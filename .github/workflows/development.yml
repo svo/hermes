@@ -1,0 +1,70 @@
+name: Build Development
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/development.yml
+      - infrastructure/packer/development.pkr.hcl
+      - infrastructure/ansible/playbook-development.yml
+      - infrastructure/ansible/roles/**
+      - bin/create-image
+  schedule:
+    - cron: 0 9 * * *
+
+jobs:
+  matrix:
+    strategy:
+      matrix:
+        configuration:
+          [
+            { runner: ubuntu-latest, platform: amd64 },
+            { runner: ubuntu-24.04-arm, platform: arm64 },
+          ]
+
+    runs-on: ${{ matrix.configuration.runner }}
+
+    steps:
+      - id: checkout
+        name: Checkout
+        uses: actions/checkout@v4
+
+      - id: docker-login
+        name: Docker:Login
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - id: docker-build
+        name: Docker:Build
+        run: |
+          ./build.sh development ${{ matrix.configuration.platform }}
+
+      - id: docker-push
+        name: Docker:Push
+        run: |
+          ./push.sh development ${{ matrix.configuration.platform }}
+
+  latest:
+    runs-on: [ubuntu-latest]
+    needs: [matrix]
+
+    steps:
+      - id: checkout
+        name: Checkout
+        uses: actions/checkout@v4
+
+      - id: docker-login
+        name: Docker:Login
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - id: docker-create-latest
+        name: Docker:create-latest
+        run: |
+          ./create-latest.sh development

@@ -1,0 +1,5 @@
+# Development environment
+.vagrant
+
+# Runtime data
+.DS_Store

@@ -1,0 +1,4 @@
+- name: Install ShellCheck shell script linter
+  ansible.builtin.apt:
+    pkg: shellcheck
+  become: true

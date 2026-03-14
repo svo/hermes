@@ -1,0 +1,21 @@
+---
+- name: Play for creating project build environment
+  hosts: all
+
+  roles:
+    - git
+    - python
+    - node
+    - ansible
+    - docker
+    - packer
+    - shellcheck
+    - ansible-lint
+
+  post_tasks:
+    - name: Set python3 as default python
+      community.general.alternatives:
+        name: python
+        link: /usr/bin/python
+        path: /usr/bin/python3
+      become: true

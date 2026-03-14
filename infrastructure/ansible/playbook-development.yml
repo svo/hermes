@@ -1,0 +1,79 @@
+---
+- name: Play for creating project development environment
+  hosts: all
+
+  pre_tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+      become: true
+
+    - name: Install locales
+      ansible.builtin.apt:
+        pkg: locales
+      become: true
+
+    - name: Ensure a locale exists
+      community.general.locale_gen:
+        name: en_US.UTF-8
+        state: present
+      become: true
+
+    - name: Set default locale
+      ansible.builtin.lineinfile:
+        dest: '/etc/default/locale'
+        line: 'LANG=en_US.UTF-8'
+      become: true
+
+    - name: Reconfigure locales
+      ansible.builtin.command:
+        cmd: dpkg-reconfigure -f noninteractive locales
+      register: locales_output
+      changed_when: locales_output.rc != 0
+      become: true
+
+    - name: Install lsof for process identification
+      ansible.builtin.apt:
+        pkg: lsof
+      become: true
+
+    - name: Install netcat for port check
+      ansible.builtin.apt:
+        pkg: netcat-traditional
+      become: true
+
+    - name: Update ~/.profile with default
+      ansible.builtin.blockinfile:
+        create: true
+        path: ~/.profile
+        marker: '# {mark} ANSIBLE MANAGED BLOCK'
+        mode: '0755'
+        block: |
+          stty sane
+          export NODE_ENV=development
+
+  roles:
+    - git
+    - python
+    - node
+    - ansible
+    - docker
+    - packer
+    - claude-code
+    - shellcheck
+    - ansible-lint
+
+  post_tasks:
+    - name: Add docker group for user
+      ansible.builtin.user:
+        name: vagrant
+        groups: docker
+        append: true
+      become: true
+
+    - name: Set python3 as default python
+      community.general.alternatives:
+        name: python
+        link: /usr/bin/python
+        path: /usr/bin/python3
+      become: true

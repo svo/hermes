@@ -1,0 +1,41 @@
+- name: Install unzip
+  ansible.builtin.apt:
+    pkg: unzip
+  become: true
+
+- name: Determine architecture
+  ansible.builtin.set_fact:
+    architecture: "{{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64' }}"
+
+- name: Set download URL based on architecture
+  ansible.builtin.set_fact:
+    url: 'https://releases.hashicorp.com/packer/1.12.0/packer_1.12.0_linux_{{ architecture }}.zip'
+
+- name: Download binary
+  ansible.builtin.get_url:
+    url: '{{ url }}'
+    dest: '/usr/local/bin/packer_1.12.0.zip'
+    mode: '0644'
+  become: true
+
+- name: Extract binary
+  ansible.builtin.unarchive:
+    src: '/usr/local/bin/packer_1.12.0.zip'
+    dest: '/usr/local/bin/'
+    remote_src: true
+    mode: '0755'
+  become: true
+
+- name: Verify installation
+  ansible.builtin.command: '/usr/local/bin/packer --version'
+  changed_when: false
+
+- name: Install ansible plugin
+  ansible.builtin.command:
+    cmd: packer plugins install github.com/hashicorp/ansible
+    creates: '{{ ansible_env.HOME }}/.config/packer/plugins/github.com/hashicorp/ansible'
+
+- name: Install docker plugin
+  ansible.builtin.command:
+    cmd: packer plugins install github.com/hashicorp/docker
+    creates: '{{ ansible_env.HOME }}/.config/packer/plugins/github.com/hashicorp/docker'

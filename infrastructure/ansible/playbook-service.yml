@@ -1,0 +1,12 @@
+---
+- name: Play for creating project service
+  hosts: all
+
+  pre_tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+      become: true
+
+  roles:
+    - node

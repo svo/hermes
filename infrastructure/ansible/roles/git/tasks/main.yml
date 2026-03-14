@@ -1,0 +1,4 @@
+- name: Install git source control
+  ansible.builtin.apt:
+    pkg: git-core
+  become: true
