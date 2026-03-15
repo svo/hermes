@@ -12,4 +12,8 @@ if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
     --skip-health
 fi
 
+if [ -n "${GOG_GOOGLE_ACCOUNT:-}" ] && [ -n "${GOG_SERVICE_ACCOUNT_KEY:-}" ]; then
+  gog auth service-account set "$GOG_GOOGLE_ACCOUNT" --key "$GOG_SERVICE_ACCOUNT_KEY"
+fi
+
 exec openclaw gateway --port 3000 --bind lan

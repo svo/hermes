@@ -5,6 +5,20 @@
     global: true
   become: true
 
+- name: Get latest gog version
+  ansible.builtin.uri:
+    url: https://api.github.com/repos/steipete/gogcli/releases/latest
+    return_content: true
+  register: gog_release
+
+- name: Install gog (Google Suite CLI)
+  ansible.builtin.shell:
+    cmd: >
+      curl -L https://github.com/steipete/gogcli/releases/download/{{ gog_release.json.tag_name }}/gogcli_{{ gog_release.json.tag_name | regex_replace('^v', '') }}_linux_{{ ansible_facts["architecture"] | regex_replace('aarch64', 'arm64') | regex_replace('x86_64', 'amd64') }}.tar.gz
+      | tar -xz -C /usr/local/bin gog && chmod +x /usr/local/bin/gog
+    creates: /usr/local/bin/gog
+  become: true
+
 - name: Install entrypoint script
   ansible.builtin.copy:
     src: entrypoint.sh
