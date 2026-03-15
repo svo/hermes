@@ -1,0 +1,13 @@
+- name: Install OpenClaw
+  community.general.npm:
+    name: openclaw
+    state: latest
+    global: true
+  become: true
+
+- name: Install entrypoint script
+  ansible.builtin.copy:
+    src: entrypoint.sh
+    dest: /usr/local/bin/entrypoint.sh
+    mode: '0755'
+  become: true

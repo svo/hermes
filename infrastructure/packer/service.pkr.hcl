@@ -1,7 +1,7 @@
 source "docker" "arm64" {
   changes     = [
-    "EXPOSE 22",
-    "CMD [\"/usr/sbin/sshd\", \"-D\"]"
+    "EXPOSE 3000",
+    "CMD [\"/usr/local/bin/entrypoint.sh\"]"
   ]
   commit      = "true"
   image       = "debian:12-slim"
@@ -11,8 +11,8 @@ source "docker" "arm64" {
 
 source "docker" "amd64" {
   changes     = [
-    "EXPOSE 22",
-    "CMD [\"/usr/sbin/sshd\", \"-D\"]"
+    "EXPOSE 3000",
+    "CMD [\"/usr/local/bin/entrypoint.sh\"]"
   ]
   commit      = "true"
   image       = "debian:12-slim"

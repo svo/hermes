@@ -10,3 +10,5 @@
 
   roles:
     - node
+    - git
+    - openclaw
