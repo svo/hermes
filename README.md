@@ -51,7 +51,7 @@ On first run, the entrypoint automatically configures OpenClaw via non-interacti
 | `GOG_GOOGLE_ACCOUNT` | No | Google account email for gog service account auth |
 | `GOG_SERVICE_ACCOUNT_KEY` | No | Path (inside the container) to the GCP service account JSON key file |
 | `TELEGRAM_BOT_TOKEN` | No | Telegram bot token from @BotFather |
-| `TELEGRAM_DM_POLICY` | No | DM policy: `pairing` (default) or `allowlist` |
+| `TELEGRAM_ALLOW_FROM` | With `TELEGRAM_BOT_TOKEN` | Comma-separated Telegram user IDs to allow |
 
 ## Telegram Integration
 
@@ -70,12 +70,15 @@ docker run -d \
   --restart unless-stopped \
   -e ANTHROPIC_API_KEY="your-api-key" \
   -e TELEGRAM_BOT_TOKEN="your-telegram-bot-token" \
+  -e TELEGRAM_ALLOW_FROM="your-telegram-user-id" \
   -v /opt/hermes/data:/root/.openclaw \
   -p 127.0.0.1:3000:3000 \
   svanosselaer/hermes-service:latest
 ```
 
-On startup, the entrypoint automatically configures the Telegram channel in OpenClaw with DM pairing enabled and group chats set to require `@mention`. To change the DM policy, set `TELEGRAM_DM_POLICY` to `allowlist`.
+On startup, the entrypoint automatically configures the Telegram channel in OpenClaw with group chats set to require `@mention`. When `TELEGRAM_ALLOW_FROM` is set, the DM policy is `allowlist` — only the listed Telegram user IDs can message the bot. Without it, the policy falls back to `pairing` (unknown users get a pairing code for the owner to approve).
+
+To find your Telegram user ID, message the bot without `TELEGRAM_ALLOW_FROM` set — the pairing prompt will show it.
 
 ## Google Calendar/Email Integration
 

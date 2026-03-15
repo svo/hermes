@@ -25,7 +25,8 @@ if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
     config.channels.telegram = {
       enabled: true,
       botToken: process.env.TELEGRAM_BOT_TOKEN,
-      dmPolicy: process.env.TELEGRAM_DM_POLICY || 'pairing',
+      dmPolicy: 'allowlist',
+      allowFrom: process.env.TELEGRAM_ALLOW_FROM.split(',').map(id => id.trim()),
       groups: { '*': { requireMention: true } }
     };
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
