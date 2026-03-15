@@ -16,4 +16,20 @@ if [ -n "${GOG_GOOGLE_ACCOUNT:-}" ] && [ -n "${GOG_SERVICE_ACCOUNT_KEY:-}" ]; th
   gog auth service-account set "$GOG_GOOGLE_ACCOUNT" --key "$GOG_SERVICE_ACCOUNT_KEY"
 fi
 
+if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+  node -e "
+    const fs = require('fs');
+    const configPath = process.env.HOME + '/.openclaw/openclaw.json';
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    config.channels = config.channels || {};
+    config.channels.telegram = {
+      enabled: true,
+      botToken: process.env.TELEGRAM_BOT_TOKEN,
+      dmPolicy: process.env.TELEGRAM_DM_POLICY || 'pairing',
+      groups: { '*': { requireMention: true } }
+    };
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+  "
+fi
+
 exec openclaw gateway --port 3000 --bind lan

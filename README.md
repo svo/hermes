@@ -33,6 +33,7 @@ docker run -d \
   --restart unless-stopped \
   --pull always \
   -e ANTHROPIC_API_KEY="your-api-key" \
+  -e TELEGRAM_BOT_TOKEN="your-telegram-bot-token" \
   -e GOG_GOOGLE_ACCOUNT="you@yourdomain.com" \
   -e GOG_SERVICE_ACCOUNT_KEY="/root/.openclaw/service-account.json" \
   -v /opt/hermes/data:/root/.openclaw \
@@ -40,7 +41,7 @@ docker run -d \
   svanosselaer/hermes-service:latest
 ```
 
-On first run, the entrypoint automatically configures OpenClaw via non-interactive onboarding and sets up Google Suite access via gog. Configuration is persisted to the volume at `/root/.openclaw` so subsequent starts skip onboarding.
+On first run, the entrypoint automatically configures OpenClaw via non-interactive onboarding and sets up Telegram and Google Suite access. Configuration is persisted to the volume at `/root/.openclaw` so subsequent starts skip onboarding.
 
 ## Environment Variables
 
@@ -49,6 +50,32 @@ On first run, the entrypoint automatically configures OpenClaw via non-interacti
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key for the OpenClaw gateway |
 | `GOG_GOOGLE_ACCOUNT` | No | Google account email for gog service account auth |
 | `GOG_SERVICE_ACCOUNT_KEY` | No | Path (inside the container) to the GCP service account JSON key file |
+| `TELEGRAM_BOT_TOKEN` | No | Telegram bot token from @BotFather |
+| `TELEGRAM_DM_POLICY` | No | DM policy: `pairing` (default) or `allowlist` |
+
+## Telegram Integration
+
+Connect Hermes to Telegram so you can chat with your assistant directly from the Telegram app.
+
+### Setup
+
+1. Open Telegram and start a chat with [@BotFather](https://t.me/BotFather)
+2. Send `/newbot` and follow the prompts to name your bot
+3. Save the bot token that BotFather returns
+4. Pass it as an environment variable when running the container:
+
+```bash
+docker run -d \
+  --name hermes \
+  --restart unless-stopped \
+  -e ANTHROPIC_API_KEY="your-api-key" \
+  -e TELEGRAM_BOT_TOKEN="your-telegram-bot-token" \
+  -v /opt/hermes/data:/root/.openclaw \
+  -p 127.0.0.1:3000:3000 \
+  svanosselaer/hermes-service:latest
+```
+
+On startup, the entrypoint automatically configures the Telegram channel in OpenClaw with DM pairing enabled and group chats set to require `@mention`. To change the DM policy, set `TELEGRAM_DM_POLICY` to `allowlist`.
 
 ## Google Calendar/Email Integration
 
