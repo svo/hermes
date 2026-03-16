@@ -108,9 +108,8 @@ The image includes [gog](https://github.com/steipete/gog), a CLI for Google Suit
 3. Enter the service account's **Client ID** (found in GCP under the service account details)
 4. Add the required OAuth scopes (comma-separated):
    ```
-   https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/contacts
+   https://mail.google.com/,https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/contacts,https://www.googleapis.com/auth/contacts.other.readonly,https://www.googleapis.com/auth/directory.readonly
    ```
-
 #### Run the container
 
 ```bash
