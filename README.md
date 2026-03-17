@@ -184,6 +184,13 @@ On first contact, Hermes will introduce itself and ask you to define its identit
 >
 > Your emoji: 🪽 works. Keep it.
 >
+> For monitoring, I want you to use both heartbeat and cron:
+>
+> 1. **Heartbeat** — you already have a 30-min heartbeat cycle. Add inbox and calendar checks to HEARTBEAT.md so you batch them together and only ping me when something actually needs attention.
+> 2. **Cron** — a morning briefing at ~08:00 AEDT with my day's calendar and overnight inbox summary.
+>
+> Quiet hours are 20:00 to 08:00 AEDT — don't ping me during that window unless something is genuinely urgent.
+>
 > Now go read your workspace files, set yourself up, and let's get to work.
 
 Hermes will then update its own identity and workspace files based on your brief and start operating accordingly.
