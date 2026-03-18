@@ -219,8 +219,8 @@ On first contact, Hermes will introduce itself and ask you to define its identit
 >
 > For monitoring, I want you to use both heartbeat and cron:
 >
-> 1. **Heartbeat** — you already have a 30-min heartbeat cycle. Add inbox, calendar, and Slack checks to HEARTBEAT.md so you batch them together and only ping me when something actually needs attention.
-> 2. **Cron** — a morning briefing at ~08:00 AEDT with my day's calendar, overnight inbox summary, and any Slack highlights.
+> 1. **Heartbeat** — you already have a 30-min heartbeat cycle. Add inbox and calendar checks to HEARTBEAT.md so you batch them together and only ping me when something actually needs attention.
+> 2. **Cron** — a morning briefing at ~08:00 AEDT with my day's calendar and overnight inbox summary.
 >
 > Quiet hours are 20:00 to 08:00 AEDT — don't ping me during that window unless something is genuinely urgent.
 >
