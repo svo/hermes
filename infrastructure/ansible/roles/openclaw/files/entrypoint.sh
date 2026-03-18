@@ -33,4 +33,20 @@ if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
   "
 fi
 
+if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
+  node -e "
+    const fs = require('fs');
+    const configPath = process.env.HOME + '/.openclaw/openclaw.json';
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    config.channels = config.channels || {};
+    config.channels.slack = {
+      enabled: true,
+      mode: 'socket',
+      botToken: process.env.SLACK_BOT_TOKEN,
+      appToken: process.env.SLACK_APP_TOKEN
+    };
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+  "
+fi
+
 exec openclaw gateway --port 3000 --bind lan

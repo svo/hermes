@@ -1,0 +1,60 @@
+{
+  "display_information": {
+    "name": "Hermes",
+    "description": "Slack connector for Hermes"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Hermes",
+      "always_online": false
+    },
+    "app_home": {
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "chat:write",
+        "channels:history",
+        "channels:read",
+        "groups:history",
+        "im:history",
+        "im:read",
+        "im:write",
+        "mpim:history",
+        "mpim:read",
+        "mpim:write",
+        "users:read",
+        "app_mentions:read",
+        "reactions:read",
+        "reactions:write",
+        "pins:read",
+        "pins:write",
+        "emoji:read",
+        "files:read",
+        "files:write"
+      ]
+    }
+  },
+  "settings": {
+    "socket_mode_enabled": true,
+    "event_subscriptions": {
+      "bot_events": [
+        "app_mention",
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "message.mpim",
+        "reaction_added",
+        "reaction_removed",
+        "member_joined_channel",
+        "member_left_channel",
+        "channel_rename",
+        "pin_added",
+        "pin_removed"
+      ]
+    }
+  }
+}

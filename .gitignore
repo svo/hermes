@@ -1,4 +1,6 @@
 # Development environment
 .openclaw
 .vagrant
+.claude/settings.local.json
+.claude/prompts/
 .DS_Store

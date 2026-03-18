@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <!-- Background -->
+  <circle cx="256" cy="256" r="256" fill="#0f172a"/>
+
+  <!-- Helmet (petasos) -->
+  <ellipse cx="256" cy="290" rx="120" ry="40" fill="#94a3b8"/>
+  <path d="M136 290 C136 225 196 160 256 160 C316 160 376 225 376 290" fill="#64748b"/>
+  <ellipse cx="256" cy="290" rx="120" ry="16" fill="#475569" opacity="0.5"/>
+
+  <!-- Left wing -->
+  <path d="M136 275 C105 252 55 240 10 250 C55 235 105 230 136 265Z" fill="#e2e8f0"/>
+  <path d="M136 262 C100 230 45 210 5 214 C45 204 100 210 136 250Z" fill="#cbd5e1"/>
+  <path d="M140 250 C110 210 60 182 15 178 C55 172 110 190 143 240Z" fill="#94a3b8"/>
+
+  <!-- Right wing -->
+  <path d="M376 275 C407 252 457 240 502 250 C457 235 407 230 376 265Z" fill="#e2e8f0"/>
+  <path d="M376 262 C412 230 467 210 507 214 C467 204 412 210 376 250Z" fill="#cbd5e1"/>
+  <path d="M372 250 C402 210 452 182 497 178 C457 172 402 190 369 240Z" fill="#94a3b8"/>
+</svg>
