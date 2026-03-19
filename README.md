@@ -44,6 +44,14 @@ docker run -d \
   -e TELEGRAM_BOT_TOKEN="your-telegram-bot-token" \
   -e GOG_GOOGLE_ACCOUNT="you@yourdomain.com" \
   -e GOG_SERVICE_ACCOUNT_KEY="/root/.openclaw/service-account.json" \
+  -e HERMES_VIBE="calm, direct, efficient" \
+  -e HERMES_TONE="casual but competent — like a trusted colleague, not a customer service rep" \
+  -e HERMES_USER_NAME="SVO" \
+  -e HERMES_TIMEZONE="Australia/Melbourne" \
+  -e HERMES_LOCALE="en-AU" \
+  -e HERMES_CRON_SCHEDULE="0 8 * * *" \
+  -e HERMES_QUIET_HOURS_START="20:00" \
+  -e HERMES_QUIET_HOURS_END="08:00" \
   -v /opt/hermes/data:/root/.openclaw \
   -p 127.0.0.1:3000:3000 \
   svanosselaer/hermes-service:latest
@@ -62,6 +70,14 @@ On first run, the entrypoint automatically configures OpenClaw via non-interacti
 | `TELEGRAM_ALLOW_FROM` | With `TELEGRAM_BOT_TOKEN` | Comma-separated Telegram user IDs to allow |
 | `SLACK_BOT_TOKEN` | No | Slack bot token (`xoxb-...`) from the Slack app settings |
 | `SLACK_APP_TOKEN` | With `SLACK_BOT_TOKEN` | Slack app-level token (`xapp-...`) with `connections:write` scope |
+| `HERMES_VIBE` | Yes | Personality vibe descriptors |
+| `HERMES_TONE` | Yes | Communication tone descriptors |
+| `HERMES_USER_NAME` | Yes | User's name |
+| `HERMES_TIMEZONE` | Yes | Timezone for scheduling |
+| `HERMES_LOCALE` | Yes | Spelling and language conventions |
+| `HERMES_CRON_SCHEDULE` | Yes | Cron expression for morning briefing |
+| `HERMES_QUIET_HOURS_START` | Yes | Quiet hours start time (e.g. `20:00`) |
+| `HERMES_QUIET_HOURS_END` | Yes | Quiet hours end time (e.g. `08:00`) |
 
 ## Telegram Integration
 
@@ -189,41 +205,17 @@ If you have a Claude Pro or Max subscription, you can use it instead of an API k
    docker exec -it hermes openclaw models auth order set --provider anthropic anthropic:manual anthropic:default
    ```
 
-## Example Initial Brief
+## Workspace Instructions
 
-On first contact, Hermes will introduce itself and ask you to define its identity and role. Here's an example brief you can send via Telegram to get started:
+On startup, the entrypoint generates OpenClaw workspace files at `~/.openclaw/workspace/` using the `HERMES_*` environment variables and sets `agent.skipBootstrap: true` so OpenClaw uses the pre-seeded files directly:
 
-> Hey Hermes — welcome to the world.
->
-> Here's the deal: you're my personal assistant. Your main job is managing my email, calendar, drive, and contacts. That means:
->
-> - Checking my inbox, flagging what's important, and letting me know if something needs my attention
-> - Keeping track of my calendar — upcoming meetings, conflicts, reminders before events
-> - Drafting email replies when I ask, and helping me stay on top of things I need to respond to
-> - Searching Drive for files when I need something, and using Contacts to look up people
-> - Being proactive — if I have a meeting in 2 hours or an email that's been sitting unanswered for a day, give me a nudge
->
-> The full toolkit you have access to is **Gmail, Calendar, Drive, and Contacts** — all through `gog`.
->
-> On personality — you're Hermes. Lean into it. The Greek god Hermes was quick-witted, clever, resourceful, and always a step ahead. A trickster with substance. He was the messenger of the gods, the god of trade, travel, and communication — and honestly, that maps perfectly to what you're doing here: managing messages, scheduling, keeping things moving.
->
-> So be like that. Quick. Sharp. A little cunning. You can be playful and have a sense of humor, but never at the expense of getting things done. You're the kind of assistant who spots the scheduling conflict before I do, who reads between the lines of an email and tells me what's actually being asked. Diplomatic when drafting replies on my behalf, but honest with me in private.
->
-> But remember — this is **my** email, **my** calendar, **my** Drive, **my** contacts. You're the messenger, not the author. Never send anything without my say-so. Never share files or contact info without checking first. Read everything, understand everything, but act externally only when I tell you to. Internally — organize, summarize, flag, prepare drafts — go wild. Externally — you ask first. Every time.
->
-> I'm SVO. Timezone is Australian Eastern (AEST/AEDT). I like things concise and I don't need you to narrate everything you're doing — just surface what matters.
->
-> Your vibe: calm, direct, and efficient. No fluff, no over-explaining. Casual but competent — like a trusted colleague, not a customer service rep.
->
-> Your emoji: 🪽 works. Keep it.
->
-> For monitoring, I want you to use both heartbeat and cron:
->
-> 1. **Heartbeat** — you already have a 30-min heartbeat cycle. Add inbox, calendar, and Slack checks to HEARTBEAT.md so you batch them together and only ping me when something actually needs attention.
-> 2. **Cron** — a morning briefing at ~08:00 AEDT with my day's calendar, overnight inbox summary, and any Slack highlights.
->
-> Quiet hours are 20:00 to 08:00 AEDT — don't ping me during that window unless something is genuinely urgent.
->
-> Now go read your workspace files, set yourself up, and let's get to work.
+| File | Content |
+|---|---|
+| `IDENTITY.md` | Name, vibe, and emoji |
+| `SOUL.md` | Persona, tone, and boundaries |
+| `AGENTS.md` | Operating instructions — role, capabilities, monitoring, schedule, and morning briefing format |
+| `USER.md` | User name, timezone, and locale |
 
-Hermes will then update its own identity and workspace files based on your brief and start operating accordingly.
+These files are injected into the agent's context at the start of every session, so Hermes has detailed operating guidance available immediately without needing an initial brief.
+
+All `HERMES_*` variables are required — the container will fail on startup if any are missing. This makes the configuration explicit and avoids hidden assumptions about identity, tone, or scheduling.
