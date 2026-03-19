@@ -20,15 +20,18 @@ node -e "
   const fs = require('fs');
   const configPath = process.env.HOME + '/.openclaw/openclaw.json';
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-  if (!config.heartbeat) {
-    config.heartbeat = {
-      enabled: true,
-      intervalMinutes: 30
+  config.agents = config.agents || {};
+  config.agents.defaults = config.agents.defaults || {};
+  config.agents.defaults.skipBootstrap = true;
+  if (!config.agents.defaults.heartbeat) {
+    config.agents.defaults.heartbeat = {
+      every: '30m',
+      target: 'last'
     };
   }
   config.cron = { enabled: true };
-  config.agent = config.agent || {};
-  config.agent.skipBootstrap = true;
+  delete config.agent;
+  delete config.heartbeat;
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
 "
 
