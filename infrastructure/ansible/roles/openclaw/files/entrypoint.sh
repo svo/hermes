@@ -173,6 +173,11 @@ if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
       botToken: process.env.SLACK_BOT_TOKEN,
       appToken: process.env.SLACK_APP_TOKEN
     };
+    config.tools = config.tools || {};
+    config.tools.allow = config.tools.allow || [];
+    if (!config.tools.allow.includes('slack')) {
+      config.tools.allow.push('slack');
+    }
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
   "
 fi
