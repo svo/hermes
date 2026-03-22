@@ -30,6 +30,13 @@ node -e "
     };
   }
   config.cron = { enabled: true };
+  config.tools = config.tools || {};
+  config.tools.allow = config.tools.allow || [];
+  ['cron', 'web_fetch', 'web_search', 'image'].forEach(t => {
+    if (!config.tools.allow.includes(t)) config.tools.allow.push(t);
+  });
+  config.tools.deny = config.tools.deny || [];
+  if (!config.tools.deny.includes('gateway')) config.tools.deny.push('gateway');
   delete config.agent;
   delete config.heartbeat;
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
@@ -157,6 +164,11 @@ if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
       allowFrom: process.env.TELEGRAM_ALLOW_FROM.split(',').map(id => id.trim()),
       groups: { '*': { requireMention: true } }
     };
+    config.tools = config.tools || {};
+    config.tools.allow = config.tools.allow || [];
+    if (!config.tools.allow.includes('telegram')) {
+      config.tools.allow.push('telegram');
+    }
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
   "
 fi
