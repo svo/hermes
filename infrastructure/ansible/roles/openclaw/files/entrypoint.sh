@@ -32,7 +32,7 @@ node -e "
   config.cron = { enabled: true };
   config.tools = config.tools || {};
   config.tools.allow = config.tools.allow || [];
-  ['cron', 'web_fetch', 'web_search', 'image'].forEach(t => {
+  ['cron', 'gog', 'web_fetch', 'web_search', 'image'].forEach(t => {
     if (!config.tools.allow.includes(t)) config.tools.allow.push(t);
   });
   config.tools.deny = config.tools.deny || [];
