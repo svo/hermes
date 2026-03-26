@@ -5,7 +5,7 @@
 
 - name: Determine architecture
   ansible.builtin.set_fact:
-    architecture: "{{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64' }}"
+    architecture: "{{ 'amd64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
 
 - name: Set download URL based on architecture
   ansible.builtin.set_fact:
@@ -33,9 +33,9 @@
 - name: Install ansible plugin
   ansible.builtin.command:
     cmd: packer plugins install github.com/hashicorp/ansible
-    creates: '{{ ansible_env.HOME }}/.config/packer/plugins/github.com/hashicorp/ansible'
+    creates: "{{ ansible_facts['env']['HOME'] }}/.config/packer/plugins/github.com/hashicorp/ansible"
 
 - name: Install docker plugin
   ansible.builtin.command:
     cmd: packer plugins install github.com/hashicorp/docker
-    creates: '{{ ansible_env.HOME }}/.config/packer/plugins/github.com/hashicorp/docker'
+    creates: "{{ ansible_facts['env']['HOME'] }}/.config/packer/plugins/github.com/hashicorp/docker"
