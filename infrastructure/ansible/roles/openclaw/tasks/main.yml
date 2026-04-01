@@ -19,25 +19,6 @@
     creates: /usr/local/bin/gog
   become: true
 
-- name: Create Claude Code settings directory
-  ansible.builtin.file:
-    path: "{{ ansible_facts['env']['HOME'] }}/.claude"
-    state: directory
-    mode: '0755'
-
-- name: Configure Claude Code permissions for gog
-  ansible.builtin.copy:
-    dest: "{{ ansible_facts['env']['HOME'] }}/.claude/settings.json"
-    content: |
-      {
-        "permissions": {
-          "allow": [
-            "Bash(gog:*)"
-          ]
-        }
-      }
-    mode: '0644'
-
 - name: Install entrypoint script
   ansible.builtin.copy:
     src: entrypoint.sh

@@ -16,6 +16,26 @@ if [ -n "${GOG_GOOGLE_ACCOUNT:-}" ] && [ -n "${GOG_SERVICE_ACCOUNT_KEY:-}" ]; th
   gog auth service-account set "$GOG_GOOGLE_ACCOUNT" --key "$GOG_SERVICE_ACCOUNT_KEY"
 fi
 
+cat > "$HOME/.openclaw/exec-approvals.json" <<'EXECAPPROVALS'
+{
+  "version": 1,
+  "defaults": {
+    "security": "deny",
+    "ask": "on-miss",
+    "askFallback": "deny"
+  },
+  "agents": {
+    "main": {
+      "security": "allowlist",
+      "ask": "on-miss",
+      "allowlist": [
+        { "pattern": "/usr/local/bin/gog" }
+      ]
+    }
+  }
+}
+EXECAPPROVALS
+
 node -e "
   const fs = require('fs');
   const configPath = process.env.HOME + '/.openclaw/openclaw.json';
