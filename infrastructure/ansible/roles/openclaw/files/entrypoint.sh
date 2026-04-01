@@ -22,12 +22,15 @@ cat > "$HOME/.openclaw/exec-approvals.json" <<'EXECAPPROVALS'
   "defaults": {
     "security": "deny",
     "ask": "on-miss",
-    "askFallback": "deny"
+    "askFallback": "deny",
+    "autoAllowSkills": false
   },
   "agents": {
     "main": {
       "security": "allowlist",
       "ask": "on-miss",
+      "askFallback": "deny",
+      "autoAllowSkills": true,
       "allowlist": [
         { "pattern": "/usr/local/bin/gog" }
       ]
