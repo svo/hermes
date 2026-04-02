@@ -57,6 +57,8 @@ node -e "
   config.tools.profile = 'full';
   delete config.tools.allow;
   config.tools.deny = ['gateway'];
+  config.tools.exec = config.tools.exec || {};
+  config.tools.exec.security = 'allowlist';
   delete config.agent;
   delete config.heartbeat;
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
