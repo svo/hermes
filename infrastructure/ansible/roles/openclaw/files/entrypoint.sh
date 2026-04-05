@@ -59,6 +59,8 @@ node -e "
   config.tools.deny = ['gateway'];
   config.tools.exec = config.tools.exec || {};
   config.tools.exec.security = 'allowlist';
+  config.env = config.env || {};
+  config.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
   delete config.agent;
   delete config.heartbeat;
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');

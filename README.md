@@ -187,24 +187,6 @@ gog auth add you@gmail.com
 
 Tokens are persisted in the volume so this only needs to be done once.
 
-## Switching from API Key to Claude Subscription
-
-If you have a Claude Pro or Max subscription, you can use it instead of an API key.
-
-1. On a machine with Claude Code installed, generate a setup token:
-   ```bash
-   claude setup-token
-   ```
-2. Copy the token and paste it into the running container:
-   ```bash
-   docker exec -it hermes openclaw models auth paste-token --provider anthropic
-   ```
-
-3. Set the subscription as the default auth method:
-   ```bash
-   docker exec -it hermes openclaw models auth order set --provider anthropic anthropic:manual anthropic:default
-   ```
-
 ## Workspace Instructions
 
 On startup, the entrypoint generates OpenClaw workspace files at `~/.openclaw/workspace/` using the `HERMES_*` environment variables and sets `agent.skipBootstrap: true` so OpenClaw uses the pre-seeded files directly:
