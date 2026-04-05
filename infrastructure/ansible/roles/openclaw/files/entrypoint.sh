@@ -20,21 +20,7 @@ cat > "$HOME/.openclaw/exec-approvals.json" <<'EXECAPPROVALS'
 {
   "version": 1,
   "defaults": {
-    "security": "deny",
-    "ask": "on-miss",
-    "askFallback": "deny",
-    "autoAllowSkills": false
-  },
-  "agents": {
-    "main": {
-      "security": "allowlist",
-      "ask": "on-miss",
-      "askFallback": "deny",
-      "autoAllowSkills": true,
-      "allowlist": [
-        { "pattern": "/usr/local/bin/gog" }
-      ]
-    }
+    "security": "full"
   }
 }
 EXECAPPROVALS
@@ -58,7 +44,7 @@ node -e "
   delete config.tools.allow;
   config.tools.deny = ['gateway'];
   config.tools.exec = config.tools.exec || {};
-  config.tools.exec.security = 'allowlist';
+  config.tools.exec.security = 'full';
   config.env = config.env || {};
   config.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
   delete config.agent;
