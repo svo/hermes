@@ -5,6 +5,11 @@
     global: true
   become: true
 
+- name: Run OpenClaw postinstall to install runtime dependencies
+  ansible.builtin.shell:
+    cmd: cd $(npm root -g)/openclaw && npm run postinstall
+  become: true
+
 - name: Get latest gog version
   ansible.builtin.uri:
     url: https://api.github.com/repos/steipete/gogcli/releases/latest
