@@ -1,22 +1,8 @@
-- name: Install pnpm
-  community.general.npm:
-    name: pnpm
-    global: true
-  become: true
-
-- name: Create pnpm global bin directory
-  ansible.builtin.file:
-    path: /usr/local/share/pnpm
-    state: directory
-    mode: '0755'
-  become: true
-
 - name: Install OpenClaw
-  ansible.builtin.shell:
-    cmd: pnpm add -g openclaw@latest
-  environment:
-    PNPM_HOME: /usr/local/share/pnpm
-    PATH: "/usr/local/share/pnpm:{{ ansible_facts.env.PATH }}"
+  community.general.npm:
+    name: openclaw
+    state: latest
+    global: true
   become: true
 
 - name: Get latest gog version
