@@ -1,7 +1,7 @@
 - name: Install OpenClaw
   community.general.npm:
     name: openclaw
-    state: latest
+    version: 2026.3.13
     global: true
   become: true
 
