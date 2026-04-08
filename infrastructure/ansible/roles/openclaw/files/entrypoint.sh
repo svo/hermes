@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PNPM_HOME=/usr/local/share/pnpm
+export PATH="$PNPM_HOME:$PATH"
+
 if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
   openclaw onboard --non-interactive --accept-risk \
     --mode local \
