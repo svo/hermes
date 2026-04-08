@@ -1,14 +1,8 @@
-- name: Install pnpm
-  community.general.npm:
-    name: pnpm
-    global: true
-  become: true
-
 - name: Install OpenClaw
-  community.general.pnpm:
+  community.general.npm:
     name: openclaw
-    global: true
     state: latest
+    global: true
   become: true
 
 - name: Get latest gog version
