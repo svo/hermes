@@ -1,6 +1,13 @@
 - name: Install OpenClaw
+  community.general.npm:
+    name: openclaw
+    state: latest
+    global: true
+  become: true
+
+- name: Run OpenClaw postinstall to install runtime dependencies
   ansible.builtin.shell:
-    cmd: npm install -g openclaw@latest
+    cmd: cd $(npm root -g)/openclaw && npm run postinstall
   become: true
 
 - name: Get latest gog version
