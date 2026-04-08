@@ -32,12 +32,22 @@ node -e "
   config.agents = config.agents || {};
   config.agents.defaults = config.agents.defaults || {};
   config.agents.defaults.skipBootstrap = true;
-  if (!config.agents.defaults.heartbeat) {
-    config.agents.defaults.heartbeat = {
-      every: '30m',
-      target: 'last'
-    };
-  }
+  config.agents.defaults.model = 'sonnet';
+  config.agents.defaults.heartbeat = {
+    every: '59m',
+    target: 'last',
+    model: 'haiku',
+    lightContext: true
+  };
+  config.agents.defaults.compaction = { model: 'haiku' };
+  config.agents.defaults.models = {
+    'anthropic/claude-sonnet-4-6': {
+      params: { cacheRetention: 'long' }
+    },
+    'anthropic/claude-haiku-4-5': {
+      params: { cacheRetention: 'long' }
+    }
+  };
   config.cron = { enabled: true };
   config.tools = config.tools || {};
   config.tools.profile = 'full';
