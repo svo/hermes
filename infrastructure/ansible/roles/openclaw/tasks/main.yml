@@ -5,11 +5,6 @@
     global: true
   become: true
 
-- name: Fix OpenClaw runtime dependencies
-  ansible.builtin.command:
-    cmd: openclaw doctor --fix --yes
-  become: true
-
 - name: Get latest gog version
   ansible.builtin.uri:
     url: https://api.github.com/repos/steipete/gogcli/releases/latest
