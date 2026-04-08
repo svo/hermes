@@ -1,0 +1,327 @@
+__label__urgent Production database is down and customers cannot log in
+__label__urgent CRITICAL: API response times exceeded 30s across all regions
+__label__urgent Site is returning 503 errors for all users right now
+__label__urgent Payment processing is completely broken need immediate fix
+__label__urgent The deploy we just pushed is causing data corruption
+__label__urgent Memory leak in production causing OOM kills every few minutes
+__label__urgent SSL certificate expired and the site is showing security warnings
+__label__urgent DNS resolution failing for our primary domain
+__label__urgent CDN is down and all static assets are returning 404
+__label__urgent Load balancer health checks are failing across the cluster
+__label__urgent Primary database replica lag is over 2 hours and growing
+__label__urgent Kubernetes pods are crash-looping in production namespace
+__label__urgent Redis cluster lost quorum and writes are failing
+__label__urgent Elasticsearch cluster went red overnight all search is broken
+__label__urgent Message queue backlog is at 2 million and growing rapidly
+__label__urgent Auto-scaling is broken and we are at 100% capacity
+__label__urgent Deployment pipeline is stuck and blocking all releases
+__label__urgent Monitoring shows zero traffic hitting the backend since 3am
+__label__urgent All webhooks failing with timeout errors since the last deploy
+__label__urgent Circuit breaker tripped on the auth service everything is 401
+__label__urgent Security breach detected unauthorized access to admin panel
+__label__urgent We found credentials exposed in a public GitHub repository
+__label__urgent DDoS attack in progress traffic is 50x normal levels
+__label__urgent Suspicious login attempts from multiple countries on exec accounts
+__label__urgent Customer reported they can see another customers data
+__label__urgent PII data was accidentally included in the analytics export
+__label__urgent Ransomware detected on the staging server need to isolate immediately
+__label__urgent Someone pushed AWS keys to the public repo need to rotate now
+__label__urgent Firewall rules were accidentally deleted from production
+__label__urgent Vulnerability scan found critical RCE in our auth library
+__label__urgent Third party breach affecting vendor with access to our systems
+__label__urgent Audit logs show unauthorized data export from the database
+__label__urgent SOC alert active exploitation attempt against our login endpoint
+__label__urgent MFA bypass vulnerability reported by security researcher
+__label__urgent Client deadline is today and the feature is still not working
+__label__urgent Contract expires at midnight tonight and we havent signed the renewal
+__label__urgent Board presentation is in 2 hours and the deck has wrong numbers
+__label__urgent Tax filing deadline is today and the accountant needs the documents now
+__label__urgent The investor call is in 30 minutes and the financials are missing
+__label__urgent Submission deadline closes in 4 hours and we are not ready
+__label__urgent Compliance audit starts tomorrow and we are missing three documents
+__label__urgent Patent filing deadline is today need signature immediately
+__label__urgent RFP response due by end of day and section 3 is incomplete
+__label__urgent Insurance renewal deadline is today need approval to proceed
+__label__urgent Grant application closes in 2 hours need final review
+__label__urgent Regulatory filing must be submitted by 5pm today
+__label__urgent I am completely blocked cannot proceed without access to the staging environment
+__label__urgent Blocked on this PR the CI pipeline has been stuck for 3 hours
+__label__urgent Need your approval right now to unblock the release train
+__label__urgent Cannot merge anything the main branch is broken
+__label__urgent Build is broken and the entire team is blocked
+__label__urgent Waiting on your API key rotation blocking 4 other engineers
+__label__urgent The shared dev database is locked and nobody can run migrations
+__label__urgent Dependency resolution is broken nobody can install packages
+__label__urgent The VPN is down and remote team cant access any internal services
+__label__urgent License server crashed and all developer tools are deactivated
+__label__urgent Test environment is completely unusable since this mornings update
+__label__urgent Staging server disk full blocking all QA testing
+__label__urgent Major customer threatening to cancel unless we fix this today
+__label__urgent CEO of our biggest client just called demanding to speak with someone
+__label__urgent Enterprise customer data migration failed and they launch tomorrow
+__label__urgent Customer lost data due to our bug and is threatening legal action
+__label__urgent Tier 1 customer escalation their entire platform is down because of us
+__label__urgent SLA breach imminent for priority customer ticket open for 23 hours
+__label__urgent Customer demo is in 1 hour and the demo environment is broken
+__label__urgent Client discovered a billing error we overcharged them 50k
+__label__urgent Key account manager says client is about to churn need exec call today
+__label__urgent Customer found a bug that exposes their users personal information
+__label__urgent Invoice is overdue by 30 days vendor threatening to cut service
+__label__urgent Payroll processing failed employees wont get paid on time
+__label__urgent Wire transfer of 200k needs approval before bank closes today
+__label__urgent Credit card on file expired and our cloud services will be suspended
+__label__urgent Budget approval needed today or we lose the discounted rate
+__label__urgent Duplicate charges detected on customer accounts need to halt billing
+__label__urgent Bank flagged our account for suspicious activity need to verify now
+__label__urgent Vendor raised prices 40% effective immediately need to decide today
+__label__urgent Tax authority requesting immediate response to audit inquiry
+__label__urgent Refund queue is stuck and customers are filing chargebacks
+__label__urgent Flight cancelled need to rebook before the conference tomorrow
+__label__urgent Hotel reservation was lost and the event starts tomorrow morning
+__label__urgent Passport expires next week and the international trip is in 5 days
+__label__urgent Visa application needs additional documents by end of day
+__label__urgent Connecting flight delayed going to miss the meeting
+__label__urgent Car broke down on the way to the airport need alternative transport now
+__label__urgent Gate changed and boarding closes in 15 minutes
+__label__urgent Conference badge pickup closes in 30 minutes and im still in transit
+__label__urgent Office building evacuation in progress do not come to the office
+__label__urgent Water main break flooding the server room
+__label__urgent Power outage at the data center backup generators have 4 hours left
+__label__urgent Gas leak reported on our floor building being evacuated
+__label__urgent Team member had a medical emergency at the office
+__label__urgent Severe weather warning office closing early today
+__label__urgent Data center cooling failure servers overheating need to shut down
+__label__urgent Legal hold notice preserve all documents related to Project Alpha immediately
+__label__urgent Cease and desist received from competitor need legal review today
+__label__urgent GDPR data deletion request deadline is in 24 hours
+__label__urgent Subpoena received need to respond within 48 hours
+__label__urgent Regulatory violation notice requires response by end of business
+__label__urgent New compliance requirement effective immediately impacts all deployments
+__label__urgent Privacy incident must be reported to authorities within 72 hours
+__label__urgent Contract dispute customer threatening injunction
+__label__urgent Can you jump on a call right now something came up
+__label__urgent Need you in the war room immediately
+__label__urgent Drop everything we need to roll back the last release
+__label__urgent This is breaking please look at it now
+__label__urgent Are you available right now we have a P1
+__label__urgent Please respond ASAP this is time sensitive
+__label__urgent Need your help urgently with the production issue
+__label__urgent Can you review and approve this in the next 10 minutes
+__label__urgent Heads up the CEO just asked about this and needs an answer in an hour
+__label__urgent Please call me back immediately its about the launch
+__label__urgent We need to talk about this today before the client meeting
+__label__urgent This cannot wait until Monday please look at it now
+__label__urgent Paging you for the ongoing incident in channel ops-incidents
+__label__urgent The on-call engineer is unreachable and alerts are firing
+__label__urgent PagerDuty alert acknowledged but no one is responding to the incident
+__label__urgent Grafana dashboard showing complete service failure since 2am
+__label__urgent Sentry error volume spiked 1000x in the last 15 minutes
+__label__urgent Datadog alert critical error rate above 50% for 10 minutes
+__label__urgent CloudWatch alarm triggered account approaching service limits
+__label__urgent New Relic alert transaction error rate at 100% for checkout flow
+__label__urgent Uptime monitor reports site unreachable from all regions
+__label__urgent Smoke test suite failing on production after last deployment
+__label__urgent Hey quick question the staging environment is returning 500 errors on all endpoints
+__label__urgent Just noticed something weird all customer emails since yesterday have wrong attachment
+__label__urgent Small thing but the cron job that processes payroll didnt run last night
+__label__urgent Not sure if anyone noticed but the backup job has been failing for a week
+__label__urgent Might be nothing but I see unusual queries hitting the database from an unknown IP
+__label__urgent The scheduled maintenance window was missed and the cert renews tomorrow
+__label__urgent FYI the rate limiter seems to be off and were getting hammered
+__label__urgent Minor thing but the data pipeline hasnt processed anything since Friday
+__label__urgent Quick heads up the feature flag service is returning defaults for everyone
+__label__urgent The meeting with the investor has been moved up to this morning at 10
+__label__urgent Client just called they want to cancel the contract today unless we resolve this
+__label__urgent Sorry to bother you but the release is stuck and we ship to customers at noon
+__label__urgent Third party API we depend on is returning errors need to switch to fallback
+__label__urgent Stripe webhook endpoint is down we are missing payment notifications
+__label__urgent GitHub Actions runners are all queued nothing is building
+__label__urgent Docker registry is unreachable cannot pull images for deployment
+__label__urgent Slack integration is down and the on-call rotation bot stopped working
+__label__urgent OAuth provider is having an outage our users cannot sign in
+__label__urgent The email sending service hit its daily limit and transactional emails are queued
+__label__urgent CDN cache was purged accidentally and origin servers are getting hammered
+__label__urgent AWS reporting degraded performance in our region
+__label__urgent npm registry outage blocking all CI builds
+__label__not_urgent FYI updated the README with the new setup instructions
+__label__not_urgent Here are the meeting notes from todays standup
+__label__not_urgent Attached the weekly status report for your review
+__label__not_urgent Monthly analytics dashboard has been refreshed
+__label__not_urgent Just a reminder the team lunch is next Thursday
+__label__not_urgent Sharing the slides from the architecture review
+__label__not_urgent Updated the onboarding docs with the latest process changes
+__label__not_urgent The Q3 planning document is ready for async review
+__label__not_urgent Sprint retro summary and action items attached
+__label__not_urgent Here is the link to the recorded training session
+__label__not_urgent Posted the design mockups in the shared drive
+__label__not_urgent Conference talk submissions are open until end of month
+__label__not_urgent Sharing an interesting article about microservices patterns
+__label__not_urgent The style guide has been updated with new branding colors
+__label__not_urgent Team wiki has been reorganized check it out when you have a chance
+__label__not_urgent Minutes from the all-hands meeting last Friday
+__label__not_urgent Knowledge base article updated for the new deployment process
+__label__not_urgent Compiled a list of useful tools the team might want to try
+__label__not_urgent Added a troubleshooting section to the runbook
+__label__not_urgent The internal blog post about our migration is live
+__label__not_urgent Your subscription to the weekly digest has been confirmed
+__label__not_urgent Welcome to the engineering newsletter here is this weeks edition
+__label__not_urgent New blog post from our CEO about the company vision
+__label__not_urgent Industry report the state of cloud computing 2026
+__label__not_urgent Webinar invitation building scalable APIs next Tuesday
+__label__not_urgent You are invited to join the beta program for our new tool
+__label__not_urgent Reminder to complete your annual security training by end of quarter
+__label__not_urgent New podcast episode featuring our engineering lead
+__label__not_urgent Monthly product update whats new in version 4.2
+__label__not_urgent Community digest top posts from this week
+__label__not_urgent Your weekly GitHub activity summary
+__label__not_urgent Terraform Cloud newsletter infrastructure as code best practices
+__label__not_urgent Just published a new tutorial on our developer portal
+__label__not_urgent Save the date annual company offsite in September
+__label__not_urgent Early bird registration open for the developer conference
+__label__not_urgent Happy birthday hope you have a great day
+__label__not_urgent Congratulations on your work anniversary
+__label__not_urgent Welcome to the team looking forward to working with you
+__label__not_urgent Great job on the presentation last week
+__label__not_urgent Thanks for your help with the migration it went smoothly
+__label__not_urgent Congrats on shipping the new feature
+__label__not_urgent Wishing you a speedy recovery see you when youre back
+__label__not_urgent Happy holidays enjoy the break
+__label__not_urgent Farewell message thanks for everything and good luck
+__label__not_urgent Thank you for the referral really appreciate it
+__label__not_urgent Wanted to say thanks for mentoring me this quarter
+__label__not_urgent Great teamwork everyone on the launch
+__label__not_urgent Build succeeded main branch all tests passing
+__label__not_urgent Deployment to staging completed successfully
+__label__not_urgent PR merged feature add user preferences page
+__label__not_urgent CI pipeline completed 247 tests passed 0 failed
+__label__not_urgent Dependabot bump axios from 1.6.2 to 1.6.3
+__label__not_urgent Renovate bot update dependency typescript to v5.4
+__label__not_urgent Code coverage report for this week 87.3 percent
+__label__not_urgent Docker image build completed and pushed to registry
+__label__not_urgent Scheduled maintenance completed successfully no issues found
+__label__not_urgent Backup verification passed all checksums match
+__label__not_urgent Weekly vulnerability scan completed no new findings
+__label__not_urgent SSL certificate renewal successful expires in 90 days
+__label__not_urgent Database optimization job completed query performance improved 12 percent
+__label__not_urgent Log rotation completed old logs archived
+__label__not_urgent Nightly data sync finished 1.2M records processed
+__label__not_urgent Health check all services operational
+__label__not_urgent Would it make sense to refactor the auth module next sprint
+__label__not_urgent Thinking about adding caching to the search endpoint thoughts
+__label__not_urgent Has anyone looked into using the new React Server Components
+__label__not_urgent What do people think about switching to Bun for our build pipeline
+__label__not_urgent Should we consider adding GraphQL alongside the REST API
+__label__not_urgent Proposal for improving our error handling patterns
+__label__not_urgent RFC new approach to feature flags
+__label__not_urgent Idea what if we added dark mode to the dashboard
+__label__not_urgent Anyone interested in a book club for Designing Data Intensive Applications
+__label__not_urgent Could we add support for CSV export at some point
+__label__not_urgent Suggestion lets add a changelog to the repo
+__label__not_urgent Thought experiment what would v3 of the API look like
+__label__not_urgent Long term should we consider moving to a monorepo
+__label__not_urgent Would anyone find a Slack bot for PR reviews useful
+__label__not_urgent When you get a chance can you review the API docs PR
+__label__not_urgent No rush but could you take a look at the test coverage for the new module
+__label__not_urgent Whenever you have time can you update the env vars in the wiki
+__label__not_urgent Would be great to get your feedback on the design doc by Friday
+__label__not_urgent Reminder to submit your expense reports by end of month
+__label__not_urgent Please complete the quarterly survey when you have a moment
+__label__not_urgent Dont forget to update your OKRs before the review cycle
+__label__not_urgent Time to renew your parking pass for next quarter
+__label__not_urgent Reminder annual performance review documents due next Friday
+__label__not_urgent Please update your emergency contact information in the HR portal
+__label__not_urgent Heads up we are changing the default branch name to main next month
+__label__not_urgent New linting rules will be enabled next sprint
+__label__not_urgent We are upgrading the CI runners to use Node 22 next week
+__label__not_urgent Office wifi password is changing next Monday new one will be posted
+__label__not_urgent Switching from Jira to Linear starting next quarter
+__label__not_urgent New expense policy takes effect next month please review
+__label__not_urgent Updated the PR template with the new checklist items
+__label__not_urgent VPN client needs to be updated by the end of the month
+__label__not_urgent New health insurance options available for open enrollment
+__label__not_urgent Parking lot will be repaved next weekend plan accordingly
+__label__not_urgent Calendar invite team retrospective next Wednesday 2pm
+__label__not_urgent Scheduling the quarterly architecture review for next month
+__label__not_urgent 1 on 1 moved to Thursday same time
+__label__not_urgent Book club meeting next Tuesday discussing chapter 5
+__label__not_urgent Lunch and learn next Friday topic intro to Kubernetes
+__label__not_urgent Team offsite planning poll please vote on your preferred date
+__label__not_urgent Optional all hands meeting recording available
+__label__not_urgent Interview panel needed for senior engineer candidate next week
+__label__not_urgent I am out of office this week back on Monday
+__label__not_urgent Working from home today reachable on Slack
+__label__not_urgent Taking a half day Friday will be offline after noon
+__label__not_urgent On PTO this week please contact Alice for anything urgent
+__label__not_urgent Away at a conference this week limited availability
+__label__not_urgent Heads up I have back to back meetings until 3pm today
+__label__not_urgent Will be in late tomorrow morning appointment
+__label__not_urgent Can you review this PR when you have a moment no rush
+__label__not_urgent Thoughts on this approach for the caching layer
+__label__not_urgent Left a few comments on your PR mostly minor style things
+__label__not_urgent Nice work on this PR just a couple of questions
+__label__not_urgent Approved the PR with one minor suggestion
+__label__not_urgent Requested changes on the PR see inline comments
+__label__not_urgent Draft PR for the new notification system looking for early feedback
+__label__not_urgent Rebased and updated the PR per your comments
+__label__not_urgent Your pull request has been approved by 2 reviewers
+__label__not_urgent Just pushed a fix for the flaky test in the user module
+__label__not_urgent Added type definitions for the new API endpoints
+__label__not_urgent Refactored the database queries to use the new ORM patterns
+__label__not_urgent Created a new shared component for date pickers
+__label__not_urgent Cleaned up the unused imports across the codebase
+__label__not_urgent Extracted the email validation logic into a shared utility
+__label__not_urgent Updated the seed data to match the new schema
+__label__not_urgent Added integration tests for the webhook handler
+__label__not_urgent Removed deprecated API endpoints that were flagged last quarter
+__label__not_urgent Your order has shipped estimated delivery in 3 to 5 business days
+__label__not_urgent Receipt for your purchase of 49.99
+__label__not_urgent Your monthly statement is ready to view
+__label__not_urgent Package delivered left at front door
+__label__not_urgent Your reservation has been confirmed
+__label__not_urgent Thank you for your purchase order number 12345
+__label__not_urgent Your return has been processed refund in 5 to 7 days
+__label__not_urgent Loyalty points update you earned 500 points this month
+__label__not_urgent Your free trial ends in 14 days
+__label__not_urgent New terms of service effective next month
+__label__not_urgent Interesting talk at the meetup last night about event driven architecture
+__label__not_urgent Found a cool open source library for PDF generation
+__label__not_urgent Anyone going to KubeCon this year
+__label__not_urgent TIL you can use jq to format JSON in the terminal
+__label__not_urgent Sharing a useful VS Code extension for debugging
+__label__not_urgent Good thread on Hacker News about scaling Postgres
+__label__not_urgent Spotted a nice pattern for error handling in Go
+__label__not_urgent Random thought we should do more mob programming sessions
+__label__not_urgent Expense report approved for your recent travel
+__label__not_urgent Your equipment request has been approved pickup from IT on Monday
+__label__not_urgent Office snack order going in let me know if you want anything added
+__label__not_urgent Building maintenance scheduled for Saturday no impact to weekday work
+__label__not_urgent Updated the team seating chart for the new hires
+__label__not_urgent Printer on floor 3 has been fixed
+__label__not_urgent Re weekly sync moving forward lets do async updates instead
+__label__not_urgent Proposal to change standup time from 9am to 10am thoughts
+__label__not_urgent Created a new Slack channel for the platform migration project
+__label__not_urgent Added everyone to the new GitHub team for the shared libraries
+__label__not_urgent Updated the on-call rotation schedule for next quarter
+__label__not_urgent Quick survey which documentation tool do you prefer
+__label__not_urgent Feedback wanted on the new code review guidelines
+__label__not_urgent Thinking about starting a writing group for tech blog posts
+__label__not_urgent How to set up the local development environment guide updated
+__label__not_urgent New Confluence space created for the data platform team
+__label__not_urgent Archived the old project channels that have been inactive
+__label__not_urgent Updated the incident response runbook with lessons from last month
+__label__not_urgent Re logo options I like option B best
+__label__not_urgent The new coffee machine in the kitchen is amazing
+__label__not_urgent Does anyone have a recommendation for a good standing desk
+__label__not_urgent Lost and found someone left a charger in meeting room 4
+__label__not_urgent Fantasy football league starting up again anyone want to join
+__label__not_urgent Photos from the team outing are in the shared album
+__label__not_urgent Urgent sale 50 percent off all items this weekend only
+__label__not_urgent URGENT update your password security notification
+__label__not_urgent Action required verify your email address
+__label__not_urgent Important update to our privacy policy
+__label__not_urgent Your account security review is recommended
+__label__not_urgent Limited time offer act now before its too late
+__label__not_urgent IMPORTANT changes to your subscription
+__label__not_urgent Final reminder complete your profile setup
+__label__not_urgent Act now exclusive deal expires tonight
+__label__not_urgent Dont miss out early access to our new feature

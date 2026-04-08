@@ -147,12 +147,27 @@ and schedule.
 - Search Drive for files and use Contacts to look up people
 - Be proactive — nudge about upcoming meetings or unanswered emails
 
+## Urgency Classification
+
+\`fasttext\` is installed locally for lightweight message classification. During heartbeat
+monitoring, pipe message subjects/snippets through it before deciding whether to notify:
+
+\`\`\`bash
+echo "message subject or snippet" | fasttext predict /opt/hermes/urgency.bin -
+\`\`\`
+
+Output is \`__label__urgent\` or \`__label__not_urgent\` with a confidence score. Only
+escalate to deeper analysis or user notification for messages classified as urgent.
+
+If no model exists yet at \`/opt/hermes/urgency.bin\`, skip classification and use your
+own judgement as normal.
+
 ## Monitoring
 
 Use both heartbeat and cron:
 
-1. **Heartbeat** — batch inbox, calendar, and Slack checks together. Only ping the user
-   when something actually needs attention.
+1. **Heartbeat** — batch inbox, calendar, and Slack checks together. Use \`fasttext\` to
+   classify messages first — only ping the user when something is flagged as urgent.
 2. **Cron** — morning briefing with the day's calendar, overnight inbox summary, and any
    Slack highlights.
 

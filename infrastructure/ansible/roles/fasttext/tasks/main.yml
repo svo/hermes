@@ -1,0 +1,53 @@
+- name: Install build dependencies for fastText
+  ansible.builtin.apt:
+    pkg:
+      - g++
+      - make
+      - wget
+      - unzip
+  become: true
+
+- name: Download fastText
+  ansible.builtin.unarchive:
+    src: https://github.com/facebookresearch/fastText/archive/v0.9.2.zip
+    dest: /tmp
+    remote_src: true
+
+- name: Build fastText
+  community.general.make:
+    chdir: /tmp/fastText-0.9.2
+
+- name: Install fastText binary
+  ansible.builtin.copy:
+    src: /tmp/fastText-0.9.2/fasttext
+    dest: /usr/local/bin/fasttext
+    remote_src: true
+    mode: '0755'
+  become: true
+
+- name: Clean up fastText build
+  ansible.builtin.file:
+    path: /tmp/fastText-0.9.2
+    state: absent
+
+- name: Create model directory
+  ansible.builtin.file:
+    path: /opt/hermes
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Copy urgency training data
+  ansible.builtin.copy:
+    src: train.txt
+    dest: /tmp/urgency-train.txt
+
+- name: Train urgency classification model
+  ansible.builtin.command:
+    cmd: fasttext supervised -input /tmp/urgency-train.txt -output /opt/hermes/urgency -lr 1.0 -epoch 25 -wordNgrams 2
+  become: true
+
+- name: Clean up training data
+  ansible.builtin.file:
+    path: /tmp/urgency-train.txt
+    state: absent

@@ -62,6 +62,7 @@
     - claude-code
     - shellcheck
     - ansible-lint
+    - fasttext
 
   post_tasks:
     - name: Add docker group for user

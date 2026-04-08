@@ -11,4 +11,5 @@
   roles:
     - node
     - git
+    - fasttext
     - openclaw
