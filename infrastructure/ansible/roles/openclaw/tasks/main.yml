@@ -1,6 +1,8 @@
 - name: Install OpenClaw
-  ansible.builtin.shell:
-    cmd: npm install -g openclaw@latest
+  community.general.npm:
+    name: openclaw
+    state: latest
+    global: true
   become: true
 
 - name: Get latest gog version
