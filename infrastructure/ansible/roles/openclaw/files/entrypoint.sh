@@ -33,7 +33,6 @@ node -e "
   config.agents.defaults = config.agents.defaults || {};
   config.agents.defaults.skipBootstrap = true;
   config.agents.defaults.model = 'haiku';
-  config.agents.defaults.maxTokens = 1024;
   config.agents.defaults.heartbeat = {
     every: '59m',
     target: 'last',
