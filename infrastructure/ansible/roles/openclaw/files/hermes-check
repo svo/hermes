@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+STATE_DIR="${HOME}/.openclaw/hermes-check"
+SEEN_FILE="${STATE_DIR}/seen-messages.txt"
+VIP_FILE="${STATE_DIR}/vip-senders.txt"
+MODEL_FILE="/opt/hermes/urgency.bin"
+GOG_ACCOUNT="${GOG_GOOGLE_ACCOUNT:-}"
+
+mkdir -p "$STATE_DIR"
+touch "$SEEN_FILE" "$VIP_FILE"
+
+gog_account_flag=""
+if [ -n "$GOG_ACCOUNT" ]; then
+  gog_account_flag="--account $GOG_ACCOUNT"
+fi
+
+action_needed="no"
+reasons=""
+
+add_reason() {
+  if [ -n "$reasons" ]; then
+    reasons="${reasons}, $1"
+  else
+    reasons="$1"
+  fi
+  action_needed="yes"
+}
+
+echo "=== HERMES CHECK ==="
+echo "TIMESTAMP: $(date --iso-8601=seconds)"
+echo ""
+
+# ─── EMAIL ───────────────────────────────────────────────────────────
+
+echo "--- EMAIL ---"
+
+email_json=$(gog gmail messages search 'is:unread newer_than:2h' --max 50 --json $gog_account_flag 2>/dev/null || echo '{"messages":[]}')
+all_ids=$(echo "$email_json" | jq -r '.messages[]?.id // empty' 2>/dev/null)
+
+new_ids=""
+new_count=0
+urgent_count=0
+vip_count=0
+urgent_lines=""
+vip_lines=""
+other_lines=""
+
+while IFS= read -r msg_id; do
+  [ -z "$msg_id" ] && continue
+  if ! grep -qFx "$msg_id" "$SEEN_FILE" 2>/dev/null; then
+    new_ids="${new_ids}${msg_id}"$'\n'
+    new_count=$((new_count + 1))
+
+    subject=$(echo "$email_json" | jq -r --arg id "$msg_id" '.messages[] | select(.id == $id) | .subject // "(no subject)"' 2>/dev/null)
+    from=$(echo "$email_json" | jq -r --arg id "$msg_id" '.messages[] | select(.id == $id) | .from // "unknown"' 2>/dev/null)
+    from_addr=$(echo "$from" | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' | head -1)
+    from_domain=$(echo "$from_addr" | cut -d@ -f2)
+
+    is_urgent="no"
+    is_vip="no"
+
+    if [ -f "$MODEL_FILE" ] && command -v fasttext >/dev/null 2>&1; then
+      label=$(echo "$subject" | fasttext predict "$MODEL_FILE" - 2>/dev/null | awk '{print $1}')
+      if [ "$label" = "__label__urgent" ]; then
+        is_urgent="yes"
+        urgent_count=$((urgent_count + 1))
+      fi
+    fi
+
+    if [ -s "$VIP_FILE" ]; then
+      if grep -qiF "$from_addr" "$VIP_FILE" 2>/dev/null || grep -qiF "$from_domain" "$VIP_FILE" 2>/dev/null; then
+        is_vip="yes"
+        vip_count=$((vip_count + 1))
+      fi
+    fi
+
+    line="From: ${from} | Subject: ${subject}"
+    if [ "$is_urgent" = "yes" ]; then
+      urgent_lines="${urgent_lines}  - [URGENT] ${line}"$'\n'
+    elif [ "$is_vip" = "yes" ]; then
+      vip_lines="${vip_lines}  - [VIP] ${line}"$'\n'
+    else
+      other_lines="${other_lines}  - ${line}"$'\n'
+    fi
+  fi
+done <<< "$all_ids"
+
+# Update seen file (keep last 200)
+if [ -n "$new_ids" ]; then
+  printf '%s' "$new_ids" >> "$SEEN_FILE"
+fi
+tail -200 "$SEEN_FILE" > "${SEEN_FILE}.tmp" && mv "${SEEN_FILE}.tmp" "$SEEN_FILE"
+
+echo "NEW_UNREAD: ${new_count}"
+echo "URGENT: ${urgent_count}"
+[ -n "$urgent_lines" ] && printf '%s' "$urgent_lines"
+echo "VIP: ${vip_count}"
+[ -n "$vip_lines" ] && printf '%s' "$vip_lines"
+echo "OTHER: $((new_count - urgent_count - vip_count))"
+[ -n "$other_lines" ] && printf '%s' "$other_lines"
+
+[ "$urgent_count" -gt 0 ] && add_reason "${urgent_count} urgent email(s)"
+[ "$vip_count" -gt 0 ] && add_reason "${vip_count} VIP email(s)"
+
+echo ""
+
+# ─── CALENDAR ────────────────────────────────────────────────────────
+
+echo "--- CALENDAR ---"
+
+cal_json=$(gog calendar events primary --today --json $gog_account_flag 2>/dev/null || echo '{"events":[]}')
+event_count=$(echo "$cal_json" | jq '.events | length' 2>/dev/null || echo 0)
+echo "EVENTS_TODAY: ${event_count}"
+
+now_epoch=$(date +%s)
+
+# Find next upcoming event
+next_event=""
+next_mins=""
+while IFS=$'\t' read -r summary start_str end_str; do
+  [ -z "$start_str" ] && continue
+  start_epoch=$(date -d "$start_str" +%s 2>/dev/null || continue)
+  if [ "$start_epoch" -gt "$now_epoch" ]; then
+    mins=$(( (start_epoch - now_epoch) / 60 ))
+    if [ -z "$next_mins" ] || [ "$mins" -lt "$next_mins" ]; then
+      next_mins="$mins"
+      start_time=$(date -d "$start_str" +%H:%M)
+      next_event="${summary} at ${start_time} (in ${mins} minutes)"
+    fi
+  fi
+done < <(echo "$cal_json" | jq -r '.events[]? | [.summary // "Untitled", .start // "", .end // ""] | @tsv' 2>/dev/null)
+
+if [ -n "$next_event" ]; then
+  echo "NEXT_EVENT: ${next_event}"
+  if [ -n "$next_mins" ] && [ "$next_mins" -le 15 ]; then
+    add_reason "meeting in ${next_mins} minutes"
+  fi
+else
+  echo "NEXT_EVENT: none"
+fi
+
+# Detect conflicts (overlapping events)
+conflict_count=0
+conflict_lines=""
+prev_summary="" prev_end_epoch=0
+
+while IFS=$'\t' read -r summary start_str end_str; do
+  [ -z "$start_str" ] && continue
+  start_epoch=$(date -d "$start_str" +%s 2>/dev/null || continue)
+  end_epoch=$(date -d "$end_str" +%s 2>/dev/null || continue)
+
+  if [ "$prev_end_epoch" -gt 0 ] && [ "$start_epoch" -lt "$prev_end_epoch" ]; then
+    conflict_count=$((conflict_count + 1))
+    prev_end_time=$(date -d "@$prev_end_epoch" +%H:%M)
+    start_time=$(date -d "$start_str" +%H:%M)
+    conflict_lines="${conflict_lines}  - ${prev_summary} (until ${prev_end_time}) overlaps ${summary} (starts ${start_time})"$'\n'
+  fi
+
+  if [ "$end_epoch" -gt "$prev_end_epoch" ]; then
+    prev_end_epoch="$end_epoch"
+    prev_summary="$summary"
+  fi
+done < <(echo "$cal_json" | jq -r '.events[]? | [.summary // "Untitled", .start // "", .end // ""] | @tsv' 2>/dev/null | sort -t$'\t' -k2)
+
+echo "CONFLICTS: ${conflict_count}"
+[ -n "$conflict_lines" ] && printf '%s' "$conflict_lines"
+[ "$conflict_count" -gt 0 ] && add_reason "${conflict_count} calendar conflict(s)"
+
+echo ""
+
+# ─── SUMMARY ─────────────────────────────────────────────────────────
+
+echo "--- SUMMARY ---"
+echo "ACTION_NEEDED: ${action_needed}"
+if [ -n "$reasons" ]; then
+  echo "REASONS: ${reasons}"
+fi

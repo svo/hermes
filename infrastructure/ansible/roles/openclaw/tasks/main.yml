@@ -19,6 +19,18 @@
     creates: /usr/local/bin/gog
   become: true
 
+- name: Install jq for hermes-check
+  ansible.builtin.apt:
+    pkg: jq
+  become: true
+
+- name: Install hermes-check script
+  ansible.builtin.copy:
+    src: hermes-check
+    dest: /usr/local/bin/hermes-check
+    mode: '0755'
+  become: true
+
 - name: Install entrypoint script
   ansible.builtin.copy:
     src: entrypoint.sh

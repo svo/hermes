@@ -37,7 +37,13 @@ node -e "
     every: '59m',
     target: 'last',
     model: 'haiku',
-    lightContext: true
+    lightContext: true,
+    prompt: 'Run: hermes-check — then act on the output. Notify user only if ACTION_NEEDED is yes with a concise summary of the reasons. Otherwise respond HEARTBEAT_OK.',
+    activeHours: {
+      start: process.env.HERMES_QUIET_HOURS_END,
+      end: process.env.HERMES_QUIET_HOURS_START,
+      timezone: process.env.HERMES_TIMEZONE
+    }
   };
   config.agents.defaults.compaction = { model: 'haiku' };
   config.agents.defaults.models = {
@@ -84,6 +90,7 @@ if [ ${#missing[@]} -gt 0 ]; then
 fi
 
 mkdir -p "$HOME/.openclaw/workspace"
+mkdir -p "$HOME/.openclaw/hermes-check"
 
 cat > "$HOME/.openclaw/workspace/IDENTITY.md" <<IDENTITY
 # Hermes
@@ -118,20 +125,25 @@ SOUL
 cat > "$HOME/.openclaw/workspace/AGENTS.md" <<AGENTS
 # Operating Instructions
 
-Personal assistant managing email, calendar, drive, and contacts via \`gog\` CLI (Google Suite). Keep the user on top of comms and schedule. Be proactive — nudge about meetings and unanswered emails.
-
-## Urgency Classification
-
-Before notifying, classify with fasttext (if /opt/hermes/urgency.bin exists):
-\`echo "subject" | fasttext predict /opt/hermes/urgency.bin -\`
-Only escalate \`__label__urgent\` messages. Skip if model missing.
+Personal assistant managing email, calendar, drive, and contacts via \`gog\` CLI (Google Suite). Keep the user on top of comms and schedule.
 
 ## Monitoring
 
-- **Heartbeat**: batch inbox + calendar + Slack checks. Classify first, only ping on urgent.
-- **Cron** (\`${HERMES_CRON_SCHEDULE}\`, tz: ${HERMES_TIMEZONE}): morning briefing — day's calendar, overnight inbox, Slack highlights.
+\`hermes-check\` is a pre-processing pipeline. Run it during heartbeats instead of
+calling gog commands individually — it fetches inbox and calendar, classifies urgency,
+detects conflicts, tracks already-seen messages, and outputs a structured summary.
 
-Quiet hours: ${HERMES_QUIET_HOURS_START}–${HERMES_QUIET_HOURS_END} (${HERMES_TIMEZONE}). No pings unless genuinely urgent.
+If ACTION_NEEDED is no, respond HEARTBEAT_OK.
+If ACTION_NEEDED is yes, notify the user with a concise summary.
+
+For deeper investigation (full email bodies, drafting replies, drive/contacts), use
+\`gog\` commands directly.
+
+VIP senders can be added to \`~/.openclaw/hermes-check/vip-senders.txt\` (one email or
+domain per line).
+
+**Cron** (\`${HERMES_CRON_SCHEDULE}\`, tz: ${HERMES_TIMEZONE}): morning briefing — run
+\`hermes-check\`, then use \`gog\` for the full day's calendar and overnight inbox summary.
 AGENTS
 
 if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
