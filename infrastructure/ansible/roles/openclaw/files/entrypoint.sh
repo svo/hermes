@@ -38,12 +38,19 @@ node -e "
     target: 'last',
     model: 'haiku',
     lightContext: true,
-    prompt: 'Run: hermes-check — then act on the output. Notify user only if ACTION_NEEDED is yes with a concise summary of the reasons. Otherwise respond HEARTBEAT_OK.',
+    isolatedSession: true,
+    prompt: 'Run: hermes-check — then act on the output. Notify user only if ACTION_NEEDED is yes with a concise summary of the reasons. Otherwise respond HEARTBEAT_OK. Do not run any other commands.',
     activeHours: {
       start: process.env.HERMES_QUIET_HOURS_END,
       end: process.env.HERMES_QUIET_HOURS_START,
       timezone: process.env.HERMES_TIMEZONE
     }
+  };
+  config.tools.loopDetection = {
+    enabled: true,
+    warningThreshold: 5,
+    criticalThreshold: 10,
+    globalCircuitBreakerThreshold: 15
   };
   config.agents.defaults.compaction = { model: 'haiku' };
   config.agents.defaults.models = {
