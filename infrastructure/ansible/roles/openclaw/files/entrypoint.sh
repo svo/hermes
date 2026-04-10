@@ -32,11 +32,11 @@ node -e "
   config.agents = config.agents || {};
   config.agents.defaults = config.agents.defaults || {};
   config.agents.defaults.skipBootstrap = true;
-  config.agents.defaults.model = 'haiku';
+  config.agents.defaults.model = 'anthropic/claude-haiku-4-5';
   config.agents.defaults.heartbeat = {
     every: '59m',
     target: 'last',
-    model: 'haiku',
+    model: 'anthropic/claude-haiku-4-5',
     lightContext: true,
     isolatedSession: true,
     prompt: 'Run: hermes-check — then act on the output. Notify user only if ACTION_NEEDED is yes with a concise summary of the reasons. Otherwise respond HEARTBEAT_OK. Do not run any other commands.',
@@ -52,7 +52,7 @@ node -e "
     criticalThreshold: 10,
     globalCircuitBreakerThreshold: 15
   };
-  config.agents.defaults.compaction = { model: 'haiku' };
+  config.agents.defaults.compaction = { model: 'anthropic/claude-haiku-4-5' };
   config.agents.defaults.models = {
     'anthropic/claude-haiku-4-5': {
       params: { cacheRetention: 'long' }
