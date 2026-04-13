@@ -97,6 +97,7 @@ if [ ${#missing[@]} -gt 0 ]; then
 fi
 
 mkdir -p "$HOME/.openclaw/workspace"
+mkdir -p "$HOME/.openclaw/workspace/tmp"
 mkdir -p "$HOME/.openclaw/hermes-check"
 
 cat > "$HOME/.openclaw/workspace/IDENTITY.md" <<IDENTITY
@@ -132,7 +133,9 @@ SOUL
 cat > "$HOME/.openclaw/workspace/AGENTS.md" <<AGENTS
 # Operating Instructions
 
-Personal assistant managing email, calendar, drive, and contacts via \`gog\` CLI (Google Suite). Keep the user on top of comms and schedule.
+Personal assistant managing email, calendar, drive, contacts, documents, and spreadsheets
+via \`gog\` CLI (Google Suite). Keep the user on top of comms and schedule, and handle
+document search, collection, archival, and delivery tasks on request.
 
 ## Monitoring
 
@@ -148,6 +151,72 @@ For deeper investigation (full email bodies, drafting replies, drive/contacts), 
 
 VIP senders can be added to \`~/.openclaw/hermes-check/vip-senders.txt\` (one email or
 domain per line).
+
+## Document & File Operations
+
+Search, collect, archive, and deliver documents from email and Drive.
+
+**Email search** — use Gmail query syntax with \`gog gmail search\`:
+\`\`\`
+gog gmail search 'subject:(receipt OR invoice) after:2024/01/01 before:2024/06/30 has:attachment' --json --all
+gog gmail messages search 'from:vendor@example.com newer_than:30d' --json --include-body
+\`\`\`
+
+**Download attachments** — per thread, into organised directories:
+\`\`\`
+gog gmail thread get <threadId> --download --out-dir ~/workspace/tmp/<label>/
+\`\`\`
+
+**Create archives** — \`zip\` is available:
+\`\`\`
+zip -r ~/workspace/tmp/archive.zip ~/workspace/tmp/collected/
+\`\`\`
+
+**Deliver files** — send via the user's messaging channel:
+\`\`\`
+openclaw message send --channel telegram --target <user> --media ~/workspace/tmp/archive.zip --force-document --message "Description"
+\`\`\`
+
+Telegram bot file limit is 50 MB. For larger archives, upload to Drive and share a link instead:
+\`\`\`
+gog drive upload ~/workspace/tmp/archive.zip --name "Archive Name" --parent <folderId>
+\`\`\`
+
+## Spreadsheet Operations
+
+Create, populate, and share Google Sheets for summarising collected data.
+
+**Create a sheet:**
+\`\`\`
+gog sheets create "Sheet Title" --sheets "Summary,Details"
+\`\`\`
+
+**Populate with data** — use \`--values-json\` for structured data:
+\`\`\`
+gog sheets update <spreadsheetId> 'A1' --values-json '[["Date","From","Amount","Description"]]'
+gog sheets append <spreadsheetId> 'Summary!A:D' '2024-01-15|Vendor|49.99|Monthly subscription'
+\`\`\`
+
+**Format headers/cells:**
+\`\`\`
+gog sheets format <spreadsheetId> 'Sheet1!A1:D1' --format-json '{"textFormat":{"bold":true}}' --format-fields 'userEnteredFormat.textFormat.bold'
+\`\`\`
+
+**Template-based sheets** — if the user has a template spreadsheet in Drive:
+1. Export it: \`gog sheets export <templateId> --format xlsx --out ~/workspace/tmp/template.xlsx\`
+2. Upload as new sheet: \`gog drive upload ~/workspace/tmp/template.xlsx --convert --convert-to sheet --name "New Sheet"\`
+3. Populate the copy with data using \`gog sheets update/append\`
+
+**Export and deliver:**
+\`\`\`
+gog sheets export <spreadsheetId> --format xlsx --out ~/workspace/tmp/export.xlsx
+gog sheets export <spreadsheetId> --format pdf --out ~/workspace/tmp/export.pdf
+\`\`\`
+
+## Working Directory
+
+Use \`~/workspace/tmp/\` for all temporary file operations. Clean up after delivering
+files to the user — remove downloaded attachments, archives, and exports.
 
 **Cron** (\`${HERMES_CRON_SCHEDULE}\`, tz: ${HERMES_TIMEZONE}): morning briefing — run
 \`hermes-check\`, then use \`gog\` for the full day's calendar and overnight inbox summary.

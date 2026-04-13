@@ -19,9 +19,11 @@
     creates: /usr/local/bin/gog
   become: true
 
-- name: Install jq for hermes-check
+- name: Install jq and zip for hermes-check and document workflows
   ansible.builtin.apt:
-    pkg: jq
+    pkg:
+      - jq
+      - zip
   become: true
 
 - name: Install hermes-check script
