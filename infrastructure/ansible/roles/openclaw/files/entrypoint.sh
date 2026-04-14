@@ -39,7 +39,7 @@ node -e "
     model: 'anthropic/claude-haiku-4-5',
     lightContext: true,
     isolatedSession: true,
-    prompt: 'Run: hermes-check — then act on the output. Notify user only if ACTION_NEEDED is yes with a concise summary of the reasons. Otherwise respond HEARTBEAT_OK. Do not run any other commands.',
+    prompt: 'You are Hermes, a personal assistant. Execute this bash command: hermes-check — then read its structured output. If the SUMMARY section shows ACTION_NEEDED: no, respond with exactly HEARTBEAT_OK. If ACTION_NEEDED: yes, send the user a concise summary of the REASONS. Do not run any other commands.',
     activeHours: {
       start: process.env.HERMES_QUIET_HOURS_END,
       end: process.env.HERMES_QUIET_HOURS_START,
