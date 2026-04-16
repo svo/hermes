@@ -58,7 +58,7 @@ node -e "
       params: { cacheRetention: 'long' }
     }
   };
-  config.cron = { enabled: true };
+  config.cron = { enabled: true, timezone: process.env.HERMES_TIMEZONE };
   config.tools = config.tools || {};
   config.tools.profile = 'full';
   delete config.tools.allow;
@@ -218,8 +218,12 @@ gog sheets export <spreadsheetId> --format pdf --out ~/workspace/tmp/export.pdf
 Use \`~/workspace/tmp/\` for all temporary file operations. Clean up after delivering
 files to the user — remove downloaded attachments, archives, and exports.
 
-**Cron** (\`${HERMES_CRON_SCHEDULE}\`, tz: ${HERMES_TIMEZONE}): morning briefing — run
-\`hermes-check\`, then use \`gog\` for the full day's calendar and overnight inbox summary.
+**Cron** (\`${HERMES_CRON_SCHEDULE}\`, tz: ${HERMES_TIMEZONE}): morning briefing.
+When this cron fires, execute these bash commands in order:
+1. Run \`hermes-check\` and read its structured output — summarise email counts and any urgent/VIP items.
+2. Run \`gog calendar list --date today\` for the full day's calendar.
+3. Run \`gog gmail search 'newer_than:12h' --json\` for overnight inbox summary.
+Then send the user a single concise morning briefing combining all results. Do not ask the user what to do — execute the commands yourself.
 AGENTS
 
 if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
