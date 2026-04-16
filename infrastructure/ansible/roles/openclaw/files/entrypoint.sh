@@ -58,16 +58,7 @@ node -e "
       params: { cacheRetention: 'long' }
     }
   };
-  config.cron = {
-    enabled: true,
-    timezone: process.env.HERMES_TIMEZONE,
-    jobs: [
-      {
-        schedule: process.env.HERMES_CRON_SCHEDULE,
-        prompt: 'You are Hermes, a personal assistant. This is the morning briefing. Execute these bash commands in order: 1. Run hermes-check and read its structured output. 2. Run gog calendar list --date today for the full day\\'s calendar. 3. Run gog gmail search \\'newer_than:12h\\' --json for overnight inbox summary. Then send the user a single concise morning briefing combining all results. Do not ask what to do — execute the commands yourself.'
-      }
-    ]
-  };
+  config.cron = { enabled: true, timezone: process.env.HERMES_TIMEZONE };
   config.tools = config.tools || {};
   config.tools.profile = 'full';
   delete config.tools.allow;
