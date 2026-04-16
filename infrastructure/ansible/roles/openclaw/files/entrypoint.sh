@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export TZ="${HERMES_TIMEZONE}"
+
 if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
   openclaw onboard --non-interactive --accept-risk \
     --mode local \
