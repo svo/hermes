@@ -58,7 +58,7 @@ node -e "
       params: { cacheRetention: 'long' }
     }
   };
-  config.cron = { enabled: true, timezone: process.env.HERMES_TIMEZONE };
+  config.cron = { enabled: true };
   config.tools = config.tools || {};
   config.tools.profile = 'full';
   delete config.tools.allow;
