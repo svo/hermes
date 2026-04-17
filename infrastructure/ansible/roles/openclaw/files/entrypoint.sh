@@ -60,7 +60,16 @@ node -e "
       params: { cacheRetention: 'long' }
     }
   };
-  config.cron = { enabled: true };
+  config.cron = {
+    enabled: true,
+    jobs: [
+      {
+        name: 'morning-briefing',
+        schedule: process.env.HERMES_CRON_SCHEDULE,
+        prompt: 'You are Hermes, a personal assistant. This is the scheduled morning briefing. Execute these bash commands in order:\\n1. Run hermes-check and read its structured output — summarise email counts and any urgent/VIP items.\\n2. Run gog calendar list --date today for the full day\\'s calendar.\\n3. Run gog gmail search \\'newer_than:12h\\' --json for overnight inbox summary.\\nThen send the user a single concise morning briefing combining all three results. Do not ask what to do — execute the commands yourself.'
+      }
+    ]
+  };
   config.tools = config.tools || {};
   config.tools.profile = 'full';
   delete config.tools.allow;
