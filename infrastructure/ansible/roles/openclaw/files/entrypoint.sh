@@ -266,7 +266,7 @@ node -e "
   const jobsDir = process.env.HOME + '/.openclaw/cron';
   const jobsPath = jobsDir + '/jobs.json';
   fs.mkdirSync(jobsDir, { recursive: true });
-  let jobs = [];
+  let jobs = {};
   try { jobs = JSON.parse(fs.readFileSync(jobsPath, 'utf8')); } catch {}
   const job = {
     name: 'morning-briefing',
@@ -278,8 +278,9 @@ node -e "
       deliver: true
     }
   };
-  const idx = jobs.findIndex(j => j.name === 'morning-briefing');
-  if (idx >= 0) jobs[idx] = job; else jobs.push(job);
+  const existing = Object.entries(jobs).find(([, v]) => v.name === 'morning-briefing');
+  const key = existing ? existing[0] : 'morning-briefing';
+  jobs[key] = job;
   fs.writeFileSync(jobsPath, JSON.stringify(jobs, null, 2) + '\n');
 "
 
