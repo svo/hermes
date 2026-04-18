@@ -60,16 +60,7 @@ node -e "
       params: { cacheRetention: 'long' }
     }
   };
-  config.cron = {
-    enabled: true,
-    jobs: [
-      {
-        name: 'morning-briefing',
-        schedule: process.env.HERMES_CRON_SCHEDULE,
-        prompt: 'You are Hermes, a personal assistant. This is the scheduled morning briefing. Execute these bash commands in order:\\n1. Run hermes-check and read its structured output — summarise email counts and any urgent/VIP items.\\n2. Run gog calendar list --date today for the full day\\'s calendar.\\n3. Run gog gmail search \\'newer_than:12h\\' --json for overnight inbox summary.\\nThen send the user a single concise morning briefing combining all three results. Do not ask what to do — execute the commands yourself.'
-      }
-    ]
-  };
+  config.cron = { enabled: true };
   config.tools = config.tools || {};
   config.tools.profile = 'full';
   delete config.tools.allow;
@@ -269,5 +260,27 @@ if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
   "
 fi
+
+node -e "
+  const fs = require('fs');
+  const jobsDir = process.env.HOME + '/.openclaw/cron';
+  const jobsPath = jobsDir + '/jobs.json';
+  fs.mkdirSync(jobsDir, { recursive: true });
+  let jobs = [];
+  try { jobs = JSON.parse(fs.readFileSync(jobsPath, 'utf8')); } catch {}
+  const job = {
+    name: 'morning-briefing',
+    schedule: { kind: 'cron', expr: process.env.HERMES_CRON_SCHEDULE, tz: process.env.HERMES_TIMEZONE },
+    sessionTarget: 'isolated',
+    payload: {
+      kind: 'agentTurn',
+      message: 'You are Hermes, a personal assistant. This is the scheduled morning briefing. Execute these bash commands in order:\n1. Run hermes-check and read its structured output — summarise email counts and any urgent/VIP items.\n2. Run gog calendar list --date today for the full day\'s calendar.\n3. Run gog gmail search \'newer_than:12h\' --json for overnight inbox summary.\nThen send the user a single concise morning briefing combining all three results. Do not ask what to do — execute the commands yourself.',
+      deliver: true
+    }
+  };
+  const idx = jobs.findIndex(j => j.name === 'morning-briefing');
+  if (idx >= 0) jobs[idx] = job; else jobs.push(job);
+  fs.writeFileSync(jobsPath, JSON.stringify(jobs, null, 2) + '\n');
+"
 
 exec openclaw gateway --port 3000 --bind lan
