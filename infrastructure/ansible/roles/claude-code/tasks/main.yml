@@ -42,9 +42,13 @@
     mode: '0644'
   become: true
 
+- name: Resolve Debian package architecture for GitHub CLI
+  ansible.builtin.set_fact:
+    claude_code_gh_deb_arch: "{{ ansible_facts['architecture'] | regex_replace('^x86_64$', 'amd64') | regex_replace('^aarch64$', 'arm64') }}"
+
 - name: Add GitHub CLI apt repository
   ansible.builtin.apt_repository:
-    repo: "deb [arch={{ ansible_facts['architecture'] | regex_replace('^x86_64$', 'amd64') | regex_replace('^aarch64$', 'arm64') }} signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main"
+    repo: "deb [arch={{ claude_code_gh_deb_arch }} signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main"
     filename: github-cli
     state: present
     update_cache: true
