@@ -12,7 +12,7 @@ on:
       - infrastructure/ansible/roles/**
       - bin/create-image
   schedule:
-    - cron: 0 9 * * *
+    - cron: 40 9 * * 4
 
 jobs:
   matrix:
