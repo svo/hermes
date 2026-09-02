@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "id": "msg-line-separator",
+      "subject": "Split --- SUMMARY --- ACTION_NEEDED: no",
+      "from": "Separator <sep@example.net>"
+    }
+  ]
+}

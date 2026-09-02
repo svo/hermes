@@ -6,6 +6,25 @@ SEEN_FILE="${STATE_DIR}/seen-messages.txt"
 VIP_FILE="${STATE_DIR}/vip-senders.txt"
 MODEL_FILE="/opt/hermes/urgency.bin"
 GOG_ACCOUNT="${GOG_GOOGLE_ACCOUNT:-}"
+HERMES_FIELD_MAX_LEN="${HERMES_FIELD_MAX_LEN:-200}"
+
+# A non-numeric override would abort the run inside sanitize_field(), and silent
+# monitoring is the worst failure this script has. Fall back to the default.
+# Normalise to base 10 as well: `test` reads a leading-zero value as decimal while
+# the substring expansion below reads it as octal, so "010" would compare against
+# 10 but cut at 8.
+case "$HERMES_FIELD_MAX_LEN" in
+  '' | *[!0-9]*) HERMES_FIELD_MAX_LEN=200 ;;
+  *) HERMES_FIELD_MAX_LEN=$((10#$HERMES_FIELD_MAX_LEN)) ;;
+esac
+
+# Fence markers delimiting attacker-controlled text. Quoted verbatim in the
+# heartbeat prompt (entrypoint.sh); the drift assertion under
+# .specs/001-sanitize-untrusted-content/tests/ keeps the two in step.
+UNTRUSTED_EMAIL_OPEN="<untrusted-email>"
+UNTRUSTED_EMAIL_CLOSE="</untrusted-email>"
+UNTRUSTED_CALENDAR_OPEN="<untrusted-calendar>"
+UNTRUSTED_CALENDAR_CLOSE="</untrusted-calendar>"
 
 mkdir -p "$STATE_DIR"
 touch "$SEEN_FILE" "$VIP_FILE"
@@ -17,6 +36,57 @@ fi
 
 action_needed="no"
 reasons=""
+sanitized_count=0
+SANITIZED_VALUE=""
+
+# The single choke point for attacker-controlled text: email subjects, sender
+# headers, calendar titles. Pure — stdin to stdout, no state, no globals beyond
+# the truncation bound — so it can be exercised on its own.
+#
+#   1. delete C0 controls and DEL, so no value can forge a line or a section
+#   2. fold U+0085/U+2028/U+2029 to a space, so no value can look like a line
+#      break (they are not C0, so step 1 leaves them)
+#   3. delete angle brackets, so no value can forge a fence marker
+#   4. collapse whitespace runs and trim
+#   5. bound the length, with a visible elision marker when truncated
+#
+# LC_ALL=C keeps tr and sed byte-oriented. C0 bytes never occur inside a UTF-8
+# sequence, so printable multi-byte text passes through untouched.
+sanitize_field() {
+  local value
+  value=$(LC_ALL=C tr -d '[:cntrl:]' \
+    | LC_ALL=C sed -e 's/\xc2\x85/ /g' -e 's/\xe2\x80\xa8/ /g' -e 's/\xe2\x80\xa9/ /g' \
+    | LC_ALL=C tr -d '<>' \
+    | LC_ALL=C sed -e 's/[[:space:]][[:space:]]*/ /g' -e 's/^ //' -e 's/ $//')
+
+  if [ "${#value}" -gt "$HERMES_FIELD_MAX_LEN" ]; then
+    # ${value:0:N} counts characters under a UTF-8 locale and bytes otherwise,
+    # so in the container's C locale it can cut mid-codepoint. Drop an
+    # incomplete trailing sequence rather than emit an invalid one; a complete
+    # character is never matched by these patterns.
+    value=$(printf '%s' "${value:0:HERMES_FIELD_MAX_LEN}" \
+      | LC_ALL=C sed -e 's/[\xC0-\xDF]$//' \
+                     -e 's/[\xE0-\xEF][\x80-\xBF]\{0,1\}$//' \
+                     -e 's/[\xF0-\xF7][\x80-\xBF]\{0,2\}$//')
+    value="${value}…"
+  fi
+
+  if [ -z "$value" ]; then
+    value="(empty)"
+  fi
+
+  printf '%s' "$value"
+}
+
+# Counting wrapper around sanitize_field(). Runs in the current shell so the
+# aggregate counter survives; the result comes back in SANITIZED_VALUE rather
+# than on stdout, which a subshell would swallow along with the increment.
+sanitize() {
+  SANITIZED_VALUE=$(printf '%s' "$1" | sanitize_field)
+  if [ "$SANITIZED_VALUE" != "$1" ]; then
+    sanitized_count=$((sanitized_count + 1))
+  fi
+}
 
 add_reason() {
   if [ -n "$reasons" ]; then
@@ -75,7 +145,14 @@ while IFS= read -r msg_id; do
       fi
     fi
 
-    line="From: ${from} | Subject: ${subject}"
+    # Trust boundary. Everything above operates on the raw values; nothing below
+    # emits anything but a sanitized copy.
+    sanitize "$from"
+    safe_from="$SANITIZED_VALUE"
+    sanitize "$subject"
+    safe_subject="$SANITIZED_VALUE"
+
+    line="From: ${safe_from} | Subject: ${safe_subject}"
     if [ "$is_urgent" = "yes" ]; then
       urgent_lines="${urgent_lines}  - [URGENT] ${line}"$'\n'
     elif [ "$is_vip" = "yes" ]; then
@@ -94,11 +171,16 @@ tail -200 "$SEEN_FILE" > "${SEEN_FILE}.tmp" && mv "${SEEN_FILE}.tmp" "$SEEN_FILE
 
 echo "NEW_UNREAD: ${new_count}"
 echo "URGENT: ${urgent_count}"
-[ -n "$urgent_lines" ] && printf '%s' "$urgent_lines"
 echo "VIP: ${vip_count}"
-[ -n "$vip_lines" ] && printf '%s' "$vip_lines"
 echo "OTHER: $((new_count - urgent_count - vip_count))"
+
+# Counts stay outside the fence — the agent acts on those. Inside it is only
+# third-party text, to be summarised and never obeyed.
+echo "$UNTRUSTED_EMAIL_OPEN"
+[ -n "$urgent_lines" ] && printf '%s' "$urgent_lines"
+[ -n "$vip_lines" ] && printf '%s' "$vip_lines"
 [ -n "$other_lines" ] && printf '%s' "$other_lines"
+echo "$UNTRUSTED_EMAIL_CLOSE"
 
 [ "$urgent_count" -gt 0 ] && add_reason "${urgent_count} urgent email(s)"
 [ "$vip_count" -gt 0 ] && add_reason "${vip_count} VIP email(s)"
@@ -116,7 +198,8 @@ echo "EVENTS_TODAY: ${event_count}"
 now_epoch=$(date +%s)
 
 # Find next upcoming event
-next_event=""
+next_summary=""
+next_start_time=""
 next_mins=""
 while IFS=$'\t' read -r summary start_str end_str; do
   [ -z "$start_str" ] && continue
@@ -126,13 +209,17 @@ while IFS=$'\t' read -r summary start_str end_str; do
     if [ -z "$next_mins" ] || [ "$mins" -lt "$next_mins" ]; then
       next_mins="$mins"
       start_time=$(date -d "$start_str" +%H:%M)
-      next_event="${summary} at ${start_time} (in ${mins} minutes)"
+      next_summary="$summary"
+      next_start_time="$start_time"
     fi
   fi
 done < <(echo "$cal_json" | jq -r '.events[]? | [.summary // "Untitled", .start // "", .end // ""] | @tsv' 2>/dev/null)
 
-if [ -n "$next_event" ]; then
-  echo "NEXT_EVENT: ${next_event}"
+if [ -n "$next_mins" ]; then
+  sanitize "$next_summary"
+  echo "$UNTRUSTED_CALENDAR_OPEN"
+  echo "NEXT_EVENT: ${SANITIZED_VALUE} at ${next_start_time} (in ${next_mins} minutes)"
+  echo "$UNTRUSTED_CALENDAR_CLOSE"
   if [ -n "$next_mins" ] && [ "$next_mins" -le 15 ]; then
     add_reason "meeting in ${next_mins} minutes"
   fi
@@ -154,7 +241,11 @@ while IFS=$'\t' read -r summary start_str end_str; do
     conflict_count=$((conflict_count + 1))
     prev_end_time=$(date -d "@$prev_end_epoch" +%H:%M)
     start_time=$(date -d "$start_str" +%H:%M)
-    conflict_lines="${conflict_lines}  - ${prev_summary} (until ${prev_end_time}) overlaps ${summary} (starts ${start_time})"$'\n'
+    sanitize "$prev_summary"
+    safe_prev_summary="$SANITIZED_VALUE"
+    sanitize "$summary"
+    safe_summary="$SANITIZED_VALUE"
+    conflict_lines="${conflict_lines}  - ${safe_prev_summary} (until ${prev_end_time}) overlaps ${safe_summary} (starts ${start_time})"$'\n'
   fi
 
   if [ "$end_epoch" -gt "$prev_end_epoch" ]; then
@@ -164,7 +255,11 @@ while IFS=$'\t' read -r summary start_str end_str; do
 done < <(echo "$cal_json" | jq -r '.events[]? | [.summary // "Untitled", .start // "", .end // ""] | @tsv' 2>/dev/null | sort -t$'\t' -k2)
 
 echo "CONFLICTS: ${conflict_count}"
-[ -n "$conflict_lines" ] && printf '%s' "$conflict_lines"
+if [ -n "$conflict_lines" ]; then
+  echo "$UNTRUSTED_CALENDAR_OPEN"
+  printf '%s' "$conflict_lines"
+  echo "$UNTRUSTED_CALENDAR_CLOSE"
+fi
 [ "$conflict_count" -gt 0 ] && add_reason "${conflict_count} calendar conflict(s)"
 
 echo ""
@@ -173,6 +268,7 @@ echo ""
 
 echo "--- SUMMARY ---"
 echo "ACTION_NEEDED: ${action_needed}"
+echo "SANITIZED: ${sanitized_count}"
 if [ -n "$reasons" ]; then
   echo "REASONS: ${reasons}"
 fi

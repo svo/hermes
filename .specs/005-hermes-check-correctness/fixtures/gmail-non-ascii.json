@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "id": "msg-non-ascii",
+      "subject": "請求書の確認 — Счёт №42 — Rechnung fällig 🪶 café",
+      "from": "山田 太郎 <taro@example.net>"
+    }
+  ]
+}

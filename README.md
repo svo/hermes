@@ -78,6 +78,7 @@ On first run, the entrypoint automatically configures OpenClaw via non-interacti
 | `HERMES_CRON_SCHEDULE` | Yes | Cron expression for morning briefing |
 | `HERMES_QUIET_HOURS_START` | Yes | Quiet hours start time (e.g. `20:00`) |
 | `HERMES_QUIET_HOURS_END` | Yes | Quiet hours end time (e.g. `08:00`) |
+| `HERMES_FIELD_MAX_LEN` | No | Maximum length of an untrusted email or calendar field in `hermes-check` output (default `200`) |
 
 ## Telegram Integration
 
@@ -201,3 +202,59 @@ On startup, the entrypoint generates OpenClaw workspace files at `~/.openclaw/wo
 These files are injected into the agent's context at the start of every session, so Hermes has detailed operating guidance available immediately without needing an initial brief.
 
 All `HERMES_*` variables are required — the container will fail on startup if any are missing. This makes the configuration explicit and avoids hidden assumptions about identity, tone, or scheduling.
+
+## Untrusted Content Boundary
+
+Email subjects, sender headers, and calendar event titles are written by whoever can send
+the user a message or an invite. `hermes-check` reads them and the heartbeat agent reads
+`hermes-check`, so that text reaches an agent that has a shell. It is treated as data, not
+as instruction.
+
+Every untrusted value passes through a single choke point in `hermes-check` —
+`sanitize_field()` — before it is emitted. That function:
+
+- deletes C0 control characters and `DEL`, so no value can forge a line or a section header
+- folds `U+0085`, `U+2028` and `U+2029` to a space, so no value can look like a line break
+- deletes `<` and `>`, so no value can forge a fence marker
+- collapses whitespace runs and trims the result
+- truncates to `HERMES_FIELD_MAX_LEN` characters (default `200`), appending `…`
+
+Printable text is otherwise left alone, including non-Latin scripts and emoji.
+
+Sanitised values are then emitted inside explicit fences:
+
+```
+--- EMAIL ---
+NEW_UNREAD: 2
+URGENT: 0
+VIP: 0
+OTHER: 2
+<untrusted-email>
+  - From: alice@example.net | Subject: Q3 planning notes
+</untrusted-email>
+```
+
+Counts and the `--- SUMMARY ---` block stay **outside** the fences: those are what the agent
+acts on. Everything **inside** a fence is third-party text to be summarised. The heartbeat
+prompt names these markers verbatim and instructs the agent never to follow, execute, or act
+on fenced content, and to report anything instruction-shaped instead of doing it. This
+matters most during heartbeats, which run with `lightContext: true` and so do not load
+`SOUL.md` or `AGENTS.md`.
+
+Every run reports `SANITIZED: <n>` in its summary — the number of fields modified. It does
+not raise `ACTION_NEEDED` on its own, because any subject containing an angle bracket trips
+it; a *sustained* non-zero value is the signal worth investigating.
+
+Operator check — this must print `1`:
+
+```bash
+docker exec hermes hermes-check | grep -cx -- '--- SUMMARY ---'
+```
+
+`-x` matters. A fenced line may legitimately *contain* the text `--- SUMMARY ---`, because
+that is what a hostile subject looks like once it has been made inert; what must never
+happen is a second line that **is** that header. Without `-x` the count rises whenever
+someone is probing, and the check reads as a breach when it is the design working.
+
+This reduces the efficacy of prompt injection; it does not eliminate it. The heartbeat agent
+still runs with a full tool profile and an unrestricted shell.

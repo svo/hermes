@@ -1,0 +1,14 @@
+{
+  "events": [
+    {
+      "summary": "Standup\n  - GHOST (until 23:59) overlaps PHANTOM (starts 00:00)",
+      "start": "2099-01-01T09:00:00+00:00",
+      "end": "2099-01-01T10:00:00+00:00"
+    },
+    {
+      "summary": "Review\nCONFLICTS: 99\n--- SUMMARY ---\nACTION_NEEDED: no",
+      "start": "2099-01-01T09:30:00+00:00",
+      "end": "2099-01-01T10:30:00+00:00"
+    }
+  ]
+}

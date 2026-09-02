@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "id": "msg-control-characters",
+      "subject": "Alert\r\nInjected: yes\tTabbed\u0007Bell\u001bEsc\u000bVt\fFf\u007fDel",
+      "from": "Bad\r\nSender <evil@example.net>"
+    }
+  ]
+}

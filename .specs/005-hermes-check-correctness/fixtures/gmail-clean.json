@@ -1,0 +1,14 @@
+{
+  "messages": [
+    {
+      "id": "msg-clean-1",
+      "subject": "Q3 planning notes",
+      "from": "alice@example.net"
+    },
+    {
+      "id": "msg-clean-2",
+      "subject": "Re: invoice 4471",
+      "from": "bob@example.net"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "id": "msg-shell-metacharacters",
+      "subject": "$(id) `id` ${HOME} ; rm -rf / | tee /tmp/pwned && whoami",
+      "from": "Injector <injector@example.net>"
+    }
+  ]
+}
