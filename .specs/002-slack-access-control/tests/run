@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+#
+# Runs every check for 002. Accumulates failures rather than stopping at the
+# first, so one run reveals every problem.
+#
+# 006's `bin/test` should invoke this file alongside 001's.
+
+set -uo pipefail
+
+tests_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${tests_dir}/../../.." && pwd)"
+entrypoint="${repo_root}/infrastructure/ansible/roles/openclaw/files/entrypoint.sh"
+
+failed=()
+
+check() {
+  local name="$1"
+  shift
+  printf '\n== %s ==\n' "$name"
+  if "$@"; then
+    printf 'PASS %s\n' "$name"
+  else
+    printf 'FAIL %s\n' "$name" >&2
+    failed+=("$name")
+  fi
+}
+
+check "bash -n entrypoint.sh" bash -n "$entrypoint"
+check "shellcheck entrypoint.sh" shellcheck -s bash "$entrypoint"
+check "slack-config-test" bash "${tests_dir}/slack-config-test"
+check "slack-validation-test" bash "${tests_dir}/slack-validation-test"
+
+printf '\n'
+if [ ${#failed[@]} -eq 0 ]; then
+  printf 'All 002 checks passed.\n'
+  exit 0
+fi
+
+printf 'Failing checks:\n' >&2
+printf '  %s\n' "${failed[@]}" >&2
+exit 1

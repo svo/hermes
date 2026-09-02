@@ -70,6 +70,8 @@ On first run, the entrypoint automatically configures OpenClaw via non-interacti
 | `TELEGRAM_ALLOW_FROM` | With `TELEGRAM_BOT_TOKEN` | Comma-separated Telegram user IDs to allow |
 | `SLACK_BOT_TOKEN` | No | Slack bot token (`xoxb-...`) from the Slack app settings |
 | `SLACK_APP_TOKEN` | With `SLACK_BOT_TOKEN` | Slack app-level token (`xapp-...`) with `connections:write` scope |
+| `SLACK_ALLOW_FROM` | With `SLACK_BOT_TOKEN` | Comma-separated Slack user IDs allowed to DM the assistant |
+| `SLACK_ALLOW_CHANNELS` | No | Comma-separated Slack channel IDs the assistant may answer in; group access is disabled when unset |
 | `HERMES_VIBE` | Yes | Personality vibe descriptors |
 | `HERMES_TONE` | Yes | Communication tone descriptors |
 | `HERMES_USER_NAME` | Yes | User's name |
@@ -116,7 +118,9 @@ Connect Hermes to Slack so you can chat with your assistant from any Slack works
 1. Create a Slack app at https://api.slack.com/apps using the manifest in [`infrastructure/slack-app-manifest.json`](infrastructure/slack-app-manifest.json) — this configures Socket Mode, bot scopes, and event subscriptions automatically
 2. Go to Basic Information > App-Level Tokens > generate a token with `connections:write` scope — this is your `SLACK_APP_TOKEN` (`xapp-...`)
 3. Install the app to the workspace and go to OAuth & Permissions to copy the Bot User OAuth Token — this is your `SLACK_BOT_TOKEN` (`xoxb-...`)
-4. Pass both tokens as environment variables:
+4. Collect the **user IDs** allowed to DM the assistant — this is your `SLACK_ALLOW_FROM`. In Slack, click the person, then **More**, then **Copy member ID**. It looks like `U0123ABCDE`
+5. Optionally collect the **channel IDs** the assistant may answer in — this is your `SLACK_ALLOW_CHANNELS`. Open the channel, click its name, and read the **Channel ID** at the bottom of the **About** tab. It looks like `C0123ABCDE`, or `G0123ABCDE` for a private channel. Group access stays disabled unless you list channels here
+6. Pass the tokens and the allowlist as environment variables:
 
 ```bash
 docker run -d \
@@ -125,10 +129,89 @@ docker run -d \
   -e ANTHROPIC_API_KEY="your-api-key" \
   -e SLACK_BOT_TOKEN="xoxb-your-slack-bot-token" \
   -e SLACK_APP_TOKEN="xapp-your-slack-app-token" \
+  -e SLACK_ALLOW_FROM="U0123ABCDE" \
+  -e SLACK_ALLOW_CHANNELS="C0123ABCDE" \
   -v /opt/hermes/data:/root/.openclaw \
   -p 127.0.0.1:3000:3000 \
   svanosselaer/hermes-service:latest
 ```
+
+### Access control
+
+`SLACK_ALLOW_FROM` is **required** whenever `SLACK_BOT_TOKEN` is set, and the container
+refuses to start without it. Workspace membership is not authorisation: every DM starts an
+agent turn holding an unrestricted shell and, where configured, a domain-wide delegated
+Google Workspace credential.
+
+| Config key | Value |
+|---|---|
+| `channels.slack.dmPolicy` | `allowlist` — only `SLACK_ALLOW_FROM` may DM the assistant |
+| `channels.slack.allowFrom` | the trimmed, comma-separated contents of `SLACK_ALLOW_FROM` |
+| `channels.slack.groupPolicy` | `disabled`, or `allowlist` when `SLACK_ALLOW_CHANNELS` is set |
+| `channels.slack.channels` | each listed ID mapped to `{enabled: true, requireMention: true}` |
+
+Slack's shape is not Telegram's. DMs gate the same way, but group access gates on
+`groupPolicy` and a `channels` map keyed by channel ID; there is no wildcard, and `groups` is
+not a Slack key at all — `openclaw config validate` rejects it as unrecognised. Group access
+is therefore closed by default rather than mention-gated by default: opening it is an
+explicit act.
+
+`*` is OpenClaw's spelling of *everyone*. An `allowFrom` containing it admits the whole
+workspace while `dmPolicy` still reads `allowlist` and the startup line still reports a
+count, so nothing on the operator-facing surface will look unusual. It is a valid upstream
+configuration and is passed through unchanged — do not put it in `SLACK_ALLOW_FROM` unless
+opening the assistant to every workspace member is what you mean.
+
+Channel allowlists are **ID-first**. OpenClaw's router ignores a channel *name*, so a
+`#general` in `SLACK_ALLOW_CHANNELS` would leave the bot silently unresponsive there. The
+container rejects names at startup instead, naming the requirement. Enterprise Grid's
+team-scoped form (`team:T…:channel:C…`) is out of scope and is rejected the same way.
+
+Entries in `SLACK_ALLOW_FROM` may also take OpenClaw's `accessGroup:<name>` form; they are
+passed through unparsed.
+
+The app manifest still subscribes to `message.channels` and `message.groups`, so the bot
+receives every message in every channel it has joined. `groupPolicy` is what stops the agent
+acting on them. Narrowing the subscription is not as simple as deleting those two events —
+see [`.specs/002-slack-access-control/SPEC.md`](.specs/002-slack-access-control/SPEC.md)
+§ Open Questions.
+
+On startup the container logs one line for the channel — policies and counts only, never
+tokens and never the IDs themselves:
+
+```
+slack: dmPolicy=allowlist allowFrom=2 groupPolicy=allowlist channels=1
+```
+
+Verify without reading the config file:
+
+```bash
+docker exec hermes openclaw config get channels.slack.dmPolicy    # allowlist
+docker exec hermes openclaw config get channels.slack.groupPolicy # disabled | allowlist
+```
+
+### When a DM is ignored
+
+Denial is by omission — OpenClaw has no denylist — so a sender who is not in `allowFrom` is
+blocked with nothing said in the Slack conversation. Check the configuration first:
+
+```bash
+docker exec hermes openclaw config get channels.slack.allowFrom
+```
+
+If the sender's ID is not in that list, that is the answer. To see the decision in the
+gateway log:
+
+```bash
+docker exec hermes openclaw logs --limit 500 --plain | grep -Ei 'dmPolicy=|DM_POLICY_'
+```
+
+The policy layer produces the reason `DM_POLICY_NOT_ALLOWLISTED` alongside the detail
+`dmPolicy=allowlist (not allowlisted)`. Those are the strings to grep for. The exact log
+line, its level, and whether the sender's ID appears in it are not documented upstream, and
+channel-ingress diagnostics are documented as redacted — so do not expect to find your own
+`U…` ID there. If nothing appears, raise the level with
+`openclaw config set logging.level trace` and reproduce.
 
 ## Google Calendar/Email Integration
 

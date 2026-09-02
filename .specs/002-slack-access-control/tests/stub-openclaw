@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+#
+# Fake `openclaw`, standing in for the four subcommands the entrypoint and these
+# cases use. No network, no credentials, no image.
+#
+#   onboard          writes the minimal config real onboarding leaves behind
+#   gateway          records that it was reached, then exits 0 instead of serving
+#   config get       prints one dotted path out of the config
+#   config validate  checks channels.slack against the upstream schema
+#
+# The validator is a local transcription of the upstream zod schema for
+# channels.slack, not the real thing. It exists to catch the failure mode that
+# produced finding A2d — a key that looks right, validates nowhere, and gates
+# nothing (Telegram's `groups` under Slack). `openclaw config validate` against
+# a real image stays the manual acceptance step; see README.md.
+
+set -uo pipefail
+
+config="${HOME}/.openclaw/openclaw.json"
+
+usage() {
+  printf 'stub-openclaw: unsupported invocation: %s\n' "$*" >&2
+  exit 64
+}
+
+case "${1:-}" in
+  onboard)
+    mkdir -p "$(dirname "$config")"
+    cat > "$config" <<'ONBOARDED'
+{
+  "gateway": {
+    "port": 3000,
+    "bind": "lan"
+  },
+  "agents": {
+    "defaults": {}
+  },
+  "tools": {},
+  "channels": {},
+  "env": {}
+}
+ONBOARDED
+    exit 0
+    ;;
+
+  gateway)
+    # `exec openclaw gateway` is the last line of the entrypoint, so this marker
+    # is how a case asserts that a rejected configuration never got that far.
+    if [ -n "${OPENCLAW_STUB_MARKERS:-}" ]; then
+      : > "${OPENCLAW_STUB_MARKERS}/gateway-started"
+    fi
+    exit 0
+    ;;
+
+  config)
+    case "${2:-}" in
+      get)
+        [ -n "${3:-}" ] || usage "$@"
+        CONFIG_PATH="$config" QUERY="$3" node -e "
+          const fs = require('fs');
+          const config = JSON.parse(fs.readFileSync(process.env.CONFIG_PATH, 'utf8'));
+          const value = process.env.QUERY.split('.').reduce(
+            (node, key) => (node === undefined || node === null ? undefined : node[key]),
+            config
+          );
+          if (value === undefined) process.exit(1);
+          console.log(typeof value === 'string' ? value : JSON.stringify(value));
+        "
+        exit $?
+        ;;
+      validate)
+        CONFIG_PATH="$config" node -e "
+          const fs = require('fs');
+
+          // Transcribed from upstream: extensions/slack/src/config-schema.ts and
+          // docs/gateway/config-channels.md. Unknown keys are the point — a
+          // Telegram-shaped 'groups' key must be rejected here, because upstream
+          // rejects it too and nothing else in this repository would notice.
+          const SLACK_KEYS = [
+            'enabled', 'mode', 'botToken', 'appToken', 'signingSecret', 'socketMode',
+            'enterpriseOrgInstall', 'webhookPath', 'dmPolicy', 'allowFrom', 'dm',
+            'groupPolicy', 'channels', 'dangerouslyAllowNameMatching', 'historyLimit',
+            'allowBots', 'reactionNotifications', 'reactionAllowlist', 'replyToMode',
+            'thread', 'actions', 'slashCommand', 'typingReaction', 'unfurlLinks',
+            'unfurlMedia', 'textChunkLimit', 'chunkMode', 'streaming', 'mediaMaxMb',
+            'execApprovals', 'capabilities', 'accounts', 'defaultAccount'
+          ];
+          const CHANNEL_KEYS = [
+            'enabled', 'allow', 'requireMention', 'allowBots', 'users', 'skills',
+            'systemPrompt', 'ignoreOtherMentions', 'replyToMode', 'botLoopProtection',
+            'presenceEvents'
+          ];
+          const DM_POLICIES = ['pairing', 'allowlist', 'open', 'disabled'];
+          const GROUP_POLICIES = ['open', 'allowlist', 'disabled'];
+
+          const problems = [];
+          const config = JSON.parse(fs.readFileSync(process.env.CONFIG_PATH, 'utf8'));
+          const slack = (config.channels || {}).slack;
+
+          if (slack !== undefined) {
+            for (const key of Object.keys(slack)) {
+              if (SLACK_KEYS.includes(key) === false) {
+                // groupAllowFrom lands here on purpose: it is valid on telegram,
+                // whatsapp, signal, imessage, msteams and matrix, and Slack is the
+                // one channel that omits it. So is 'groups'.
+                problems.push('channels.slack.' + key + ': unrecognised key');
+              }
+            }
+            if (slack.dmPolicy !== undefined && DM_POLICIES.includes(slack.dmPolicy) === false) {
+              problems.push('channels.slack.dmPolicy: expected one of ' + DM_POLICIES.join(', '));
+            }
+            if (slack.groupPolicy !== undefined && GROUP_POLICIES.includes(slack.groupPolicy) === false) {
+              problems.push('channels.slack.groupPolicy: expected one of ' + GROUP_POLICIES.join(', '));
+            }
+            if (slack.allowFrom !== undefined) {
+              if (Array.isArray(slack.allowFrom) === false) {
+                problems.push('channels.slack.allowFrom: expected an array');
+              } else {
+                for (const entry of slack.allowFrom) {
+                  if (typeof entry !== 'string' && typeof entry !== 'number') {
+                    problems.push('channels.slack.allowFrom: expected strings or numbers');
+                  }
+                }
+              }
+            }
+            if (slack.dmPolicy === 'open') {
+              const allowFrom = Array.isArray(slack.allowFrom) ? slack.allowFrom : [];
+              if (allowFrom.includes('*') === false) {
+                problems.push('channels.slack.dmPolicy=open requires channels.slack.allowFrom to include *');
+              }
+            }
+            if (slack.channels !== undefined) {
+              const isObject = typeof slack.channels === 'object' &&
+                slack.channels !== null &&
+                Array.isArray(slack.channels) === false;
+              if (isObject === false) {
+                problems.push('channels.slack.channels: expected an object keyed by channel id');
+              } else {
+                for (const [id, entry] of Object.entries(slack.channels)) {
+                  if (typeof entry !== 'object' || entry === null) {
+                    problems.push('channels.slack.channels.' + id + ': expected an object');
+                    continue;
+                  }
+                  for (const key of Object.keys(entry)) {
+                    // allowFrom is valid at the Slack root and omitted from the
+                    // per-channel entry schema, so it is rejected here.
+                    if (CHANNEL_KEYS.includes(key) === false) {
+                      problems.push('channels.slack.channels.' + id + '.' + key + ': unrecognised key');
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          if (problems.length > 0) {
+            console.error(JSON.stringify({ ok: false, problems }, null, 2));
+            process.exit(1);
+          }
+          console.log(JSON.stringify({ ok: true }));
+        "
+        exit $?
+        ;;
+      *)
+        usage "$@"
+        ;;
+    esac
+    ;;
+
+  *)
+    usage "$@"
+    ;;
+esac

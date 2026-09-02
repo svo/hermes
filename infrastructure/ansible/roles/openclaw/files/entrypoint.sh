@@ -250,14 +250,84 @@ if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
     const fs = require('fs');
     const configPath = process.env.HOME + '/.openclaw/openclaw.json';
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+
+    const fail = (lines) => {
+      for (const line of lines) console.error(line);
+      process.exit(1);
+    };
+    const entries = (value) => value.split(',').map((s) => s.trim()).filter(Boolean);
+
+    // Slack's access-control shape is not Telegram's. DMs gate the same way, on
+    // dmPolicy + allowFrom; group access gates on groupPolicy and a channels map
+    // keyed by channel ID. There is no wildcard, and 'groups' is not a Slack key
+    // at all: upstream's schema is strict and rejects it — but nothing in this
+    // container runs the validator yet, so writing it would just sit there
+    // gating nothing.
+
+    // Guarded rather than dereferenced: TELEGRAM_ALLOW_FROM above throws a
+    // TypeError when unset, and 004 fixes that one. This block must not add a
+    // second instance of it.
+    const allowFrom = entries(process.env.SLACK_ALLOW_FROM || '');
+    if (allowFrom.length === 0) {
+      fail([
+        'Error: SLACK_ALLOW_FROM is required when SLACK_BOT_TOKEN is set.',
+        '  Without it any member of the Slack workspace could DM the assistant,',
+        '  and every DM starts an agent turn holding an unrestricted shell.',
+        '  Set it to a comma-separated list of Slack user IDs:',
+        '    SLACK_ALLOW_FROM=U0123ABCDE,U0456FGHIJ',
+        '  Find a user ID in Slack: click the person, then More, then Copy member ID.'
+      ]);
+    }
+
+    // allowFrom entries may also take the documented accessGroup:<name> form, so
+    // they are passed through unparsed. Only channel IDs are format-checked.
+    const requested = (process.env.SLACK_ALLOW_CHANNELS || '').trim();
+    const channelIds = entries(requested);
+    if (requested !== '' && channelIds.length === 0) {
+      fail([
+        'Error: SLACK_ALLOW_CHANNELS is set but lists no channel IDs.',
+        '  Unset it to leave group access disabled, or list channel IDs:',
+        '    SLACK_ALLOW_CHANNELS=C0123ABCDE,C0456FGHIJ'
+      ]);
+    }
+    const rejected = channelIds.filter((id) => /^[CG][A-Z0-9]+$/.test(id) === false);
+    if (rejected.length > 0) {
+      fail([
+        'Error: SLACK_ALLOW_CHANNELS contains entries that are not Slack channel IDs:',
+        ...rejected.map((id) => '    ' + id),
+        '  Slack channel allowlists are ID-first. A channel name is ignored under',
+        '  groupPolicy=allowlist, so the bot would silently never answer there.',
+        '  Use the channel ID — C for a public channel, G for a private one:',
+        '    SLACK_ALLOW_CHANNELS=C0123ABCDE',
+        '  Find it in Slack: open the channel, click its name, and read the',
+        '  Channel ID at the bottom of the About tab.'
+      ]);
+    }
+
+    const channels = {};
+    for (const id of channelIds) channels[id] = { enabled: true, requireMention: true };
+
     config.channels = config.channels || {};
     config.channels.slack = {
       enabled: true,
       mode: 'socket',
       botToken: process.env.SLACK_BOT_TOKEN,
-      appToken: process.env.SLACK_APP_TOKEN
+      appToken: process.env.SLACK_APP_TOKEN,
+      dmPolicy: 'allowlist',
+      allowFrom,
+      groupPolicy: channelIds.length > 0 ? 'allowlist' : 'disabled',
+      channels
     };
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+
+    // Counts only. The IDs themselves would leak workspace membership into the
+    // container log, and the tokens must never appear there at all.
+    console.log(
+      'slack: dmPolicy=' + config.channels.slack.dmPolicy +
+      ' allowFrom=' + allowFrom.length +
+      ' groupPolicy=' + config.channels.slack.groupPolicy +
+      ' channels=' + channelIds.length
+    );
   "
 fi
 

@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+#
+# The rejected configurations. These are the point of 002: a Slack deployment
+# that is misconfigured must stop, loudly, before the gateway starts — rather
+# than come up with an open door or a channel allowlist Slack silently ignores.
+#
+# Every case asserts the exit status *and* the message, because a bare non-zero
+# exit (a TypeError, say) is exactly the failure this spec is replacing.
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+SLACK_ENV=(SLACK_BOT_TOKEN=xoxb-test-bot-token SLACK_APP_TOKEN=xapp-test-app-token)
+
+should_exit_non_zero_when_slack_bot_token_is_set_without_slack_allow_from() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint "${SLACK_ENV[@]}"
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  case_end
+}
+
+should_name_the_variable_and_the_fix_when_slack_allow_from_is_missing() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint "${SLACK_ENV[@]}"
+  assert_contains "names the variable" "$RUN_ERR" "SLACK_ALLOW_FROM is required"
+  assert_contains "names the trigger" "$RUN_ERR" "when SLACK_BOT_TOKEN is set"
+  assert_contains "names the consequence" "$RUN_ERR" "could DM the assistant"
+  assert_contains "shows the fix" "$RUN_ERR" "SLACK_ALLOW_FROM=U0123ABCDE"
+  assert_contains "says where to find an id" "$RUN_ERR" "Copy member ID"
+  case_end
+}
+
+should_not_throw_a_type_error_when_slack_allow_from_is_unset() {
+  case_start "${FUNCNAME[0]}"
+  # The Telegram block dereferences its allowlist without a guard and dies with
+  # a TypeError (finding B3a, fixed by 004). This block must not add a second
+  # instance of that: the failure has to be the named error, not a stack trace.
+  run_entrypoint "${SLACK_ENV[@]}"
+  assert_not_contains "no TypeError" "$RUN_ERR" "TypeError"
+  assert_not_contains "no stack trace" "$RUN_ERR" "at Object."
+  case_end
+}
+
+should_not_start_the_gateway_when_slack_allow_from_is_missing() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint "${SLACK_ENV[@]}"
+  if gateway_started; then fail "the gateway started despite a rejected configuration"; fi
+  case_end
+}
+
+should_not_leave_slack_configured_when_slack_allow_from_is_missing() {
+  case_start "${FUNCNAME[0]}"
+  # A half-written channel block would come back on the next start as an
+  # enabled channel with no policy. Nothing is written until the input is valid.
+  run_entrypoint "${SLACK_ENV[@]}"
+  assert_equals "slack absent" "null" "$(config_get '.channels.slack')"
+  case_end
+}
+
+should_exit_non_zero_when_slack_allow_from_lists_no_ids() {
+  case_start "${FUNCNAME[0]}"
+  # dmPolicy=allowlist with an empty allowFrom locks everyone out silently,
+  # which reads to the operator as "the bot ignores me".
+  run_entrypoint "${SLACK_ENV[@]}" SLACK_ALLOW_FROM=' , , '
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "names the variable" "$RUN_ERR" "SLACK_ALLOW_FROM is required"
+  case_end
+}
+
+should_reject_a_channel_name_when_it_is_supplied_instead_of_an_id() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint "${SLACK_ENV[@]}" SLACK_ALLOW_FROM=U0123ABCDE SLACK_ALLOW_CHANNELS='#general'
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  if gateway_started; then fail "the gateway started despite a rejected configuration"; fi
+  case_end
+}
+
+should_name_the_id_first_requirement_when_a_channel_name_is_supplied() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint "${SLACK_ENV[@]}" SLACK_ALLOW_FROM=U0123ABCDE SLACK_ALLOW_CHANNELS='#general'
+  assert_contains "names the variable" "$RUN_ERR" "SLACK_ALLOW_CHANNELS"
+  assert_contains "names the requirement" "$RUN_ERR" "ID-first"
+  assert_contains "names the silent failure" "$RUN_ERR" "silently never answer"
+  assert_contains "says where to find an id" "$RUN_ERR" "About tab"
+  case_end
+}
+
+should_echo_every_rejected_entry_when_several_are_supplied() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint "${SLACK_ENV[@]}" SLACK_ALLOW_FROM=U0123ABCDE \
+    SLACK_ALLOW_CHANNELS='#general,C0777KEPT,#random'
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  # The rejected entries are the indented ones; the example in the guidance is
+  # indented too, which is why the valid entry is checked by its own id.
+  assert_contains "first rejected entry" "$RUN_ERR" "    #general"
+  assert_contains "second rejected entry" "$RUN_ERR" "    #random"
+  assert_not_contains "the valid entry is not blamed" "$RUN_ERR" "C0777KEPT"
+  case_end
+}
+
+should_reject_a_lowercase_channel_id_when_it_is_supplied() {
+  case_start "${FUNCNAME[0]}"
+  # Slack channel IDs are upper case. A lower-cased one is a transcription
+  # error, and it would be ignored just as silently as a name.
+  run_entrypoint "${SLACK_ENV[@]}" SLACK_ALLOW_FROM=U0123ABCDE SLACK_ALLOW_CHANNELS='c0123abcde'
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "names the requirement" "$RUN_ERR" "ID-first"
+  case_end
+}
+
+should_reject_a_team_scoped_channel_id_when_it_is_supplied() {
+  case_start "${FUNCNAME[0]}"
+  # Enterprise Grid's team-scoped form is out of scope (SPEC Open Question 1,
+  # answered: standard workspaces only). It fails loudly rather than being
+  # accepted and then ignored, so a Grid deployment learns it at startup.
+  run_entrypoint "${SLACK_ENV[@]}" SLACK_ALLOW_FROM=U0123ABCDE \
+    SLACK_ALLOW_CHANNELS='team:T0123ABCDE:channel:C0456FGHIJ'
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "names the requirement" "$RUN_ERR" "ID-first"
+  case_end
+}
+
+should_exit_non_zero_when_slack_allow_channels_lists_no_ids() {
+  case_start "${FUNCNAME[0]}"
+  # Set-but-empty is ambiguous: it could mean "no group access" or "I meant to
+  # list something". Unsetting it is the way to say the first one.
+  run_entrypoint "${SLACK_ENV[@]}" SLACK_ALLOW_FROM=U0123ABCDE SLACK_ALLOW_CHANNELS=' , '
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "names the variable" "$RUN_ERR" "SLACK_ALLOW_CHANNELS is set but lists no channel IDs"
+  assert_contains "names the way to disable group access" "$RUN_ERR" "Unset it"
+  case_end
+}
+
+should_leave_group_access_disabled_when_slack_allow_channels_is_empty() {
+  case_start "${FUNCNAME[0]}"
+  # An unset variable and an empty one mean the same thing to `docker run -e`,
+  # so an empty value is the closed default rather than an error.
+  run_entrypoint "${SLACK_ENV[@]}" SLACK_ALLOW_FROM=U0123ABCDE SLACK_ALLOW_CHANNELS=
+  assert_equals "exit status" "0" "$RUN_STATUS"
+  assert_equals "groupPolicy" "disabled" "$(config_get '.channels.slack.groupPolicy')"
+  case_end
+}
+
+should_exit_non_zero_when_slack_bot_token_is_set_without_slack_allow_from
+should_name_the_variable_and_the_fix_when_slack_allow_from_is_missing
+should_not_throw_a_type_error_when_slack_allow_from_is_unset
+should_not_start_the_gateway_when_slack_allow_from_is_missing
+should_not_leave_slack_configured_when_slack_allow_from_is_missing
+should_exit_non_zero_when_slack_allow_from_lists_no_ids
+should_reject_a_channel_name_when_it_is_supplied_instead_of_an_id
+should_name_the_id_first_requirement_when_a_channel_name_is_supplied
+should_echo_every_rejected_entry_when_several_are_supplied
+should_reject_a_lowercase_channel_id_when_it_is_supplied
+should_reject_a_team_scoped_channel_id_when_it_is_supplied
+should_exit_non_zero_when_slack_allow_channels_lists_no_ids
+should_leave_group_access_disabled_when_slack_allow_channels_is_empty
+
+report_totals "slack-validation-test"

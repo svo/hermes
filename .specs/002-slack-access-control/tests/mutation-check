@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+#
+# Sensitivity check: mutate the Slack block one behaviour at a time and confirm
+# that at least one named case fails for each. A green suite proves nothing on
+# its own — this is what shows the cases are attached to the behaviour they
+# claim to be about.
+#
+# Not part of `run`: it executes both suites once per mutation. Run it by hand
+# after changing the Slack block or the cases.
+#
+#   .specs/002-slack-access-control/tests/mutation-check
+#
+# Two of these mutations were initially anchored on a string that also appears
+# in the Telegram block a few lines above, so they silently mutated Telegram and
+# were reported as uncaught. Both anchors now include a neighbouring Slack line.
+
+set -uo pipefail
+
+tests_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${tests_dir}/../../.." && pwd)"
+src="${repo_root}/infrastructure/ansible/roles/openclaw/files/entrypoint.sh"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+uncaught=0
+
+run_mutation() {
+  local name="$1" old="$2" new="$3"
+  local copy="${work}/entrypoint.${name}.sh"
+  if ! python3 - "$src" "$copy" "$old" "$new" <<'PY'
+import sys
+src, dst, old, new = sys.argv[1:5]
+s = open(src).read()
+if old not in s:
+    sys.exit("anchor not found: " + old[:60])
+open(dst, 'w').write(s.replace(old, new, 1))
+PY
+  then
+    printf '%-38s ANCHOR NOT FOUND\n' "$name" >&2
+    uncaught=$((uncaught + 1))
+    return
+  fi
+  local out caught
+  out="$(ENTRYPOINT="$copy" bash "${tests_dir}/slack-config-test" 2>&1
+         ENTRYPOINT="$copy" bash "${tests_dir}/slack-validation-test" 2>&1)"
+  caught="$(printf '%s\n' "$out" | grep '^FAIL ' | sed 's/^FAIL //' | paste -sd, -)"
+  if [ -n "$caught" ]; then
+    printf '%-38s caught by %s\n' "$name" "$caught"
+  else
+    printf '%-38s *** NOT CAUGHT ***\n' "$name" >&2
+    uncaught=$((uncaught + 1))
+  fi
+}
+
+run_mutation no-trim ".map((s) => s.trim())" ".map((s) => s)"
+run_mutation no-filter-empty ".map((s) => s.trim()).filter(Boolean)" ".map((s) => s.trim())"
+run_mutation group-policy-open "channelIds.length > 0 ? 'allowlist' : 'disabled'" "'allowlist'"
+run_mutation no-require-mention "{ enabled: true, requireMention: true }" "{ enabled: true }"
+run_mutation no-allow-from-guard "if (allowFrom.length === 0) {" "if (false) {"
+run_mutation regex-accepts-anything "/^[CG][A-Z0-9]+\$/.test(id) === false" "false"
+# Anchored on the two adjacent Slack lines: the bare dmPolicy line also appears
+# in the Telegram block above, which is not under test here.
+run_mutation dm-policy-pairing "      dmPolicy: 'allowlist',
+      allowFrom," "      dmPolicy: 'pairing',
+      allowFrom,"
+run_mutation no-startup-log "    console.log(" "    const unused = ("
+# Same trap: Telegram's groups: { '*': { requireMention: true } } comes first.
+run_mutation require-mention-false "{ enabled: true, requireMention: true }" "{ enabled: true, requireMention: false }"
+run_mutation not-enabled "      enabled: true,
+      mode: 'socket'," "      enabled: false,
+      mode: 'socket',"
+run_mutation logs-the-ids "' allowFrom=' + allowFrom.length" "' allowFrom=' + allowFrom.join('+')"
+run_mutation logs-the-channel-ids "' channels=' + channelIds.length" "' channels=' + channelIds.join('+')"
+# Pure insertion: `channels` is an ES6 shorthand property backed by a const, so
+# renaming it here would mutate a variable reference and crash the block with a
+# ReferenceError instead of producing the Telegram-shaped config this is about.
+# A crash is caught by every case; that would prove nothing about A2d.
+run_mutation telegram-groups-shape "      groupPolicy: channelIds.length > 0 ? 'allowlist' : 'disabled',
+      channels" "      groups: { '*': { requireMention: true } },
+      groupPolicy: channelIds.length > 0 ? 'allowlist' : 'disabled',
+      channels" 
+run_mutation writes-before-validating "    const allowFrom = entries(process.env.SLACK_ALLOW_FROM || '');" "    fs.writeFileSync(configPath, JSON.stringify(Object.assign(config, { channels: Object.assign(config.channels || {}, { slack: { enabled: true } }) }), null, 2));
+    const allowFrom = entries(process.env.SLACK_ALLOW_FROM || '');"
+run_mutation no-empty-channels-check "if (requested !== '' && channelIds.length === 0) {" "if (false) {"
+run_mutation no-mode "      mode: 'socket'," "" 
+run_mutation exit-zero-on-failure "process.exit(1);" "process.exit(0);"
+
+printf '\n'
+if [ "$uncaught" -eq 0 ]; then
+  printf 'Every mutation was caught.\n'
+  exit 0
+fi
+printf '%d mutation(s) survived.\n' "$uncaught" >&2
+exit 1

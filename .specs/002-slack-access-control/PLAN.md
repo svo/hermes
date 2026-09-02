@@ -50,9 +50,10 @@ Owned region: `:248-262`.
 None.
 
 ### Image & CI
-- `infrastructure/slack-app-manifest.json` — pending Open Question 2, reduce `bot_events`
-  and trim unused write scopes (`pins:write`, `reactions:write`, `files:write`) to match
-  actual usage.
+None. Open Question 2 was answered against upstream before the edit was made, and the
+answer was not to make it: `pins:write`, `reactions:write` and `files:write` are consumed by
+action groups that default to enabled, and `message.channels` / `message.groups` are what
+carry a mention-gated conversation past its first turn. See SPEC § Open Questions 2.
 
 ### Documentation
 - `README.md` environment table — add `SLACK_ALLOW_FROM` (required with `SLACK_BOT_TOKEN`)
@@ -74,18 +75,24 @@ None.
 
 ## Task List
 
-1. [ ] runtime-config: add `SLACK_ALLOW_FROM` parsing with `dmPolicy: 'allowlist'`,
+1. [x] runtime-config: add `SLACK_ALLOW_FROM` parsing with `dmPolicy: 'allowlist'`,
        trimmed and filtered, guarded against undefined.
-2. [ ] runtime-config: add `SLACK_ALLOW_CHANNELS` parsing, ID-format validation with a
+2. [x] runtime-config: add `SLACK_ALLOW_CHANNELS` parsing, ID-format validation with a
        named error, `groupPolicy`, and the `channels` map.
-3. [ ] runtime-config: default `groupPolicy` to `'disabled'` when no channels are supplied.
-4. [ ] tests: container smoke matrix — token without allowlist (expect non-zero exit and the
+3. [x] runtime-config: default `groupPolicy` to `'disabled'` when no channels are supplied.
+4. [x] tests: container smoke matrix — token without allowlist (expect non-zero exit and the
        named error), token with allowlist (expect the four config keys), channel name
-       supplied (expect the ID-first error).
-5. [ ] tests: assert `openclaw config validate` exits zero after each successful case.
-6. [ ] docs: README environment table, ID-retrieval steps, updated `docker run` example.
-7. [ ] manifest: reduce `bot_events` and write scopes — **only after** Open Question 2 is
-       answered, since it requires reinstalling the Slack app.
+       supplied (expect the ID-first error). Run against the real `entrypoint.sh` with a
+       stub `openclaw` rather than a container; see `tests/README.md` for why, and for what
+       that leaves as a manual step.
+5. [x] tests: assert `openclaw config validate` exits zero after each successful case.
+6. [x] docs: README environment table, ID-retrieval steps, updated `docker run` example,
+       access-control section, and the diagnosis path for a denied DM.
+7. [ ] manifest: **not done, and not to be done in this shape.** Open Question 2 was
+       answered against upstream and the reduction as specified would break mention-gated
+       group use and default-on action groups. Reopened as a separate piece of work with a
+       mandatory order — gate `channels.slack.actions` in config, deploy, verify on a test
+       workspace, then reinstall with the smaller manifest.
 
 ## Testing Strategy
 
@@ -109,10 +116,20 @@ and is a manual acceptance step, not automated. Record the result in the PR.
 
 ## Operability Plan
 
-- One startup log line per channel: `slack: dmPolicy=allowlist allowFrom=2 groupPolicy=disabled`.
-  Counts only — never token values, never the IDs themselves.
+- One startup log line per channel, counts only — never token values, never the IDs
+  themselves. As shipped it carries the channel count too, so `groupPolicy=allowlist` says
+  how many:
+  ```
+  slack: dmPolicy=allowlist allowFrom=2 groupPolicy=disabled channels=0
+  ```
+  A case asserts the line, and a second asserts that neither token nor either ID appears
+  anywhere in the run's output.
 - Document the log line emitted when a DM is denied, so a locked-out user is diagnosable
-  rather than mysterious.
+  rather than mysterious. **Downgraded to grep candidates.** `DM_POLICY_NOT_ALLOWLISTED` and
+  `dmPolicy=allowlist (not allowlisted)` are doc-verified as the values the policy layer
+  produces, but nothing upstream documents them being logged, at what level, or with the
+  sender's ID attached — and ingress diagnostics are documented as redacted. The README
+  gives the grep and a config-first check instead of promising a line that may not exist.
 
 ## Risks and Mitigations
 
@@ -127,4 +144,8 @@ and is a manual acceptance step, not automated. Record the result in the PR.
   with a message naming the ID-first requirement.
 - **Risk:** manifest changes require an app reinstall and can interrupt a working
   deployment. → **Mitigation:** task 7 is sequenced last and gated on an explicit decision.
+  That gate did its job: the decision went against the reduction, because verifying it first
+  showed it would break mention-gated group use and three default-on action groups. The
+  manifest is untouched and A2f is mitigated at the policy layer instead — `groupPolicy` is
+  `disabled` unless channels are listed, so ambient messages arrive and reach no agent turn.
 - **Risk:** IDs are logged and leak workspace membership. → **Mitigation:** log counts only.

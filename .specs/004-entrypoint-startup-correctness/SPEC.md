@@ -131,3 +131,6 @@ New invariant: **no write of any kind occurs before validation passes.**
    explicit variable?
 3. **Channel teardown.** Removing a channel's token leaves `enabled: true` and a stale token
    in the persisted config. Fix here, or as its own spec? Same issue for both channels.
+   **002 deferred its half of this here** (002 § Open Questions 3), on the grounds that one
+   mechanism should cover both channels — fixing Slack alone would leave Telegram
+   asymmetric. So this question now carries both.
