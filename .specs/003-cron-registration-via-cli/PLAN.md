@@ -39,8 +39,12 @@ Owned region: `:264-285` (deleted) and the insertion point before `:287`.
 
 - Delete the entire jobs.json `node -e` block, including the `catch {}` that could wipe
   sibling jobs (B1c).
-- Add `wait_for_gateway()` — polls `openclaw gateway status` on a fixed interval with a
-  bounded attempt count. No unbounded loops.
+- Add `wait_for_gateway()` — polls on a fixed interval with a bounded attempt count. No
+  unbounded loops. **Implemented against `openclaw gateway health --port`, not
+  `openclaw gateway status`:** the gateway listens on 3000, `status` has no documented
+  `--port` and would resolve the default, and `health` is the documented port-targeted
+  liveness-and-readiness probe. A `timeout` bounds a probe that connects and then hangs,
+  which a retry budget alone would not.
 - Add `register_briefing()`:
   1. `openclaw automations list` → if a job named `morning-briefing` exists, log and return.
   2. Otherwise `openclaw automations create "$HERMES_CRON_SCHEDULE" "$BRIEFING_PROMPT"
@@ -69,6 +73,11 @@ Owned region: `:264-285` (deleted) and the insertion point before `:287`.
 |---|---|
 | `HERMES_CRON_SCHEDULE`, `HERMES_TIMEZONE` (required — enforced by 004) | automation schedule and `--tz` |
 | `HERMES_BRIEFING_CHANNEL` + `HERMES_BRIEFING_TO` (optional, both-or-neither) | `--announce --channel --to` |
+| `HERMES_CRON_READY_ATTEMPTS`, `HERMES_CRON_REGISTER_ATTEMPTS` (optional) | the two retry budgets, so a slow host can raise them rather than lose the briefing |
+| `HERMES_CRON_CALL_TIMEOUT` (optional) | the per-call bound, so a stalled gateway cannot hold the registrar open forever |
+
+All three are rejected at startup unless they are positive whole numbers. A value bash cannot
+compare would skip every loop iteration and give up immediately, blaming the gateway.
 
 Both-or-neither: supplying one without the other is a configuration error and should fail
 the same way 002's partial Slack config does.
@@ -78,18 +87,36 @@ the same way 002's partial Slack config does.
 1. [ ] runtime-config: **verify the premise first** — start the container as-is and run
        `openclaw cron list`. Record the output in the commit message. If `morning-briefing`
        is present, stop and revise this spec.
+
+       **Not done — could not be run.** There is no `hermes` container and no `openclaw`
+       binary on the host this was implemented on. The command is carried into SPEC Open
+       Question 2 for whoever has a deployment, and the change proceeded on the two findings
+       that hold without it: B1b and B1c are internal contradictions, true whatever upstream
+       does. Even if the premise turns out to be wrong and the job does register today, the
+       `catch {}` at the old `:340` still silently discards a corrupt store and the
+       unconditional rewrite at `:354` still drops every sibling job.
 2. [ ] runtime-config: verify `operator.admin` from inside the container (SPEC Open
        Question 2). If it fails, add a credentials task before continuing.
-3. [ ] runtime-config: extract `BRIEFING_PROMPT` to a single variable.
-4. [ ] runtime-config: add `wait_for_gateway()` with bounded retries.
-5. [ ] runtime-config: add `register_briefing()` with list-before-create idempotency.
-6. [ ] runtime-config: wire the background registrar before `exec`; delete the jobs.json
+
+       **Not done — same reason,** and the documentation points the wrong way rather than
+       being silent; see SPEC Open Question 2. The registrar is written to be correct either
+       way: any non-zero exit is a failure, the underlying message is logged verbatim, and
+       the attempts are bounded. If a deployment shows the mutation refused, the credentials
+       task lands then — and it touches the bind flags 007 owns.
+3. [x] runtime-config: extract `BRIEFING_PROMPT` to a single variable.
+4. [x] runtime-config: add `wait_for_gateway()` with bounded retries.
+5. [x] runtime-config: add `register_briefing()` with list-before-create idempotency.
+6. [x] runtime-config: wire the background registrar before `exec`; delete the jobs.json
        block.
-7. [ ] instructions: reduce the `AGENTS.md` cron section to a pointer.
-8. [ ] tests: restart-idempotency check — start five times, assert exactly one job.
-9. [ ] tests: failure-path check — make registration fail, assert the gateway still starts
+7. [x] instructions: reduce the `AGENTS.md` cron section to a pointer.
+8. [x] tests: restart-idempotency check — start five times, assert exactly one job.
+9. [x] tests: failure-path check — make registration fail, assert the gateway still starts
        and the error is logged.
-10. [ ] docs: README verification subsection and the two new environment rows.
+10. [x] docs: README verification subsection and the new environment rows — four, not the
+        two this task anticipated: the two delivery variables plus the two retry budgets.
+
+Tasks 3–10 are verified by `tests/`, which runs the real `entrypoint.sh` against a stub
+`openclaw`; `tests/README.md` says what that can and cannot establish.
 
 ## Testing Strategy
 
@@ -109,10 +136,18 @@ No test framework exists. Verification is behavioural, through the CLI the fix n
 
 ## Operability Plan
 
-- `cron: registered morning-briefing <id>` on success.
+As implemented, with the parenthetical each line actually carries — a log assertion written
+from this list rather than from the code would otherwise never match:
+
+- `cron: waiting for gateway (up to <n> attempts)` once, when the registrar starts.
+- `cron: registered morning-briefing <id>` on success, or `… <id unavailable>` when the
+  listing carried no id this recognised.
 - `cron: morning-briefing already registered (<id>)` when skipped.
-- `cron: registration attempt <n>/<max> failed: <error>` per failure.
-- `cron: giving up after <max> attempts; briefing not scheduled` on exhaustion.
+- `cron: registration attempt <n>/<max> failed: <error>` per failure, carrying the captured
+  output of the failing call verbatim.
+- `cron: giving up after <max> attempts; briefing not scheduled (<why>)` on exhaustion. The
+  reason is required: the spec asks it to log *why*, and "the gateway never became ready" and
+  "the create was refused" call for different operator responses.
 - Operator: `openclaw cron list`, `openclaw cron runs --id <id> --limit 50`.
 
 ## Risks and Mitigations

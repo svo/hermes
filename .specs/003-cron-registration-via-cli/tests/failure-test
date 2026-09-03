@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+#
+# The rejected and the failing paths: what the operator sees when the briefing
+# cannot be registered, and that the gateway starts anyway.
+#
+# The asymmetry is the point. A partial delivery target is a configuration
+# error and stops the container before it starts. A registration that fails
+# at runtime is logged and left — chat access matters more than the briefing.
+#
+# One behaviour per case, named should_<behaviour>_when_<condition>.
+
+set -uo pipefail
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+BRIEFING='morning-briefing'
+
+case_start "should_refuse_to_start_when_a_briefing_channel_has_no_target"
+run_entrypoint HERMES_BRIEFING_CHANNEL=slack
+assert_equals "exit status" "1" "$RUN_STATUS"
+assert_contains "names the variable" "$RUN_ERR" "HERMES_BRIEFING_CHANNEL is set but HERMES_BRIEFING_TO is not"
+assert_contains "names the consequence" "$RUN_ERR" "delivers nothing"
+assert_contains "names the fix" "$RUN_ERR" "Set both, or neither"
+if gateway_started; then
+  fail "the gateway should not have started"
+fi
+case_end
+
+case_start "should_refuse_to_start_when_a_briefing_target_has_no_channel"
+run_entrypoint HERMES_BRIEFING_TO='channel:C0123ABCDE'
+assert_equals "exit status" "1" "$RUN_STATUS"
+assert_contains "names the variable" "$RUN_ERR" "HERMES_BRIEFING_TO is set but HERMES_BRIEFING_CHANNEL is not"
+assert_contains "names the consequence" "$RUN_ERR" "cannot be routed"
+assert_contains "names the fix" "$RUN_ERR" "Set both, or neither"
+if gateway_started; then
+  fail "the gateway should not have started"
+fi
+case_end
+
+case_start "should_register_nothing_when_the_briefing_target_is_partial"
+run_entrypoint HERMES_BRIEFING_CHANNEL=slack
+assert_equals "briefings" "0" "$(store_count_named "$BRIEFING")"
+assert_equals "create calls" "0" "$(stub_call_count create)"
+case_end
+
+case_start "should_start_the_gateway_when_registration_fails"
+run_entrypoint OPENCLAW_STUB_CREATE_FAILS=yes
+assert_equals "entrypoint exit status" "0" "$RUN_STATUS"
+if ! gateway_started; then
+  fail "the gateway should have started even though registration failed"
+fi
+case_end
+
+case_start "should_log_the_underlying_error_when_registration_fails"
+run_entrypoint OPENCLAW_STUB_CREATE_FAILS=yes \
+  OPENCLAW_STUB_CREATE_ERROR='gateway refused: operator.admin required'
+assert_contains "the attempt is numbered" "$RUN_ERR" "cron: registration attempt 1/2 failed:"
+assert_contains "the underlying message survives" "$RUN_ERR" "operator.admin required"
+case_end
+
+case_start "should_give_up_after_the_attempt_budget_when_registration_keeps_failing"
+run_entrypoint OPENCLAW_STUB_CREATE_FAILS=yes
+assert_contains "first attempt" "$RUN_ERR" "cron: registration attempt 1/2 failed:"
+assert_contains "last attempt" "$RUN_ERR" "cron: registration attempt 2/2 failed:"
+assert_not_contains "no attempt beyond the budget" "$RUN_ERR" "attempt 3/2"
+assert_contains "gives up" "$RUN_ERR" "cron: giving up after 2 attempts; briefing not scheduled"
+assert_equals "create calls" "2" "$(stub_call_count create)"
+case_end
+
+case_start "should_give_up_after_the_attempt_budget_when_the_gateway_never_becomes_ready"
+run_entrypoint OPENCLAW_STUB_GATEWAY_READY=no
+assert_contains "says how long it waited" "$RUN_OUT" "cron: waiting for gateway (up to 3 attempts)"
+assert_contains "gives up" "$RUN_ERR" "cron: giving up after 3 attempts; briefing not scheduled"
+assert_contains "says why" "$RUN_ERR" "gateway never became ready"
+assert_equals "create calls" "0" "$(stub_call_count create)"
+case_end
+
+case_start "should_start_the_gateway_when_the_gateway_never_becomes_ready"
+run_entrypoint OPENCLAW_STUB_GATEWAY_READY=no
+assert_equals "entrypoint exit status" "0" "$RUN_STATUS"
+if ! gateway_started; then
+  fail "the gateway should have started"
+fi
+case_end
+
+case_start "should_report_a_failure_when_create_succeeds_without_storing_the_job"
+# Success is the job appearing in the listing, not what `create` printed —
+# nothing upstream documents create's output, so it is not trusted.
+run_entrypoint OPENCLAW_STUB_CREATE_SILENT=yes
+assert_contains "the discrepancy is named" "$RUN_ERR" "create reported success but no automation named ${BRIEFING} is listed"
+assert_not_contains "no success is claimed" "$(run_log)" "cron: registered"
+assert_contains "gives up" "$RUN_ERR" "cron: giving up after 2 attempts"
+case_end
+
+case_start "should_report_a_failure_when_the_automation_list_cannot_be_read"
+run_entrypoint OPENCLAW_STUB_LIST_FAILS=yes
+assert_contains "names the failing step" "$RUN_ERR" "could not list automations"
+assert_contains "the underlying message survives" "$RUN_ERR" "operator.admin required"
+assert_contains "gives up" "$RUN_ERR" "cron: giving up after 2 attempts"
+case_end
+
+case_start "should_not_create_a_job_when_the_automation_list_cannot_be_read"
+# Creating blind when the store cannot be read is how duplicates accumulate.
+run_entrypoint OPENCLAW_STUB_LIST_FAILS=yes
+assert_equals "create calls" "0" "$(stub_call_count create)"
+case_end
+
+case_start "should_start_the_gateway_when_the_automation_list_cannot_be_read"
+run_entrypoint OPENCLAW_STUB_LIST_FAILS=yes
+assert_equals "entrypoint exit status" "0" "$RUN_STATUS"
+if ! gateway_started; then
+  fail "the gateway should have started"
+fi
+case_end
+
+case_start "should_create_at_most_once_when_the_listing_never_shows_the_job"
+# A create that reports success and cannot be seen afterwards is the one shape
+# where retrying the create is catastrophic: it turns one unverifiable write
+# into one automation per attempt, and N per restart forever.
+run_entrypoint OPENCLAW_STUB_CREATE_SILENT=yes
+assert_equals "create calls" "1" "$(stub_call_count create)"
+assert_contains "the discrepancy is still reported" "$RUN_ERR" "create reported success but no automation named ${BRIEFING} is listed"
+assert_contains "and it still gives up" "$RUN_ERR" "cron: giving up after 2 attempts"
+case_end
+
+case_start "should_create_at_most_once_when_the_store_is_slow_to_show_the_job"
+# The same guard must not cost the success case: a store that reflects the
+# write on the second look still registers exactly one job.
+store="$(new_store)"
+run_entrypoint --store "$store"
+assert_equals "briefings" "1" "$(store_count_named "$BRIEFING")"
+assert_equals "create calls" "1" "$(stub_call_count create)"
+case_end
+
+case_start "should_retry_the_create_when_the_create_itself_failed"
+# The guard is on a create that SUCCEEDED. One that failed has written nothing,
+# so retrying it is the whole point of having a budget.
+run_entrypoint OPENCLAW_STUB_CREATE_FAILS=yes
+assert_equals "create calls" "2" "$(stub_call_count create)"
+case_end
+
+case_start "should_refuse_to_start_when_a_retry_budget_is_not_a_number"
+run_entrypoint HERMES_CRON_READY_ATTEMPTS=fast
+assert_equals "exit status" "1" "$RUN_STATUS"
+assert_contains "names the variable and the value" "$RUN_ERR" "HERMES_CRON_READY_ATTEMPTS must be a positive whole number, not 'fast'"
+if gateway_started; then
+  fail "the gateway should not have started"
+fi
+case_end
+
+case_start "should_refuse_to_start_when_a_retry_budget_is_zero"
+# Zero would skip every iteration and give up immediately, blaming the gateway.
+run_entrypoint HERMES_CRON_REGISTER_ATTEMPTS=0
+assert_equals "exit status" "1" "$RUN_STATUS"
+assert_contains "names the variable" "$RUN_ERR" "HERMES_CRON_REGISTER_ATTEMPTS must be a positive whole number"
+case_end
+
+case_start "should_give_up_when_the_gateway_accepts_the_connection_and_never_answers"
+# Retries bound the number of attempts. Only a timeout bounds an attempt that
+# connects and then hangs — without one the registrar waits forever and emits
+# none of the lines this block promises, which is the silence the spec exists
+# to eliminate. This case takes as long as one probe timeout.
+run_entrypoint OPENCLAW_STUB_HANG=health HERMES_CRON_READY_ATTEMPTS=1
+assert_contains "gives up" "$RUN_ERR" "cron: giving up after 1 attempts; briefing not scheduled"
+assert_contains "says why" "$RUN_ERR" "gateway never became ready"
+assert_equals "create calls" "0" "$(stub_call_count create)"
+if ! gateway_started; then
+  fail "the gateway should have started"
+fi
+case_end
+
+case_start "should_keep_a_multi_line_error_on_one_log_line"
+# README tells the operator to read this with `docker logs hermes | grep '^cron:'`.
+# A captured error is a whole stream, so its continuation lines would reach the
+# log without the prefix and that grep would show the first line of a failure
+# and hide the rest.
+run_entrypoint OPENCLAW_STUB_CREATE_FAILS=yes \
+  OPENCLAW_STUB_CREATE_ERROR='refused: operator.admin required
+  hint: check gateway auth
+  see: https://example.invalid/auth'
+assert_contains "the whole message is on the attempt line" "$RUN_ERR" \
+  "cron: registration attempt 1/2 failed: stub-openclaw: refused: operator.admin required hint: check gateway auth see: https://example.invalid/auth"
+assert_equals "no line reached the log without the prefix" "0" \
+  "$(printf '%s\n' "$RUN_ERR" | grep -vc '^cron: ' || true)"
+case_end
+
+report_totals "failure-test"

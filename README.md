@@ -81,6 +81,11 @@ On first run, the entrypoint automatically configures OpenClaw via non-interacti
 | `HERMES_QUIET_HOURS_START` | Yes | Quiet hours start time (e.g. `20:00`) |
 | `HERMES_QUIET_HOURS_END` | Yes | Quiet hours end time (e.g. `08:00`) |
 | `HERMES_FIELD_MAX_LEN` | No | Maximum length of an untrusted email or calendar field in `hermes-check` output (default `200`) |
+| `HERMES_BRIEFING_CHANNEL` | With `HERMES_BRIEFING_TO` | Channel the morning briefing is announced to (e.g. `slack`, `telegram`). Without it the briefing relies on implicit routing |
+| `HERMES_BRIEFING_TO` | With `HERMES_BRIEFING_CHANNEL` | Where in that channel to announce it. The format is channel-specific — Slack takes `channel:C0123ABCDE`, Telegram a bare chat id such as `-1001234567890` |
+| `HERMES_CRON_READY_ATTEMPTS` | No | How many times to poll for gateway readiness before giving up on registering the briefing (default `60`, two seconds apart) |
+| `HERMES_CRON_REGISTER_ATTEMPTS` | No | How many registration attempts before giving up (default `5`, three seconds apart) |
+| `HERMES_CRON_CALL_TIMEOUT` | No | Seconds any single `openclaw` call the registrar makes may take before it is abandoned (default `30`; a create gets twice that) |
 
 ## Telegram Integration
 
@@ -273,18 +278,105 @@ Tokens are persisted in the volume so this only needs to be done once.
 
 ## Workspace Instructions
 
-On startup, the entrypoint generates OpenClaw workspace files at `~/.openclaw/workspace/` using the `HERMES_*` environment variables and sets `agent.skipBootstrap: true` so OpenClaw uses the pre-seeded files directly:
+On startup, the entrypoint generates OpenClaw workspace files at `~/.openclaw/workspace/` using the `HERMES_*` environment variables and sets `agents.defaults.skipBootstrap: true` so OpenClaw uses the pre-seeded files directly:
 
 | File | Content |
 |---|---|
 | `IDENTITY.md` | Name, vibe, and emoji |
 | `SOUL.md` | Persona, tone, and boundaries |
-| `AGENTS.md` | Operating instructions — role, capabilities, monitoring, schedule, and morning briefing format |
+| `AGENTS.md` | Operating instructions — role, capabilities, monitoring, and document workflows |
 | `USER.md` | User name, timezone, and locale |
 
 These files are injected into the agent's context at the start of every session, so Hermes has detailed operating guidance available immediately without needing an initial brief.
 
-All `HERMES_*` variables are required — the container will fail on startup if any are missing. This makes the configuration explicit and avoids hidden assumptions about identity, tone, or scheduling.
+Every `HERMES_*` variable marked required in the table above must be set — the container fails on startup if any is missing. This makes the configuration explicit and avoids hidden assumptions about identity, tone, or scheduling.
+
+## Morning Briefing
+
+At `HERMES_CRON_SCHEDULE`, in `HERMES_TIMEZONE`, Hermes runs `hermes-check`, reads the day's
+calendar and the overnight inbox, and sends one combined briefing.
+
+It is an OpenClaw **automation**, registered through the CLI. Cron data lives in the
+gateway's own store, so there is nothing hand-editable to inspect — use the CLI:
+
+```bash
+docker exec hermes openclaw cron list --all
+```
+
+Exactly one job named `morning-briefing` should be listed. `--all` matters: without it the
+listing shows only *enabled* jobs, so a briefing someone disabled reads as missing and sends
+you looking for a registration failure that never happened. The registrar passes `--all` for
+the same reason — otherwise it would register a second copy alongside the disabled one. Take its id and you can trigger it
+on demand, or read what happened the last few times it fired:
+
+```bash
+docker exec hermes openclaw cron run <jobId>
+docker exec hermes openclaw cron runs --id <jobId> --limit 50
+```
+
+(`openclaw cron` is an alias for `openclaw automations`; either spelling works.)
+
+### Registration happens after the gateway starts
+
+Automation mutations are served by the gateway scheduler and require the `operator.admin`
+permission, so the briefing cannot be registered before the gateway is up. The entrypoint
+forks a registrar just before `exec`ing the gateway: it waits for readiness, checks whether
+the job already exists, creates it if it does not, logs the outcome, and exits. The gateway
+remains PID 1.
+
+Registration is asymmetric on purpose. **A failure to register never stops the gateway** —
+chat access matters more than the briefing, and a container that refuses to start because a
+briefing could not be scheduled helps nobody. So the failure has to be visible instead:
+
+```bash
+docker logs hermes | grep '^cron:'
+```
+
+| Line | Meaning |
+|---|---|
+| `cron: waiting for gateway (up to <n> attempts)` | The registrar is up, polling for readiness |
+| `cron: registered morning-briefing <id>` | Created on this start |
+| `cron: morning-briefing already registered (<id>)` | Found; nothing was created |
+| `cron: registration attempt <n>/<max> failed: <error>` | One attempt failed; the underlying message follows |
+| `cron: giving up after <n> attempts; briefing not scheduled (<why>)` | Bounded retries exhausted; **there is no briefing** |
+
+All three budgets must be positive whole numbers. The container refuses to start on anything
+else rather than accept it: a value bash cannot compare skips every iteration, and the
+give-up line would then blame the gateway for a typo.
+
+Retries bound how many attempts are made; `HERMES_CRON_CALL_TIMEOUT` bounds each one. Both are
+needed — a gateway that accepts the connection and then stalls would otherwise hold the
+registrar open forever and emit none of the lines above.
+
+The job is looked up by name before it is created, so restarts do not accumulate duplicates.
+That holds for a single container against its own volume, which is what this image is for;
+two containers sharing one volume and racing to register are not defended against.
+
+### Delivery target
+
+Without `HERMES_BRIEFING_CHANNEL` and `HERMES_BRIEFING_TO`, the briefing relies on implicit
+routing — on a fresh container there may be no conversation for it to land in. Setting both
+gives it an explicit destination:
+
+```bash
+  -e HERMES_BRIEFING_CHANNEL="slack" \
+  -e HERMES_BRIEFING_TO="channel:C0123ABCDE" \
+```
+
+```bash
+  -e HERMES_BRIEFING_CHANNEL="telegram" \
+  -e HERMES_BRIEFING_TO="-1001234567890" \
+```
+
+The target's format belongs to the channel, so it is passed through exactly as given. Set both
+or neither: a channel with no target registers cleanly and then delivers nothing, so the
+container refuses to start rather than fail silently later.
+
+### A note on `~/.openclaw/cron/jobs.json`
+
+Earlier versions of this image pre-seeded that file. It was never a supported registration
+path, and nothing writes it now. If your config volume still has one, it is inert — you can
+remove it, and the image will not recreate it.
 
 ## Untrusted Content Boundary
 
@@ -323,6 +415,11 @@ prompt names these markers verbatim and instructs the agent never to follow, exe
 on fenced content, and to report anything instruction-shaped instead of doing it. This
 matters most during heartbeats, which run with `lightContext: true` and so do not load
 `SOUL.md` or `AGENTS.md`.
+
+The morning briefing is the second reader of that output, and it is exposed the same way: it
+runs `hermes-check` in an isolated session, which also does not load `SOUL.md` or `AGENTS.md`.
+Its prompt therefore carries the same fencing contract, and that prompt is the one place the
+briefing instructions exist — see [Morning Briefing](#morning-briefing).
 
 Every run reports `SANITIZED: <n>` in its summary — the number of fields modified. It does
 not raise `ACTION_NEEDED` on its own, because any subject containing an angle bracket trips

@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+#
+# Fake `openclaw`, standing in for the subcommands the entrypoint and these
+# cases use. No network, no credentials, no image.
+#
+#   onboard             writes the minimal config real onboarding leaves behind
+#   gateway             records that it was reached, then exits 0 instead of serving
+#   gateway health      the readiness probe the registrar polls
+#   automations list    reads the stub's automation store
+#   automations create  appends to it, rejecting flags it does not know
+#
+# The store is a JSON array in $OPENCLAW_STUB_STORE/jobs.json, so a case can
+# point several runs at the same store and ask what five restarts left behind.
+#
+# `create` rejecting an unknown flag is deliberate. The upstream docs do not
+# publish a complete flag list for it, so the registrar must not invent one —
+# a speculative --json or --deliver has to fail here the way it would fail
+# against the real binary, rather than being quietly accepted.
+#
+# Behaviour switches, all defaulting to the happy path:
+#
+#   OPENCLAW_STUB_GATEWAY_READY  no    -> `gateway health` never succeeds
+#   OPENCLAW_STUB_CREATE_FAILS   yes   -> `automations create` exits 1
+#   OPENCLAW_STUB_CREATE_ERROR   text  -> what it says when it does
+#   OPENCLAW_STUB_CREATE_SILENT  yes   -> create exits 0 but stores nothing
+#   OPENCLAW_STUB_LIST_JSON      no    -> `list --json` is rejected as unknown
+#   OPENCLAW_STUB_LIST_SHAPE     wrapped|garbage|renamed -> a different --json envelope
+#   OPENCLAW_STUB_LIST_FAILS     yes   -> `list` exits 1 whatever the flags
+#   OPENCLAW_STUB_HANG           health -> that call blocks instead of answering
+
+set -uo pipefail
+
+config="${HOME}/.openclaw/openclaw.json"
+store="${OPENCLAW_STUB_STORE:-}"
+markers="${OPENCLAW_STUB_MARKERS:-}"
+
+usage() {
+  printf 'stub-openclaw: unsupported invocation: %s\n' "$*" >&2
+  exit 64
+}
+
+# argv as a JSON array, so an argument holding newlines still records as one
+# line and one element.
+argv_json() {
+  printf '%s\0' "$@" | node -e "
+    let raw = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => { raw += chunk; });
+    process.stdin.on('end', () => {
+      const parts = raw.split('\0');
+      parts.pop();
+      process.stdout.write(JSON.stringify(parts));
+    });
+  "
+}
+
+record() {
+  # record <verb> <json-argv>
+  [ -n "$markers" ] || return 0
+  printf '%s\n' "$2" >> "${markers}/calls-$1"
+}
+
+case "${1:-}" in
+  onboard)
+    mkdir -p "$(dirname "$config")"
+    cat > "$config" <<'ONBOARDED'
+{
+  "gateway": {
+    "port": 3000,
+    "bind": "lan"
+  },
+  "agents": {
+    "defaults": {}
+  },
+  "tools": {},
+  "channels": {},
+  "env": {}
+}
+ONBOARDED
+    exit 0
+    ;;
+
+  gateway)
+    case "${2:-}" in
+      health)
+        if [ -n "$markers" ]; then
+          printf '%s\n' "$*" >> "${markers}/calls-health"
+        fi
+        # A gateway that accepts the connection and then never answers. Only a
+        # timeout bounds this; a retry budget alone would wait forever.
+        [ "${OPENCLAW_STUB_HANG:-no}" = "health" ] && exec sleep 3600
+        [ "${OPENCLAW_STUB_GATEWAY_READY:-yes}" = "yes" ] || exit 1
+        printf 'ok\n'
+        exit 0
+        ;;
+      *)
+        # `exec openclaw gateway` is the last line of the entrypoint, so this
+        # marker is how a case asserts that a rejected configuration never got
+        # that far — and that a failed registration did not stop it.
+        if [ -n "$markers" ]; then
+          : > "${markers}/gateway-started"
+        fi
+        exit 0
+        ;;
+    esac
+    ;;
+
+  automations | cron)
+    verb="${2:-}"
+    shift 2 2>/dev/null || usage "$@"
+    argv="$(argv_json "$@")"
+    record "$verb" "$argv"
+
+    case "$verb" in
+      list)
+        [ "${OPENCLAW_STUB_LIST_FAILS:-no}" = "no" ] || {
+          printf 'stub-openclaw: gateway refused: operator.admin required\n' >&2
+          exit 1
+        }
+        STUB_ARGV="$argv" STUB_STORE="$store" \
+        STUB_LIST_JSON="${OPENCLAW_STUB_LIST_JSON:-yes}" \
+        STUB_LIST_SHAPE="${OPENCLAW_STUB_LIST_SHAPE:-array}" node -e "
+          const fs = require('fs');
+          const argv = JSON.parse(process.env.STUB_ARGV);
+
+          let all = false;
+          let json = false;
+          for (const arg of argv) {
+            if (arg === '--all') { all = true; continue; }
+            if (arg === '--json') {
+              if (process.env.STUB_LIST_JSON !== 'yes') {
+                console.error('stub-openclaw: unknown option --json');
+                process.exit(64);
+              }
+              json = true;
+              continue;
+            }
+            console.error('stub-openclaw: unknown list flag: ' + arg);
+            process.exit(64);
+          }
+
+          const stored = JSON.parse(fs.readFileSync(process.env.STUB_STORE + '/jobs.json', 'utf8'));
+          const jobs = all ? stored : stored.filter((job) => job.enabled !== false);
+
+          if (json === false) {
+            for (const job of jobs) console.log(job.id + '  ' + job.name + '  ' + job.schedule);
+            process.exit(0);
+          }
+          if (process.env.STUB_LIST_SHAPE === 'garbage') {
+            process.stdout.write('not json at all\n');
+            process.exit(0);
+          }
+          if (process.env.STUB_LIST_SHAPE === 'wrapped') {
+            console.log(JSON.stringify({ ok: true, jobs }, null, 2));
+            process.exit(0);
+          }
+          // Valid JSON whose key names are none of the ones the registrar
+          // guesses at. The plain listing below still prints the name, so this
+          // is the case where the --json path must not be the last word.
+          if (process.env.STUB_LIST_SHAPE === 'renamed') {
+            console.log(JSON.stringify(
+              jobs.map((job) => ({ automationId: job.id, automationName: job.name })),
+              null,
+              2
+            ));
+            process.exit(0);
+          }
+          console.log(JSON.stringify(jobs, null, 2));
+        "
+        exit $?
+        ;;
+
+      create)
+        if [ "${OPENCLAW_STUB_CREATE_FAILS:-no}" = "yes" ]; then
+          printf 'stub-openclaw: %s\n' \
+            "${OPENCLAW_STUB_CREATE_ERROR:-gateway refused: operator.admin required}" >&2
+          exit 1
+        fi
+        STUB_ARGV="$argv" STUB_STORE="$store" \
+        STUB_CREATE_SILENT="${OPENCLAW_STUB_CREATE_SILENT:-no}" node -e "
+          const fs = require('fs');
+          const argv = JSON.parse(process.env.STUB_ARGV);
+
+          const job = {
+            name: null, tz: null, session: null,
+            announce: false, channel: null, to: null
+          };
+          const positional = [];
+          const takesValue = {
+            '--name': 'name', '--tz': 'tz', '--session': 'session',
+            '--channel': 'channel', '--to': 'to'
+          };
+
+          for (let i = 0; i < argv.length; i += 1) {
+            const arg = argv[i];
+            if (arg === '--announce') { job.announce = true; continue; }
+            if (Object.prototype.hasOwnProperty.call(takesValue, arg)) {
+              i += 1;
+              if (i >= argv.length) {
+                console.error('stub-openclaw: ' + arg + ' needs a value');
+                process.exit(64);
+              }
+              job[takesValue[arg]] = argv[i];
+              continue;
+            }
+            if (arg.startsWith('--')) {
+              console.error('stub-openclaw: unknown create flag: ' + arg);
+              process.exit(64);
+            }
+            positional.push(arg);
+          }
+
+          if (positional.length !== 2) {
+            console.error('stub-openclaw: create takes a schedule and a prompt, got ' + positional.length);
+            process.exit(64);
+          }
+          job.schedule = positional[0];
+          job.prompt = positional[1];
+          job.enabled = true;
+
+          // A create that reports success and stores nothing. The registrar
+          // must notice, because that is what an unrecorded failure looks like.
+          if (process.env.STUB_CREATE_SILENT === 'yes') {
+            console.log('Created automation ' + job.name);
+            process.exit(0);
+          }
+
+          const storePath = process.env.STUB_STORE + '/jobs.json';
+          const jobs = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+          job.id = 'job-' + String(jobs.length + 1).padStart(4, '0');
+          jobs.push(job);
+          fs.writeFileSync(storePath, JSON.stringify(jobs, null, 2) + '\n');
+          console.log('Created automation ' + job.name);
+        "
+        exit $?
+        ;;
+
+      *)
+        usage "$@"
+        ;;
+    esac
+    ;;
+
+  *)
+    usage "$@"
+    ;;
+esac

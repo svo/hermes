@@ -72,12 +72,17 @@ fails until 001 and 005 land — see `006/PLAN.md` § Preconditions.
 Four specs edit `entrypoint.sh` and two edit `hermes-check`. To keep the changes
 non-colliding, each plan declares an owned region. No two specs modify the same lines.
 
+Regions are named by content, not by line number. Each spec that lands moves every line below
+it, so the numbers written into `SPEC.md` and `PLAN.md` are the ones that were true when they
+were written — anchor on the content instead. 001 and 002 have landed; 003 replaced a
+22-line block with a 230-line one.
+
 | File | Region | Owner |
 |---|---|---|
-| `entrypoint.sh` | 1–99 (shebang, `TZ` export, required-vars block) and ordering within the first `node -e` block | **004** |
-| `entrypoint.sh` | 248–262 (Slack block) | **002** |
-| `entrypoint.sh` | 264–285 (cron block — deleted) and the registrar inserted before `exec` | **003** |
-| `entrypoint.sh` | 12 and 287 (bind flags), plus an appended permissions step | **007** |
+| `entrypoint.sh` | The shebang, the `TZ` export, the required-vars block, and ordering within the first `node -e` block | **004** |
+| `entrypoint.sh` | The `SLACK_BOT_TOKEN` block | **002** |
+| `entrypoint.sh` | ~~The `jobs.json` `node -e` block~~ (deleted) and the briefing registrar between the Slack block and `exec` | **003** |
+| `entrypoint.sh` | The bind flags on `openclaw onboard` and on the final `exec openclaw gateway`, plus an appended permissions step | **007** |
 | `hermes-check` | `sanitize_field()` helper and the emit sites | **001** |
 | `hermes-check` | VIP matching, counters, jq guards, date parsing | **005** |
 
