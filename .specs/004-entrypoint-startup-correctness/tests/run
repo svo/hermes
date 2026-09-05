@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#
+# Runs every check for 004. Accumulates failures rather than stopping at the
+# first, so one run reveals every problem.
+#
+# 006's `bin/test` should invoke this file alongside 001's, 002's and 003's.
+
+set -uo pipefail
+
+tests_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${tests_dir}/../../.." && pwd)"
+entrypoint="${repo_root}/infrastructure/ansible/roles/openclaw/files/entrypoint.sh"
+
+failed=()
+
+check() {
+  local name="$1"
+  shift
+  printf '\n== %s ==\n' "$name"
+  if "$@"; then
+    printf 'PASS %s\n' "$name"
+  else
+    printf 'FAIL %s\n' "$name" >&2
+    failed+=("$name")
+  fi
+}
+
+check "bash -n entrypoint.sh" bash -n "$entrypoint"
+check "shellcheck entrypoint.sh" shellcheck -s bash "$entrypoint"
+check "shellcheck stub-openclaw" shellcheck -s bash "${tests_dir}/stub-openclaw"
+check "validation-test" bash "${tests_dir}/validation-test"
+check "state-test" bash "${tests_dir}/state-test"
+check "config-test" bash "${tests_dir}/config-test"
+check "gate-test" bash "${tests_dir}/gate-test"
+
+printf '\n'
+if [ ${#failed[@]} -eq 0 ]; then
+  printf 'All 004 checks passed.\n'
+  exit 0
+fi
+
+printf 'Failing checks:\n' >&2
+printf '  %s\n' "${failed[@]}" >&2
+exit 1

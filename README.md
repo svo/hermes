@@ -63,11 +63,11 @@ On first run, the entrypoint automatically configures OpenClaw via non-interacti
 
 | Variable | Required | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for the OpenClaw gateway |
+| `ANTHROPIC_API_KEY` | Yes, every start | Anthropic API key for the OpenClaw gateway. Required on **every** start, not only the first — see [Startup validation](#startup-validation) |
 | `GOG_GOOGLE_ACCOUNT` | No | Google account email for gog service account auth |
 | `GOG_SERVICE_ACCOUNT_KEY` | No | Path (inside the container) to the GCP service account JSON key file |
 | `TELEGRAM_BOT_TOKEN` | No | Telegram bot token from @BotFather |
-| `TELEGRAM_ALLOW_FROM` | With `TELEGRAM_BOT_TOKEN` | Comma-separated Telegram user IDs to allow |
+| `TELEGRAM_ALLOW_FROM` | With `TELEGRAM_BOT_TOKEN` | Comma-separated Telegram user IDs to allow. The container refuses to start without it |
 | `SLACK_BOT_TOKEN` | No | Slack bot token (`xoxb-...`) from the Slack app settings |
 | `SLACK_APP_TOKEN` | With `SLACK_BOT_TOKEN` | Slack app-level token (`xapp-...`) with `connections:write` scope |
 | `SLACK_ALLOW_FROM` | With `SLACK_BOT_TOKEN` | Comma-separated Slack user IDs allowed to DM the assistant |
@@ -80,6 +80,7 @@ On first run, the entrypoint automatically configures OpenClaw via non-interacti
 | `HERMES_CRON_SCHEDULE` | Yes | Cron expression for morning briefing |
 | `HERMES_QUIET_HOURS_START` | Yes | Quiet hours start time (e.g. `20:00`) |
 | `HERMES_QUIET_HOURS_END` | Yes | Quiet hours end time (e.g. `08:00`) |
+| `HERMES_OWNER` | Sometimes | Who the heartbeat reports to, as comma-separated `<channel>:<id>` identities (e.g. `telegram:123456789`, `slack:U0123ABCDE`). Derived from the channel allowlists when unset; required when a channel is configured and none of its entries can serve as an owner — see [Heartbeat delivery](#heartbeat-delivery) |
 | `HERMES_FIELD_MAX_LEN` | No | Maximum length of an untrusted email or calendar field in `hermes-check` output (default `200`) |
 | `HERMES_BRIEFING_CHANNEL` | With `HERMES_BRIEFING_TO` | Channel the morning briefing is announced to (e.g. `slack`, `telegram`). Without it the briefing relies on implicit routing |
 | `HERMES_BRIEFING_TO` | With `HERMES_BRIEFING_CHANNEL` | Where in that channel to announce it. The format is channel-specific — Slack takes `channel:C0123ABCDE`, Telegram a bare chat id such as `-1001234567890` |
@@ -110,9 +111,27 @@ docker run -d \
   svanosselaer/hermes-service:latest
 ```
 
-On startup, the entrypoint automatically configures the Telegram channel in OpenClaw with group chats set to require `@mention`. When `TELEGRAM_ALLOW_FROM` is set, the DM policy is `allowlist` — only the listed Telegram user IDs can message the bot. Without it, the policy falls back to `pairing` (unknown users get a pairing code for the owner to approve).
+On startup, the entrypoint automatically configures the Telegram channel in OpenClaw with group
+chats set to require `@mention`. The DM policy is always `allowlist` — only the listed Telegram
+user IDs can message the bot.
 
-To find your Telegram user ID, message the bot without `TELEGRAM_ALLOW_FROM` set — the pairing prompt will show it.
+### Access control
+
+`TELEGRAM_ALLOW_FROM` is **required** whenever `TELEGRAM_BOT_TOKEN` is set, and the container
+refuses to start without it. There is no fallback policy: `dmPolicy` is written as `allowlist`
+unconditionally, so an absent allowlist would be an allowlist admitting nobody.
+
+| Config key | Value |
+|---|---|
+| `channels.telegram.dmPolicy` | `allowlist` — only `TELEGRAM_ALLOW_FROM` may DM the assistant |
+| `channels.telegram.allowFrom` | the trimmed, comma-separated contents of `TELEGRAM_ALLOW_FROM` |
+| `channels.telegram.groups` | `{"*": {"requireMention": true}}` — any group, mention-gated |
+
+To find your Telegram user ID, message a bot such as [@userinfobot](https://t.me/userinfobot),
+which replies with your numeric ID. Earlier versions of this document said to message *your* bot
+with `TELEGRAM_ALLOW_FROM` unset and read the ID off a pairing prompt. That never worked: this
+image does not configure `pairing`, and starting without the allowlist crashed the entrypoint
+before the gateway came up.
 
 ## Slack Integration
 
@@ -289,7 +308,111 @@ On startup, the entrypoint generates OpenClaw workspace files at `~/.openclaw/wo
 
 These files are injected into the agent's context at the start of every session, so Hermes has detailed operating guidance available immediately without needing an initial brief.
 
-Every `HERMES_*` variable marked required in the table above must be set — the container fails on startup if any is missing. This makes the configuration explicit and avoids hidden assumptions about identity, tone, or scheduling.
+Every `HERMES_*` variable marked required in the table above must be set. This makes the
+configuration explicit and avoids hidden assumptions about identity, tone, or scheduling.
+
+## Startup validation
+
+The container validates its whole environment **before it writes anything**. Onboarding, the
+Google credential, and every key of `openclaw.json` come after that check, so a misconfigured
+start leaves the config volume exactly as it found it.
+
+```
+Phase 1  validate    no writes, no network, no side effects
+Phase 2  configure   onboarding, credentials, config
+Phase 3  verify      openclaw config validate, then the gateway
+```
+
+A rejected start prints one block listing **every** missing variable, not the first one:
+
+```
+Error: missing required environment variables:
+  HERMES_LOCALE
+  TELEGRAM_ALLOW_FROM
+
+TELEGRAM_ALLOW_FROM is required when TELEGRAM_BOT_TOKEN is set.
+  ...
+
+Nothing has been written. The persisted configuration is untouched.
+```
+
+A three-variable misconfiguration is one restart, not three.
+
+### `ANTHROPIC_API_KEY` is required on every start
+
+This is a **behaviour change**, and it will stop a container that used to start.
+
+The persisted config keeps a copy of the key. A restart without the variable used to overwrite
+that copy with nothing and then exit **zero** — so the key configured once was silently deleted,
+and the start after that came up unauthenticated with no failure anywhere to explain it. The
+key is now a required variable, which means the config file is never opened when it is absent.
+
+If you have been relying on the key already being in the volume, add `-e ANTHROPIC_API_KEY=…`
+to your `docker run` before upgrading.
+
+### The configuration is validated against the schema
+
+After the config is written and before the gateway starts, the entrypoint runs `openclaw config
+validate`. Roughly fifteen keys are written into strict schemas by hand; without this gate an
+upstream key rename turned a working image into one that bricked on the next restart with
+nothing useful in the log. A failure now costs one startup and names the key path:
+
+```
+Error: the configuration this container just wrote is not valid.
+  openclaw config validate said:
+    agents.defaults.heartbeat.bogusKey: unrecognised key
+
+  The gateway was not started, because it would fail to load this.
+  Compare the key it names against: openclaw config schema
+```
+
+A successful start logs one line:
+
+```
+config: validated
+```
+
+Verify by hand at any time:
+
+```bash
+docker exec hermes openclaw config validate --json
+docker exec hermes openclaw config get commands.ownerAllowFrom
+```
+
+### Exec approvals are yours after the first start
+
+`~/.openclaw/exec-approvals.json` is written only when it is absent. It used to be rewritten on
+every start, so an operator who tightened `defaults.security` had it reverted to `full` by the
+next restart — a restart quietly widening what the agent may run.
+
+The cost is that a change to the shipped default no longer reaches an existing container. To
+adopt one, delete the file and restart:
+
+```bash
+docker exec hermes rm /root/.openclaw/exec-approvals.json && docker restart hermes
+```
+
+## Heartbeat delivery
+
+The heartbeat summarises the user's inbox and calendar, so where it delivers matters.
+
+It targets `owner`, which resolves against `commands.ownerAllowFrom`. That key is derived from
+the channel allowlists — Telegram first, then Slack — as `<channel>:<id>` identities, or set
+explicitly with `HERMES_OWNER`:
+
+```bash
+  -e HERMES_OWNER="telegram:123456789"
+```
+
+Set it explicitly when the allowlist holds more people than the operator, or when nothing in the
+allowlist can be an owner. Two entries cannot: `*`, which is a policy rather than an account, and
+`accessGroup:<name>`, which names a group. Both stay valid in `TELEGRAM_ALLOW_FROM` and
+`SLACK_ALLOW_FROM`; they just cannot also answer who the owner is, and the container says so at
+startup rather than going quiet later.
+
+Previously the target was `last`, the most recent external conversation. On a fresh container
+there is none, so every heartbeat was skipped — and once there was one, it could be a group
+chat, which is not where a summary of the user's inbox belongs.
 
 ## Morning Briefing
 

@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+#
+# Phase 3: the `openclaw config validate` gate.
+#
+# Roughly fifteen keys are hand-written into strict schemas with nothing
+# checking them (finding D2). An upstream rename therefore turned a working
+# image into one that bricked on the next restart, saying nothing an operator
+# could act on. The gate converts that into one failed startup naming the key.
+#
+# The stub's validator is a transcription of the upstream schema for the keys
+# this entrypoint writes, not the real thing — so it can reject, which is the
+# only way these cases mean anything. `openclaw config validate` against a real
+# image stays the manual acceptance step; see README.md.
+#
+# One behaviour per case, named should_<behaviour>_when_<condition>.
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+# `openclaw config validate` against the config the last run wrote.
+validate() {
+  env HOME="$RUN_HOME" PATH="${BIN_DIR}:${PATH}" openclaw config validate "$@"
+}
+
+should_run_the_gate_when_the_configuration_is_written() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  if ! config_validated; then fail "the gate never ran"; fi
+  assert_contains "says so" "$RUN_OUT" "config: validated"
+  case_end
+}
+
+should_exit_zero_from_validate_when_the_entrypoint_has_configured_the_container() {
+  case_start "${FUNCNAME[0]}"
+  # The acceptance criterion the whole gate rests on: the config this container
+  # writes for itself must pass the schema it is about to be read against.
+  run_entrypoint
+  assert_equals "the entrypoint succeeded" "0" "$RUN_STATUS"
+  validate >/dev/null 2>"${RUN_DIR}/validate.err"
+  assert_equals "validate exit status" "0" "$?"
+  case_end
+}
+
+should_exit_zero_from_validate_when_both_channels_are_configured() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint TELEGRAM_BOT_TOKEN=8123:AAFtelegram TELEGRAM_ALLOW_FROM=123456789 \
+    SLACK_BOT_TOKEN=xoxb-test SLACK_APP_TOKEN=xapp-test SLACK_ALLOW_FROM=U0123ABCDE
+  assert_equals "the entrypoint succeeded" "0" "$RUN_STATUS"
+  validate >/dev/null 2>"${RUN_DIR}/validate.err"
+  assert_equals "validate exit status" "0" "$?"
+  case_end
+}
+
+should_reject_an_unrecognised_key_when_validate_runs() {
+  case_start "${FUNCNAME[0]}"
+  # Guards the guard. Every case above asserts a zero exit, which a validator
+  # that always succeeded would also produce, so the transcription has to be
+  # shown rejecting something.
+  run_entrypoint
+  local rewritten="${RUN_DIR}/with-bogus.json"
+  jq '.agents.defaults.heartbeat.bogusKey = true' "$RUN_CONFIG" > "$rewritten"
+  mv "$rewritten" "$RUN_CONFIG"
+  local problems
+  problems="$(validate 2>&1)"
+  assert_equals "validate exit status" "1" "$?"
+  assert_contains "names the key path" "$problems" "agents.defaults.heartbeat.bogusKey: unrecognised key"
+  case_end
+}
+
+should_reject_the_undocumented_env_shape_when_validate_runs() {
+  case_start "${FUNCNAME[0]}"
+  # The shape this entrypoint used to write. `env` holds `vars` and `shellEnv`;
+  # a bare env.<NAME> is an unrecognised key, which is why the migration in
+  # phase 2 is part of this change rather than a tidy-up.
+  run_entrypoint
+  local rewritten="${RUN_DIR}/with-bare-env.json"
+  jq '.env.ANTHROPIC_API_KEY = "sk-ant-bare"' "$RUN_CONFIG" > "$rewritten"
+  mv "$rewritten" "$RUN_CONFIG"
+  local problems
+  problems="$(validate 2>&1)"
+  assert_equals "validate exit status" "1" "$?"
+  assert_contains "names the key path" "$problems" "env.ANTHROPIC_API_KEY: unrecognised key"
+  case_end
+}
+
+should_refuse_to_start_when_the_written_configuration_is_invalid() {
+  case_start "${FUNCNAME[0]}"
+  # Injected through onboarding, so the entrypoint carries it forward into the
+  # config it writes — the same route an upstream key rename would take.
+  run_entrypoint OPENCLAW_STUB_ONBOARD_EXTRA='{"agents":{"defaults":{"bogusKey":true}}}'
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "names the failing step" "$RUN_ERR" "is not valid"
+  assert_contains "quotes the validator" "$RUN_ERR" "agents.defaults.bogusKey: unrecognised key"
+  assert_contains "says what to do" "$RUN_ERR" "openclaw config schema"
+  case_end
+}
+
+should_not_start_the_gateway_when_the_written_configuration_is_invalid() {
+  case_start "${FUNCNAME[0]}"
+  # A gateway that starts on a config it cannot load is the brick this replaces.
+  run_entrypoint OPENCLAW_STUB_ONBOARD_EXTRA='{"agents":{"defaults":{"bogusKey":true}}}'
+  # It has to be the gate that stopped it, not some earlier crash.
+  assert_contains "stopped by the gate" "$RUN_ERR" "is not valid"
+  if gateway_started; then fail "the gateway started on an invalid configuration"; fi
+  case_end
+}
+
+should_not_register_the_briefing_when_the_written_configuration_is_invalid() {
+  case_start "${FUNCNAME[0]}"
+  # The gate is sequenced ahead of 003's registrar so an invalid config never
+  # reaches it — a briefing registered against a container that cannot start is
+  # worse than no briefing.
+  run_entrypoint OPENCLAW_STUB_ONBOARD_EXTRA='{"agents":{"defaults":{"bogusKey":true}}}'
+  assert_contains "stopped by the gate" "$RUN_ERR" "is not valid"
+  assert_not_contains "the registrar never ran" "$RUN_OUT" "cron:"
+  assert_not_contains "and logged no failure either" "$RUN_ERR" "cron:"
+  case_end
+}
+
+should_surface_the_validator_message_when_the_gate_fails() {
+  case_start "${FUNCNAME[0]}"
+  # The validator names the offending key path; that message is the whole value
+  # of the gate, so it is passed through rather than summarised.
+  run_entrypoint OPENCLAW_STUB_VALIDATE_ERROR='channels.slack.groups: unrecognised key'
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "the validator's own words" "$RUN_ERR" "channels.slack.groups: unrecognised key"
+  case_end
+}
+
+should_not_log_a_token_when_the_gate_fails() {
+  case_start "${FUNCNAME[0]}"
+  # The validator's output is passed through, and what it prints on failure is
+  # undocumented. The config it is reading holds four tokens, so a validator
+  # that quoted an offending value would put one in `docker logs` — which is
+  # the thing 002 went to lengths to prevent one section below this one.
+  run_entrypoint TELEGRAM_BOT_TOKEN=8123:AAFsecret SLACK_BOT_TOKEN=xoxb-secret \
+    SLACK_APP_TOKEN=xapp-secret SLACK_ALLOW_FROM=U0123ABCDE TELEGRAM_ALLOW_FROM=123456789 \
+    ANTHROPIC_API_KEY=sk-ant-secret \
+    OPENCLAW_STUB_VALIDATE_ERROR='channels.slack.botToken: invalid value "xoxb-secret" (also saw 8123:AAFsecret, xapp-secret, sk-ant-secret)'
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  local logged="${RUN_OUT}${RUN_ERR}"
+  assert_not_contains "slack bot token" "$logged" "xoxb-secret"
+  assert_not_contains "slack app token" "$logged" "xapp-secret"
+  assert_not_contains "telegram token" "$logged" "8123:AAFsecret"
+  assert_not_contains "anthropic key" "$logged" "sk-ant-secret"
+  # The message still has to be useful: the key path survives.
+  assert_contains "the key path survives" "$logged" "channels.slack.botToken"
+  assert_contains "and the redaction is visible" "$logged" "[redacted]"
+  case_end
+}
+
+should_say_nothing_on_stderr_when_the_gate_passes() {
+  case_start "${FUNCNAME[0]}"
+  # The validator reports keys its transcription cannot vouch for. Those are for
+  # whoever reads the checks, not for the container log on every start.
+  run_entrypoint
+  assert_equals "the entrypoint succeeded" "0" "$RUN_STATUS"
+  if ! config_validated; then fail "the gate never ran"; fi
+  assert_not_contains "no unverified notes in the log" "$RUN_ERR" "unverified:"
+  case_end
+}
+
+should_report_only_the_known_unverified_keys_when_validate_runs() {
+  case_start "${FUNCNAME[0]}"
+  # Four keys this entrypoint writes are absent from the published schema
+  # documentation. They are not rejected — absent from one page is weaker
+  # evidence than documented as something else, and deleting working
+  # configuration on that basis would be a guess. Pinning the list here means a
+  # new hand-written key cannot be added without someone having to decide.
+  run_entrypoint
+  local report
+  report="$(validate --json 2>&1)"
+  assert_equals "validate exit status" "0" "$?"
+  assert_equals "the unverified list" \
+    '["tools.exec.security","tools.loopDetection.warningThreshold","tools.loopDetection.criticalThreshold","tools.loopDetection.globalCircuitBreakerThreshold"]' \
+    "$(printf '%s' "$report" | jq -c '.unverified')"
+  case_end
+}
+
+should_run_the_gate_when_the_configuration_is_written
+should_exit_zero_from_validate_when_the_entrypoint_has_configured_the_container
+should_exit_zero_from_validate_when_both_channels_are_configured
+should_reject_an_unrecognised_key_when_validate_runs
+should_reject_the_undocumented_env_shape_when_validate_runs
+should_refuse_to_start_when_the_written_configuration_is_invalid
+should_not_start_the_gateway_when_the_written_configuration_is_invalid
+should_not_register_the_briefing_when_the_written_configuration_is_invalid
+should_surface_the_validator_message_when_the_gate_fails
+should_not_log_a_token_when_the_gate_fails
+should_say_nothing_on_stderr_when_the_gate_passes
+should_report_only_the_known_unverified_keys_when_validate_runs
+
+report_totals "gate-test"

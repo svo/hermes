@@ -122,15 +122,68 @@ New invariant: **no write of any kind occurs before validation passes.**
 
 ## Open Questions
 
-1. **Replace the `node -e` blocks with `openclaw config set` / `patch`?** Upstream provides
-   non-interactive path-based setters that validate against the schema, which would dissolve
-   B2 and the whole D2 class at the root. It is a larger refactor than this spec's scope —
-   recommended as a follow-up. Decide whether to fold it in now or track separately.
-2. **`ownerAllowFrom` derivation.** Deriving it from `TELEGRAM_ALLOW_FROM` is convenient but
-   couples two concerns. A dedicated `HERMES_OWNER` variable is more explicit. Prefer the
-   explicit variable?
-3. **Channel teardown.** Removing a channel's token leaves `enabled: true` and a stale token
-   in the persisted config. Fix here, or as its own spec? Same issue for both channels.
-   **002 deferred its half of this here** (002 § Open Questions 3), on the grounds that one
-   mechanism should cover both channels — fixing Slack alone would leave Telegram
-   asymmetric. So this question now carries both.
+All three were answered before implementation. The answers are recorded here rather than in
+the commit message, because two of them constrain what a later change may do.
+
+1. **Replace the `node -e` blocks with `openclaw config set` / `patch`?** *Answered: a
+   follow-up, not this change.* The gate added in task 7 already converts the D2 failure mode
+   from a brick into a named startup error, which is the part that was urgent. Rewriting the
+   block would touch every line 002 and 003 read the config through, in the same change that
+   reorders it. Tracked as [`008`](../008-config-via-cli/SPEC.md).
+
+2. **`ownerAllowFrom` derivation.** *Answered: `HERMES_OWNER`, with derivation as the
+   fallback.* An explicit variable is the escape hatch; when it is unset the identities are
+   derived from the channel allowlists, Telegram first, so no existing deployment has to add a
+   variable to keep working. A channel configured with allowlist entries that cannot be owner
+   identities — `*`, `accessGroup:<name>` — is the one case that demands the explicit form, and
+   phase 1 says so by name.
+
+   Two things this uncovered, both doc-verified and neither in the finding as written:
+
+   - Entries are `<channel>:<identifier>`, not bare IDs. A bare ID cannot be routed, because
+     the same number is a different account on a different channel.
+   - Setting `ownerAllowFrom` alone does not satisfy the acceptance criterion. `target: 'last'`
+     is documented to skip when the session has no external route, so a fresh container still
+     had no heartbeat. The target is now `owner`, which resolves against `ownerAllowFrom` and
+     never resolves to a group — which also closes a leak the finding did not mention: `last`
+     could deliver a summary of the user's inbox into whatever group chat was most recent.
+
+   `*` is rejected as an owner rather than passed through. It validates upstream, grants
+   nothing on current builds, and strips the owner-only tools while still reading like an
+   owner (upstream issues 25286 and 30226, advisory GHSA-c28g-vh7m-fm7v).
+
+3. **Channel teardown.** *Answered: its own spec.* Removing a channel's token leaves
+   `enabled: true` and a stale token in the persisted config, for both Telegram and Slack. It
+   is a behaviour change rather than a correctness fix, it needs its own tests and its own
+   README section, and none of this plan's eleven tasks covers it. Carried — with 002's half,
+   deferred here — into [`009`](../009-channel-teardown/SPEC.md).
+
+## Findings This Work Added
+
+Three defects turned up while implementing, none of them in the ten rows above. All are
+doc-verified against `docs.openclaw.ai`.
+
+| ID | Claim | Anchor | Confidence | Status |
+|---|---|---|---|---|
+| B4d | `config.env.ANTHROPIC_API_KEY` is an unrecognised key. Upstream keeps an inline environment variable at `env.vars.<NAME>`; `env` holds `vars` and `shellEnv` and nothing else | `entrypoint.sh` first `node -e` block | doc-verified | **fixed here** — the gate in task 7 would otherwise reject the container's own config, and an upgraded volume carries the old spelling, so the legacy key is deleted as well as relocated |
+| B5b | `heartbeat.target: 'last'` is documented to skip when the session has no external route, so `ownerAllowFrom` alone leaves a fresh container with no heartbeat | `entrypoint.sh` heartbeat block | doc-verified | **fixed here** — see Open Question 2 |
+| D3 | `~/.openclaw/exec-approvals.json` is **retired**. Approvals live in SQLite at `~/.openclaw/state/openclaw.sqlite#exec_approvals_config`; upgrading is documented as a one-off `openclaw doctor --fix` that imports the file | `entrypoint.sh` approvals heredoc | doc-verified | **not fixed** — task 5 makes the write conditional, which is strictly better either way. Whether the container's `security: full` default takes effect at all is a separate question, tracked in [`008`](../008-config-via-cli/SPEC.md) |
+
+### Still unverified
+
+Four keys the entrypoint writes are absent from the published schema documentation:
+`tools.exec.security`, and `tools.loopDetection`'s `warningThreshold`, `criticalThreshold` and
+`globalCircuitBreakerThreshold`. They were left in place — absent from one page is weaker
+evidence than documented as something else, and deleting working configuration on that basis
+would be a guess — and the checks pin the list so a new hand-written key cannot be added
+without someone deciding.
+
+**If any of them is genuinely unrecognised upstream, the phase 3 gate will refuse to start a
+container that previously worked.** `PLAN.md` § Risks calls for running the validator against
+the current config before wiring the gate; that is not something a stub can do, and it is the
+acceptance step still owed:
+
+```bash
+docker run --rm --entrypoint openclaw <image> config schema
+docker exec hermes openclaw config validate --json
+```

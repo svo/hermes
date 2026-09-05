@@ -6,6 +6,7 @@
 #   onboard             writes the minimal config real onboarding leaves behind
 #   gateway             records that it was reached, then exits 0 instead of serving
 #   gateway health      the readiness probe the registrar polls
+#   config validate     the startup gate 004 added; accepts, and records the call
 #   automations list    reads the stub's automation store
 #   automations create  appends to it, rejecting flags it does not know
 #
@@ -101,6 +102,25 @@ ONBOARDED
           : > "${markers}/gateway-started"
         fi
         exit 0
+        ;;
+    esac
+    ;;
+
+  config)
+    # 004 gates startup on this before forking the registrar. Nothing here is
+    # about validation, so it accepts — 004's own stub carries the schema
+    # transcription that can reject. The marker lets a case assert the gate ran
+    # ahead of the fork.
+    case "${2:-}" in
+      validate)
+        if [ -n "$markers" ]; then
+          : > "${markers}/config-validated"
+        fi
+        printf 'ok\n'
+        exit 0
+        ;;
+      *)
+        usage "$@"
         ;;
     esac
     ;;

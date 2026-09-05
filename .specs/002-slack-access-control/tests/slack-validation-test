@@ -70,6 +70,20 @@ should_exit_non_zero_when_slack_allow_from_lists_no_ids() {
   case_end
 }
 
+should_not_leave_slack_configured_when_the_allowlist_lists_no_ids() {
+  case_start "${FUNCNAME[0]}"
+  # The same assertion as the unset case above, on the input that still reaches
+  # this block. 004 moved the unset case into a phase that exits before the
+  # config file exists, which is a stronger guarantee but stops that case from
+  # witnessing what this block does before it validates — nothing may be
+  # written until the input is good.
+  run_entrypoint "${SLACK_ENV[@]}" SLACK_ALLOW_FROM=' , , '
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_equals "slack absent" "null" "$(config_get '.channels.slack')"
+  if gateway_started; then fail "the gateway started despite a rejected configuration"; fi
+  case_end
+}
+
 should_reject_a_channel_name_when_it_is_supplied_instead_of_an_id() {
   case_start "${FUNCNAME[0]}"
   run_entrypoint "${SLACK_ENV[@]}" SLACK_ALLOW_FROM=U0123ABCDE SLACK_ALLOW_CHANNELS='#general'
@@ -150,6 +164,7 @@ should_not_throw_a_type_error_when_slack_allow_from_is_unset
 should_not_start_the_gateway_when_slack_allow_from_is_missing
 should_not_leave_slack_configured_when_slack_allow_from_is_missing
 should_exit_non_zero_when_slack_allow_from_lists_no_ids
+should_not_leave_slack_configured_when_the_allowlist_lists_no_ids
 should_reject_a_channel_name_when_it_is_supplied_instead_of_an_id
 should_name_the_id_first_requirement_when_a_channel_name_is_supplied
 should_echo_every_rejected_entry_when_several_are_supplied

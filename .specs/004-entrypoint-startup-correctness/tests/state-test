@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+#
+# What a restart must not destroy.
+#
+# Two of 004's findings are not crashes — they are a container quietly deleting
+# something the operator put there. Both need more than one run against the same
+# HOME to see at all, because the first start is what creates the state the
+# second one was destroying.
+#
+# One behaviour per case, named should_<behaviour>_when_<condition>.
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+# Where the key lives now. env.vars.<NAME> is the documented home for an inline
+# environment variable; the bare env.<NAME> this used to write is an
+# unrecognised key, and the phase 3 gate rejects it.
+KEY_PATH='.env.vars.ANTHROPIC_API_KEY'
+
+# --- B4c: the silent wipe --------------------------------------------------
+
+should_keep_the_persisted_key_when_a_restart_omits_it() {
+  case_start "${FUNCNAME[0]}"
+  # The finding, end to end. The second start used to exit *zero* having
+  # deleted the key: JSON.stringify drops an undefined value, so the config was
+  # rewritten without it and nothing said so. The gateway then came up
+  # unauthenticated on the start after that.
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home" ANTHROPIC_API_KEY=sk-ant-configured-once
+  assert_equals "first start succeeded" "0" "$RUN_STATUS"
+  assert_equals "the key was persisted" "sk-ant-configured-once" "$(config_get "$KEY_PATH")"
+
+  run_entrypoint --home "$home" --omit ANTHROPIC_API_KEY
+  assert_equals "the restart was refused" "1" "$RUN_STATUS"
+  assert_equals "the key survived" "sk-ant-configured-once" "$(config_get "$KEY_PATH")"
+  case_end
+}
+
+should_not_touch_the_config_at_all_when_a_restart_omits_the_key() {
+  case_start "${FUNCNAME[0]}"
+  # Stronger than reading one key back: the whole file is byte-identical. A
+  # rewrite that happened to preserve the key would still mean phase 1 ran too
+  # late, and the next finding would land in whatever it did rewrite.
+  local home before after; home="$(new_home)"
+  run_entrypoint --home "$home" ANTHROPIC_API_KEY=sk-ant-configured-once
+  # Asserted, not assumed: two identical fingerprints prove nothing if the
+  # first start never got as far as writing a configured container.
+  assert_equals "first start succeeded" "0" "$RUN_STATUS"
+  before="$(fingerprint "$RUN_CONFIG")"
+
+  run_entrypoint --home "$home" --omit ANTHROPIC_API_KEY
+  after="$(fingerprint "$RUN_CONFIG")"
+  assert_equals "openclaw.json is byte-identical" "$before" "$after"
+  case_end
+}
+
+should_leave_the_config_untouched_when_any_required_variable_is_omitted() {
+  case_start "${FUNCNAME[0]}"
+  # The golden-file check across the whole matrix, against a configured volume
+  # rather than an empty one — which is the state a restart actually finds.
+  local home before after var; home="$(new_home)"
+  run_entrypoint --home "$home"
+  assert_equals "first start succeeded" "0" "$RUN_STATUS"
+  before="$(fingerprint "${home}/.openclaw/openclaw.json")"
+  for var in "${REQUIRED_VARS[@]}"; do
+    run_entrypoint --home "$home" --omit "$var"
+    after="$(fingerprint "${home}/.openclaw/openclaw.json")"
+    assert_equals "openclaw.json unchanged without ${var}" "$before" "$after"
+  done
+  case_end
+}
+
+should_report_the_key_as_missing_rather_than_starting_when_a_restart_omits_it() {
+  case_start "${FUNCNAME[0]}"
+  # It used to exit zero. Exiting zero is what made it silent.
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home"
+  run_entrypoint --home "$home" --omit ANTHROPIC_API_KEY
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "names the key" "$RUN_ERR" "ANTHROPIC_API_KEY"
+  if gateway_started; then fail "the gateway started without an API key"; fi
+  case_end
+}
+
+# --- B6: approvals are the operator's -------------------------------------
+
+should_preserve_an_edited_approvals_file_when_the_container_restarts() {
+  case_start "${FUNCNAME[0]}"
+  # An operator who tightens exec approvals had them reverted to `full` by the
+  # next restart — a restart quietly widening what the agent may run.
+  local home approvals; home="$(new_home)"
+  run_entrypoint --home "$home"
+  approvals="${home}/.openclaw/exec-approvals.json"
+  printf '%s\n' '{"version":1,"defaults":{"security":"allowlist"}}' > "$approvals"
+
+  run_entrypoint --home "$home"
+  assert_equals "the restart succeeded" "0" "$RUN_STATUS"
+  assert_equals "the operator's setting survived" "allowlist" \
+    "$(jq -r '.defaults.security' "$approvals")"
+  case_end
+}
+
+should_create_the_approvals_file_when_it_is_absent() {
+  case_start "${FUNCNAME[0]}"
+  # Write-if-absent still has to write when it is absent.
+  run_entrypoint
+  assert_equals "created" "full" \
+    "$(jq -r '.defaults.security' "${RUN_HOME}/.openclaw/exec-approvals.json")"
+  case_end
+}
+
+should_not_recreate_an_approvals_file_the_operator_deleted() {
+  case_start "${FUNCNAME[0]}"
+  # Deleting it is how an operator adopts a changed shipped default, so it has
+  # to come back — the file is owned, not sacred.
+  local home approvals; home="$(new_home)"
+  run_entrypoint --home "$home"
+  approvals="${home}/.openclaw/exec-approvals.json"
+  rm -f "$approvals"
+  run_entrypoint --home "$home"
+  assert_equals "recreated from the shipped default" "full" \
+    "$(jq -r '.defaults.security' "$approvals")"
+  case_end
+}
+
+# --- restarts in general ---------------------------------------------------
+
+should_skip_onboarding_when_a_config_already_exists() {
+  case_start "${FUNCNAME[0]}"
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home"
+  if ! onboarding_ran; then fail "onboarding did not run on a fresh HOME"; fi
+  run_entrypoint --home "$home"
+  if onboarding_ran; then fail "onboarding ran again over an existing config"; fi
+  case_end
+}
+
+should_keep_the_key_when_a_restart_supplies_it_again() {
+  case_start "${FUNCNAME[0]}"
+  # The ordinary restart. A rotated key must reach the config.
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home" ANTHROPIC_API_KEY=sk-ant-first
+  run_entrypoint --home "$home" ANTHROPIC_API_KEY=sk-ant-rotated
+  assert_equals "the new key landed" "sk-ant-rotated" "$(config_get "$KEY_PATH")"
+  case_end
+}
+
+should_keep_the_persisted_key_when_a_restart_omits_it
+should_not_touch_the_config_at_all_when_a_restart_omits_the_key
+should_leave_the_config_untouched_when_any_required_variable_is_omitted
+should_report_the_key_as_missing_rather_than_starting_when_a_restart_omits_it
+should_preserve_an_edited_approvals_file_when_the_container_restarts
+should_create_the_approvals_file_when_it_is_absent
+should_not_recreate_an_approvals_file_the_operator_deleted
+should_skip_onboarding_when_a_config_already_exists
+should_keep_the_key_when_a_restart_supplies_it_again
+
+report_totals "state-test"

@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+#
+# Phase 1: what the container refuses, and what it says.
+#
+# The permutation matrix is the centre of this file. For each required variable
+# it omits that one and asserts three things — a non-zero exit, the variable
+# named in stderr, and that nothing was written. The third is the one that
+# matters: it is what proves phase 1 precedes the writes rather than merely
+# appearing earlier in the file.
+#
+# Two strings are asserted absent from every rejection. `TypeError` and
+# `unbound variable` are the regression markers for B3a and B4b — the two
+# failures whose whole problem was that they said nothing an operator could
+# act on.
+#
+# One behaviour per case, named should_<behaviour>_when_<condition>.
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+# --- the permutation matrix ------------------------------------------------
+
+should_exit_non_zero_when_a_required_variable_is_omitted() {
+  case_start "${FUNCNAME[0]}"
+  local var
+  for var in "${REQUIRED_VARS[@]}"; do
+    run_entrypoint --omit "$var"
+    assert_equals "exit status without ${var}" "1" "$RUN_STATUS"
+  done
+  case_end
+}
+
+should_name_the_omitted_variable_when_a_required_variable_is_omitted() {
+  case_start "${FUNCNAME[0]}"
+  local var
+  for var in "${REQUIRED_VARS[@]}"; do
+    run_entrypoint --omit "$var"
+    assert_contains "names ${var}" "$RUN_ERR" "$var"
+  done
+  case_end
+}
+
+should_write_nothing_when_a_required_variable_is_omitted() {
+  case_start "${FUNCNAME[0]}"
+  # The assertion the whole phase ordering exists for. Not "the config is
+  # unchanged" — there is no config, because onboarding never ran.
+  local var
+  for var in "${REQUIRED_VARS[@]}"; do
+    run_entrypoint --omit "$var"
+    assert_file_absent "openclaw.json without ${var}" "$RUN_CONFIG"
+    assert_file_absent "exec-approvals.json without ${var}" "${RUN_HOME}/.openclaw/exec-approvals.json"
+    assert_file_absent "workspace without ${var}" "${RUN_HOME}/.openclaw/workspace"
+    if onboarding_ran; then fail "onboarding ran without ${var}"; fi
+  done
+  case_end
+}
+
+should_not_start_the_gateway_when_a_required_variable_is_omitted() {
+  case_start "${FUNCNAME[0]}"
+  local var
+  for var in "${REQUIRED_VARS[@]}"; do
+    run_entrypoint --omit "$var"
+    if gateway_started; then fail "the gateway started without ${var}"; fi
+  done
+  case_end
+}
+
+should_not_print_a_stack_trace_when_a_required_variable_is_omitted() {
+  case_start "${FUNCNAME[0]}"
+  local var
+  for var in "${REQUIRED_VARS[@]}"; do
+    run_entrypoint --omit "$var"
+    assert_not_contains "no TypeError without ${var}" "$RUN_ERR" "TypeError"
+    assert_not_contains "no unbound variable without ${var}" "$RUN_ERR" "unbound variable"
+    assert_not_contains "no stack frame without ${var}" "$RUN_ERR" "at Object."
+  done
+  case_end
+}
+
+# --- B4b: the friendly message has to win the race with `export TZ` ---------
+
+should_name_the_variable_when_the_timezone_is_omitted() {
+  case_start "${FUNCNAME[0]}"
+  # `export TZ="${HERMES_TIMEZONE}"` sat above the check under `set -u`, so the
+  # operator's first symptom was a bash error about a shell builtin.
+  run_entrypoint --omit HERMES_TIMEZONE
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "the friendly list" "$RUN_ERR" "missing required environment variables:"
+  assert_contains "names the variable" "$RUN_ERR" "HERMES_TIMEZONE"
+  assert_not_contains "not a bash error" "$RUN_ERR" "unbound variable"
+  case_end
+}
+
+# --- B4c: the key that used to be deleted by asking for it -----------------
+
+should_name_the_api_key_when_it_is_omitted() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint --omit ANTHROPIC_API_KEY
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "names the variable" "$RUN_ERR" "ANTHROPIC_API_KEY"
+  assert_contains "says it is needed every start" "$RUN_ERR" "on every start, not only the first"
+  case_end
+}
+
+# --- one error block, not one per restart ----------------------------------
+
+should_list_every_missing_variable_when_several_are_omitted() {
+  case_start "${FUNCNAME[0]}"
+  # A three-variable misconfiguration should cost one restart. Reporting the
+  # first and exiting is what makes it cost three.
+  run_entrypoint --omit HERMES_TONE --omit HERMES_LOCALE --omit HERMES_QUIET_HOURS_END
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "first" "$RUN_ERR" "HERMES_TONE"
+  assert_contains "second" "$RUN_ERR" "HERMES_LOCALE"
+  assert_contains "third" "$RUN_ERR" "HERMES_QUIET_HOURS_END"
+  case_end
+}
+
+should_say_nothing_was_written_when_a_start_is_rejected() {
+  case_start "${FUNCNAME[0]}"
+  # The operator's next question after a rejection is what state they are in.
+  run_entrypoint --omit HERMES_VIBE
+  assert_contains "reassures about state" "$RUN_ERR" "Nothing has been written"
+  case_end
+}
+
+# --- B3a: Telegram, conditionally required ---------------------------------
+
+should_exit_non_zero_when_the_telegram_token_has_no_allowlist() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint TELEGRAM_BOT_TOKEN=8123:AAFtelegram
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "names the variable" "$RUN_ERR" "TELEGRAM_ALLOW_FROM is required"
+  assert_contains "names the trigger" "$RUN_ERR" "when TELEGRAM_BOT_TOKEN is set"
+  assert_contains "shows the fix" "$RUN_ERR" "TELEGRAM_ALLOW_FROM=123456789"
+  assert_contains "says where to find an id" "$RUN_ERR" "@userinfobot"
+  case_end
+}
+
+should_not_throw_a_type_error_when_the_telegram_token_has_no_allowlist() {
+  case_start "${FUNCNAME[0]}"
+  # This is B3a itself: the block dereferenced .split on an unset variable and
+  # died with a stack trace, after onboarding and after the config was written.
+  run_entrypoint TELEGRAM_BOT_TOKEN=8123:AAFtelegram
+  assert_not_contains "no TypeError" "$RUN_ERR" "TypeError"
+  assert_not_contains "no stack frame" "$RUN_ERR" "at Object."
+  case_end
+}
+
+should_write_nothing_when_the_telegram_token_has_no_allowlist() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint TELEGRAM_BOT_TOKEN=8123:AAFtelegram
+  assert_file_absent "openclaw.json" "$RUN_CONFIG"
+  if onboarding_ran; then fail "onboarding ran despite a rejected configuration"; fi
+  if gateway_started; then fail "the gateway started despite a rejected configuration"; fi
+  case_end
+}
+
+should_exit_non_zero_when_the_telegram_allowlist_lists_no_ids() {
+  case_start "${FUNCNAME[0]}"
+  # Separators only. Left alone it reaches the config as ['', '', ''] — an
+  # allowlist that admits nobody, which reads to the operator as a bot that
+  # ignores them.
+  run_entrypoint TELEGRAM_BOT_TOKEN=8123:AAFtelegram TELEGRAM_ALLOW_FROM=' , , '
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "names the variable" "$RUN_ERR" "TELEGRAM_ALLOW_FROM is required"
+  case_end
+}
+
+should_start_when_the_telegram_allowlist_is_supplied() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint TELEGRAM_BOT_TOKEN=8123:AAFtelegram TELEGRAM_ALLOW_FROM=123456789
+  assert_equals "exit status" "0" "$RUN_STATUS"
+  if ! gateway_started; then fail "the gateway was never reached"; fi
+  case_end
+}
+
+# --- Slack, the rule 002 supplied ------------------------------------------
+
+should_exit_non_zero_when_the_slack_token_has_no_allowlist() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint SLACK_BOT_TOKEN=xoxb-test SLACK_APP_TOKEN=xapp-test
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "names the variable" "$RUN_ERR" "SLACK_ALLOW_FROM is required"
+  assert_contains "names the consequence" "$RUN_ERR" "could DM the assistant"
+  case_end
+}
+
+should_write_nothing_when_the_slack_token_has_no_allowlist() {
+  case_start "${FUNCNAME[0]}"
+  # 002's block rejects this too, but only after onboarding, the credential
+  # write and the whole config mutation had already happened.
+  run_entrypoint SLACK_BOT_TOKEN=xoxb-test SLACK_APP_TOKEN=xapp-test
+  assert_file_absent "openclaw.json" "$RUN_CONFIG"
+  if onboarding_ran; then fail "onboarding ran despite a rejected configuration"; fi
+  case_end
+}
+
+should_exit_non_zero_when_the_slack_token_has_no_app_token() {
+  case_start "${FUNCNAME[0]}"
+  # Socket Mode cannot connect without it, and nothing checked for it before.
+  run_entrypoint SLACK_BOT_TOKEN=xoxb-test SLACK_ALLOW_FROM=U0123ABCDE
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "names the variable" "$RUN_ERR" "SLACK_APP_TOKEN is required"
+  assert_contains "names the scope" "$RUN_ERR" "connections:write"
+  case_end
+}
+
+should_report_both_channels_when_both_are_incomplete() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint TELEGRAM_BOT_TOKEN=8123:AAFtelegram SLACK_BOT_TOKEN=xoxb-test
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "telegram" "$RUN_ERR" "TELEGRAM_ALLOW_FROM"
+  assert_contains "slack app token" "$RUN_ERR" "SLACK_APP_TOKEN"
+  assert_contains "slack allowlist" "$RUN_ERR" "SLACK_ALLOW_FROM"
+  case_end
+}
+
+should_not_require_a_channel_allowlist_when_no_channel_is_configured() {
+  case_start "${FUNCNAME[0]}"
+  # An operator not using either channel must not be made to configure one.
+  run_entrypoint
+  assert_equals "exit status" "0" "$RUN_STATUS"
+  assert_equals "telegram absent" "null" "$(config_get '.channels.telegram')"
+  assert_equals "slack absent" "null" "$(config_get '.channels.slack')"
+  case_end
+}
+
+# --- HERMES_OWNER ----------------------------------------------------------
+
+should_exit_non_zero_when_no_allowlist_entry_can_be_an_owner() {
+  case_start "${FUNCNAME[0]}"
+  # A wildcard admits the workspace and is a legal allowlist entry, but it is
+  # not an identity: nothing can be DM'd at it, so the heartbeat would have no
+  # route and would be skipped in silence.
+  run_entrypoint SLACK_BOT_TOKEN=xoxb-test SLACK_APP_TOKEN=xapp-test SLACK_ALLOW_FROM='*'
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "names the variable" "$RUN_ERR" "HERMES_OWNER"
+  assert_contains "names the consequence" "$RUN_ERR" "has no"
+  assert_contains "shows the fix" "$RUN_ERR" "HERMES_OWNER=slack:U0123ABCDE"
+  case_end
+}
+
+should_accept_a_wildcard_allowlist_when_an_owner_is_named() {
+  case_start "${FUNCNAME[0]}"
+  # `*` stays a valid upstream configuration, as the README documents. It just
+  # cannot also be the answer to who the owner is.
+  run_entrypoint SLACK_BOT_TOKEN=xoxb-test SLACK_APP_TOKEN=xapp-test \
+    SLACK_ALLOW_FROM='*' HERMES_OWNER=slack:U0123ABCDE
+  assert_equals "exit status" "0" "$RUN_STATUS"
+  assert_equals "owner" '["slack:U0123ABCDE"]' "$(config_get '.commands.ownerAllowFrom')"
+  case_end
+}
+
+should_reject_an_owner_without_a_channel_prefix() {
+  case_start "${FUNCNAME[0]}"
+  # A bare id cannot be routed: the same number means different accounts on
+  # different channels.
+  run_entrypoint TELEGRAM_BOT_TOKEN=8123:AAFtelegram TELEGRAM_ALLOW_FROM=123456789 \
+    HERMES_OWNER=123456789
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "names the entry" "$RUN_ERR" "HERMES_OWNER entry '123456789'"
+  assert_contains "names the shape" "$RUN_ERR" "expected <channel>:<id>"
+  assert_file_absent "openclaw.json" "$RUN_CONFIG"
+  case_end
+}
+
+should_reject_a_wildcard_owner() {
+  case_start "${FUNCNAME[0]}"
+  # It validates upstream, grants nothing, and strips the owner-only tools
+  # while still reading like an owner.
+  run_entrypoint TELEGRAM_BOT_TOKEN=8123:AAFtelegram TELEGRAM_ALLOW_FROM=123456789 \
+    HERMES_OWNER='telegram:*'
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "names the reason" "$RUN_ERR" "a wildcard is not an owner identity"
+  case_end
+}
+
+should_not_call_the_owner_missing_when_it_was_supplied_and_rejected() {
+  case_start "${FUNCNAME[0]}"
+  # Telling an operator who set the variable that it is missing sends them to
+  # add a line they have already added. The rejection names the entry; that is
+  # the whole message.
+  run_entrypoint TELEGRAM_BOT_TOKEN=8123:AAFtelegram TELEGRAM_ALLOW_FROM=123456789 \
+    HERMES_OWNER='telegram:*'
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "names the entry" "$RUN_ERR" "a wildcard is not an owner identity"
+  assert_not_contains "not reported as missing" "$RUN_ERR" "missing required environment variables"
+  # The guidance still prints — the operator needs to know what to put there.
+  assert_contains "still explains the variable" "$RUN_ERR" "HERMES_OWNER=telegram:123456789"
+  case_end
+}
+
+should_not_blame_the_owner_when_the_allowlist_itself_is_missing() {
+  case_start "${FUNCNAME[0]}"
+  # Nothing to derive from is the allowlist's problem, and it is already on the
+  # list. Naming HERMES_OWNER as well would send the operator after a second
+  # variable that setting the first one supplies.
+  run_entrypoint TELEGRAM_BOT_TOKEN=8123:AAFtelegram
+  assert_contains "names the allowlist" "$RUN_ERR" "TELEGRAM_ALLOW_FROM"
+  assert_not_contains "does not name the owner" "$RUN_ERR" "HERMES_OWNER"
+  case_end
+}
+
+should_exit_non_zero_when_a_required_variable_is_empty_rather_than_omitted() {
+  case_start "${FUNCNAME[0]}"
+  # `docker run -e HERMES_TONE=` sets it to the empty string rather than
+  # leaving it out. Both mean the operator supplied nothing.
+  run_entrypoint --omit HERMES_TONE HERMES_TONE=
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_contains "names the variable" "$RUN_ERR" "HERMES_TONE"
+  case_end
+}
+
+should_exit_non_zero_when_a_required_variable_is_whitespace_only() {
+  case_start "${FUNCNAME[0]}"
+  # Not a missing variable — a value. It is accepted, because refusing it would
+  # be this script deciding what a tone may say.
+  run_entrypoint --omit HERMES_TONE HERMES_TONE=' '
+  assert_equals "exit status" "0" "$RUN_STATUS"
+  case_end
+}
+
+should_exit_non_zero_when_a_required_variable_is_omitted
+should_name_the_omitted_variable_when_a_required_variable_is_omitted
+should_write_nothing_when_a_required_variable_is_omitted
+should_not_start_the_gateway_when_a_required_variable_is_omitted
+should_not_print_a_stack_trace_when_a_required_variable_is_omitted
+should_name_the_variable_when_the_timezone_is_omitted
+should_name_the_api_key_when_it_is_omitted
+should_list_every_missing_variable_when_several_are_omitted
+should_say_nothing_was_written_when_a_start_is_rejected
+should_exit_non_zero_when_the_telegram_token_has_no_allowlist
+should_not_throw_a_type_error_when_the_telegram_token_has_no_allowlist
+should_write_nothing_when_the_telegram_token_has_no_allowlist
+should_exit_non_zero_when_the_telegram_allowlist_lists_no_ids
+should_start_when_the_telegram_allowlist_is_supplied
+should_exit_non_zero_when_the_slack_token_has_no_allowlist
+should_write_nothing_when_the_slack_token_has_no_allowlist
+should_exit_non_zero_when_the_slack_token_has_no_app_token
+should_report_both_channels_when_both_are_incomplete
+should_not_require_a_channel_allowlist_when_no_channel_is_configured
+should_exit_non_zero_when_no_allowlist_entry_can_be_an_owner
+should_accept_a_wildcard_allowlist_when_an_owner_is_named
+should_reject_an_owner_without_a_channel_prefix
+should_reject_a_wildcard_owner
+should_not_blame_the_owner_when_the_allowlist_itself_is_missing
+should_not_call_the_owner_missing_when_it_was_supplied_and_rejected
+should_exit_non_zero_when_a_required_variable_is_empty_rather_than_omitted
+should_exit_non_zero_when_a_required_variable_is_whitespace_only
+
+report_totals "validation-test"

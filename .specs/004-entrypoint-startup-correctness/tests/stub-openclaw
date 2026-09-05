@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+#
+# Fake `openclaw`, standing in for the subcommands the entrypoint and these
+# cases use. No network, no credentials, no image.
+#
+#   onboard          writes what onboarding leaves behind — by default WITHOUT a
+#                    `tools` key, which is the shape that exposed B2
+#   gateway          records that it was reached, then exits 0 instead of serving
+#   gateway health   the readiness probe 003's registrar polls
+#   config validate  a transcription of the upstream schema, for the keys this
+#                    entrypoint writes
+#   config get       one dotted path out of the config
+#   automations ...  just enough that the registrar finishes and gets out of the
+#                    way; 003's stub is the one that tests registration
+#
+# Behaviour switches, all defaulting to the happy path:
+#
+#   OPENCLAW_STUB_ONBOARD_TOOLS   yes  -> onboarding also writes "tools": {}
+#   OPENCLAW_STUB_ONBOARD_EXTRA   json -> merged into the onboarded config, which
+#                                         is how a case injects a key the
+#                                         validator must reject
+#   OPENCLAW_STUB_VALIDATE_ERROR  text -> validate rejects with this message
+#                                         whatever the config says
+#
+# The onboarded config omits `tools` on purpose. Real onboarding's output is not
+# documented, and the entrypoint used to write config.tools.loopDetection
+# thirteen lines above the guard that created config.tools — a TypeError that
+# only appears when the key is absent. A stub that always supplied it would have
+# made B2 untestable, which is how the defect survived this long.
+
+set -uo pipefail
+
+config="${HOME}/.openclaw/openclaw.json"
+markers="${OPENCLAW_STUB_MARKERS:-}"
+
+usage() {
+  printf 'stub-openclaw: unsupported invocation: %s\n' "$*" >&2
+  exit 64
+}
+
+case "${1:-}" in
+  onboard)
+    mkdir -p "$(dirname "$config")"
+    if [ -n "$markers" ]; then
+      : > "${markers}/onboarded"
+    fi
+    STUB_CONFIG="$config" \
+    STUB_TOOLS="${OPENCLAW_STUB_ONBOARD_TOOLS:-no}" \
+    STUB_EXTRA="${OPENCLAW_STUB_ONBOARD_EXTRA:-}" node -e "
+      const fs = require('fs');
+      const config = {
+        gateway: { port: 3000, bind: 'lan' },
+        agents: { defaults: {} },
+        channels: {},
+        env: {}
+      };
+      if (process.env.STUB_TOOLS === 'yes') config.tools = {};
+      if (process.env.STUB_EXTRA) Object.assign(config, JSON.parse(process.env.STUB_EXTRA));
+      fs.writeFileSync(process.env.STUB_CONFIG, JSON.stringify(config, null, 2) + '\n');
+    "
+    exit $?
+    ;;
+
+  gateway)
+    case "${2:-}" in
+      health)
+        printf 'ok\n'
+        exit 0
+        ;;
+      *)
+        # `exec openclaw gateway` is the last line of the entrypoint, so this
+        # marker is how a case asserts that a rejected configuration never got
+        # that far.
+        if [ -n "$markers" ]; then
+          : > "${markers}/gateway-started"
+        fi
+        exit 0
+        ;;
+    esac
+    ;;
+
+  automations | cron)
+    # The registrar is 003's; it only has to finish quietly here. Reporting the
+    # briefing as already present makes it log one line and exit, instead of
+    # retrying against a store this stub does not keep.
+    case "${2:-}" in
+      list) printf 'job-0001  morning-briefing  0 8 * * *\n'; exit 0 ;;
+      *) usage "$@" ;;
+    esac
+    ;;
+
+  config)
+    case "${2:-}" in
+      get)
+        [ -n "${3:-}" ] || usage "$@"
+        STUB_CONFIG="$config" STUB_QUERY="$3" node -e "
+          const fs = require('fs');
+          const config = JSON.parse(fs.readFileSync(process.env.STUB_CONFIG, 'utf8'));
+          const value = process.env.STUB_QUERY.split('.').reduce(
+            (node, key) => (node === undefined || node === null ? undefined : node[key]),
+            config
+          );
+          if (value === undefined) process.exit(1);
+          console.log(typeof value === 'string' ? value : JSON.stringify(value));
+        "
+        exit $?
+        ;;
+
+      validate)
+        if [ -n "$markers" ]; then
+          : > "${markers}/config-validated"
+        fi
+        if [ -n "${OPENCLAW_STUB_VALIDATE_ERROR:-}" ]; then
+          printf '%s\n' "$OPENCLAW_STUB_VALIDATE_ERROR" >&2
+          exit 1
+        fi
+        STUB_CONFIG="$config" STUB_JSON="${3:-}" node -e "
+          const fs = require('fs');
+
+          // Transcribed from docs.openclaw.ai, and deliberately narrow: it
+          // rejects unknown keys only INSIDE the objects it has evidence for,
+          // and says nothing about top-level keys onboarding may write that
+          // this transcription has never seen. Upstream is strict everywhere;
+          // a stub that guessed at the parts it could not read would reject
+          // configurations that are fine.
+          const AGENT_DEFAULT_KEYS = [
+            'workspace', 'cwd', 'repoRoot', 'skills', 'skipBootstrap',
+            'skipOptionalBootstrapFiles', 'contextInjection', 'bootstrapMaxChars',
+            'bootstrapTotalMaxChars', 'startupContext', 'contextLimits',
+            'contextPruning', 'model', 'utilityModel', 'imageModel', 'mediaModels',
+            'pdfModel', 'models', 'params', 'pdfMaxMb', 'pdfMaxPages',
+            'thinkingDefault', 'fastModeDefault', 'verboseDefault',
+            'reasoningDefault', 'elevatedDefault', 'toolProgressDetail',
+            'timeoutSeconds', 'mediaMaxMb', 'maxConcurrent', 'modelSelectionScope',
+            'imageMaxDimensionPx', 'imageQuality', 'userTimezone', 'heartbeat',
+            'systemAgent', 'compaction', 'sandbox', 'blockStreamingDefault',
+            'blockStreamingBreak', 'blockStreamingChunk', 'blockStreamingCoalesce',
+            'humanDelay', 'typingMode', 'typingIntervalSeconds'
+          ];
+          const HEARTBEAT_KEYS = [
+            'agentId', 'every', 'activeHours', 'model', 'session', 'target',
+            'directPolicy', 'to', 'accountId', 'prompt', 'timeoutSeconds',
+            'lightContext', 'isolatedSession'
+          ];
+          const ACTIVE_HOURS_KEYS = ['start', 'end', 'timezone'];
+          const TOOLS_KEYS = [
+            'profile', 'allow', 'deny', 'byProvider', 'toolsBySender', 'elevated',
+            'github', 'exec', 'loopDetection', 'web', 'media', 'agentToAgent',
+            'sessions', 'sessions_spawn', 'updatePlan', 'codeMode', 'sandbox'
+          ];
+          const TOOLS_EXEC_KEYS = [
+            'backgroundMs', 'timeoutSeconds', 'cleanupMs', 'approvalRunningNoticeMs',
+            'notifyOnExit', 'notifyOnExitEmptySuccess', 'commandHighlighting',
+            'applyPatch', 'grantExpiryDays'
+          ];
+          const TELEGRAM_KEYS = [
+            'enabled', 'botToken', 'dmPolicy', 'allowFrom', 'groups', 'groupPolicy',
+            'groupAllowFrom', 'accounts', 'defaultAccount'
+          ];
+          const ENV_KEYS = ['vars', 'shellEnv'];
+          const COMMANDS_KEYS = ['ownerAllowFrom'];
+          const CRON_KEYS = ['enabled'];
+          const PROFILES = ['minimal', 'coding', 'messaging', 'full'];
+          const DM_POLICIES = ['pairing', 'allowlist', 'open', 'disabled'];
+          const HEARTBEAT_TARGETS = ['owner', 'last', 'none'];
+
+          // Keys this entrypoint writes that the published docs do not list.
+          // They are NOT rejected: 'absent from one page' is weaker evidence
+          // than 'documented as something else', and removing working
+          // configuration on that basis would be a guess. They are reported
+          // instead, so a new hand-written key cannot be added without someone
+          // noticing that nothing has verified it.
+          const UNVERIFIED = [
+            'tools.exec.security',
+            'tools.loopDetection.warningThreshold',
+            'tools.loopDetection.criticalThreshold',
+            'tools.loopDetection.globalCircuitBreakerThreshold'
+          ];
+
+          const problems = [];
+          const unverified = [];
+          const config = JSON.parse(fs.readFileSync(process.env.STUB_CONFIG, 'utf8'));
+
+          const isObject = (value) =>
+            typeof value === 'object' && value !== null && Array.isArray(value) === false;
+
+          const checkKeys = (node, path, allowed) => {
+            if (isObject(node) === false) {
+              problems.push(path + ': expected an object');
+              return false;
+            }
+            for (const key of Object.keys(node)) {
+              const full = path + '.' + key;
+              if (allowed.includes(key)) continue;
+              if (UNVERIFIED.includes(full)) { unverified.push(full); continue; }
+              problems.push(full + ': unrecognised key');
+            }
+            return true;
+          };
+
+          const enumCheck = (value, path, allowed) => {
+            if (value !== undefined && allowed.includes(value) === false) {
+              problems.push(path + ': expected one of ' + allowed.join(', '));
+            }
+          };
+
+          // env — the one this entrypoint used to get wrong. An inline
+          // environment variable lives at env.vars.<NAME>; a bare env.<NAME> is
+          // an unrecognised key, and upstream rejects it.
+          if (config.env !== undefined) checkKeys(config.env, 'env', ENV_KEYS);
+
+          if (config.commands !== undefined) {
+            checkKeys(config.commands, 'commands', COMMANDS_KEYS);
+            const owners = config.commands.ownerAllowFrom;
+            if (owners !== undefined) {
+              if (Array.isArray(owners) === false) {
+                problems.push('commands.ownerAllowFrom: expected an array');
+              } else {
+                for (const entry of owners) {
+                  if (typeof entry !== 'string') {
+                    problems.push('commands.ownerAllowFrom: expected strings');
+                  }
+                }
+              }
+            }
+          }
+
+          if (config.cron !== undefined) checkKeys(config.cron, 'cron', CRON_KEYS);
+
+          if (config.tools !== undefined) {
+            checkKeys(config.tools, 'tools', TOOLS_KEYS);
+            enumCheck(config.tools.profile, 'tools.profile', PROFILES);
+            if (config.tools.exec !== undefined) {
+              checkKeys(config.tools.exec, 'tools.exec', TOOLS_EXEC_KEYS);
+            }
+            if (config.tools.loopDetection !== undefined) {
+              checkKeys(config.tools.loopDetection, 'tools.loopDetection', ['enabled']);
+            }
+          }
+
+          const defaults = (config.agents || {}).defaults;
+          if (defaults !== undefined) {
+            checkKeys(defaults, 'agents.defaults', AGENT_DEFAULT_KEYS);
+            const heartbeat = defaults.heartbeat;
+            if (heartbeat !== undefined) {
+              checkKeys(heartbeat, 'agents.defaults.heartbeat', HEARTBEAT_KEYS);
+              // owner | last | none, or an explicit channel id.
+              if (typeof heartbeat.target === 'string' &&
+                  HEARTBEAT_TARGETS.includes(heartbeat.target) === false &&
+                  /^[a-z][a-z0-9-]*\$/.test(heartbeat.target) === false) {
+                problems.push('agents.defaults.heartbeat.target: expected one of ' +
+                  HEARTBEAT_TARGETS.join(', ') + ', or a channel id');
+              }
+              if (heartbeat.activeHours !== undefined) {
+                checkKeys(heartbeat.activeHours, 'agents.defaults.heartbeat.activeHours', ACTIVE_HOURS_KEYS);
+                for (const key of ['start', 'end', 'timezone']) {
+                  const value = heartbeat.activeHours[key];
+                  if (value !== undefined && typeof value !== 'string') {
+                    problems.push('agents.defaults.heartbeat.activeHours.' + key + ': expected a string');
+                  }
+                }
+              }
+            }
+          }
+
+          const telegram = (config.channels || {}).telegram;
+          if (telegram !== undefined) {
+            checkKeys(telegram, 'channels.telegram', TELEGRAM_KEYS);
+            enumCheck(telegram.dmPolicy, 'channels.telegram.dmPolicy', DM_POLICIES);
+            // Documented cross-field rule: an allowlist policy with nothing in
+            // the allowlist admits nobody and is rejected rather than accepted
+            // as a bot that silently never answers.
+            if (telegram.dmPolicy === 'allowlist') {
+              const allow = Array.isArray(telegram.allowFrom) ? telegram.allowFrom : [];
+              if (allow.filter((entry) => String(entry).trim() !== '').length === 0) {
+                problems.push('channels.telegram.dmPolicy=allowlist requires a non-empty channels.telegram.allowFrom');
+              }
+            }
+          }
+
+          const json = process.env.STUB_JSON === '--json';
+          if (problems.length > 0) {
+            const report = { ok: false, problems, unverified };
+            console.error(json ? JSON.stringify(report, null, 2) : problems.join('\n'));
+            process.exit(1);
+          }
+          const report = { ok: true, unverified };
+          if (json) {
+            console.log(JSON.stringify(report, null, 2));
+          } else if (unverified.length > 0) {
+            console.error('unverified: ' + unverified.join(' '));
+          }
+        "
+        exit $?
+        ;;
+
+      *)
+        usage "$@"
+        ;;
+    esac
+    ;;
+
+  *)
+    usage "$@"
+    ;;
+esac

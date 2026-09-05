@@ -162,6 +162,7 @@ the commit message, because two of them constrain what a later change may do.
    `channels.slack.actions`, deploy that, verify on a test workspace, and only then reinstall
    the app with the smaller scope set. That is agent-capability work, not access control.
 
-3. **Token-only teardown.** *Answered: 004 owns it.* It is already 004's Open Question 3,
+3. **Token-only teardown.** *Answered: 004 owns it — and 004 has since deferred it again, to
+   [`009`](../009-channel-teardown/SPEC.md), carrying both channels' halves.* It is already 004's Open Question 3,
    and it is one mechanism covering both channels — Slack alone would leave Telegram
    asymmetric, which is the class of gap this spec exists to remove.

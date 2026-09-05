@@ -141,8 +141,17 @@ gateway_started() {
 }
 
 # A value out of the config the last run wrote, by jq path expression.
+#
+# A run rejected in 004's phase 1 exits before onboarding, so there is no config
+# file at all. That is the same answer these cases are asking for — the channel
+# is not configured — only stronger, so an absent file reads as an empty config
+# rather than as a jq failure.
 config_get() {
-  jq -c -r "$1" "$RUN_CONFIG"
+  if [ -f "$RUN_CONFIG" ]; then
+    jq -c -r "$1" "$RUN_CONFIG"
+  else
+    printf '%s\n' '{}' | jq -c -r "$1"
+  fi
 }
 
 # `openclaw config validate` against the config the last run wrote.

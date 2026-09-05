@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+#
+# Sensitivity check. Not part of `run`: it is slow, and it is a check on the
+# cases rather than on the entrypoint.
+#
+# Each mutation changes exactly one behaviour in a copy of entrypoint.sh and
+# asserts that at least one case notices. A mutation nothing catches is a hole
+# in the suite.
+#
+#   .specs/004-entrypoint-startup-correctness/tests/mutation-check [name-substring]
+#
+# With an argument, only mutations whose name contains it are run — the whole
+# set takes a while, and this is how you re-check one after editing its anchor.
+#
+# Every anchor is asserted to occur exactly once in the whole file before it is
+# applied, and a bad anchor is reported as a bad anchor rather than as a caught
+# or uncaught mutation. 002 learned that the hard way: two of its mutations
+# anchored on a string that also occurred in a neighbouring block, so they
+# mutated code nothing there tested and read as clean.
+
+# The anchors below are literal fragments of entrypoint.sh, so every $ in them
+# is meant to stay a $. Single quotes are the point.
+# shellcheck disable=SC2016
+
+set -uo pipefail
+
+tests_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${tests_dir}/../../.." && pwd)"
+original="${repo_root}/infrastructure/ansible/roles/openclaw/files/entrypoint.sh"
+
+only="${1:-}"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+missed=()
+skipped=0
+
+selected() {
+  if [ -z "$only" ]; then
+    return 0
+  fi
+  case "$1" in
+    *"$only"*) return 0 ;;
+    *) skipped=$((skipped + 1)); return 1 ;;
+  esac
+}
+
+# mutate <name> <anchor> <replacement>
+#
+# The anchor is a fixed string, matched against the whole file so that it may
+# span lines; the replacement takes its place. Both are passed through the
+# environment, never interpolated into a pattern.
+mutate() {
+  local name="$1" anchor="$2" replacement="$3"
+  local mutant="${work}/entrypoint.sh" status caught out
+
+  selected "$name" || return 0
+
+  MUT_ANCHOR="$anchor" MUT_REPLACEMENT="$replacement" \
+    python3 -c '
+import os, sys
+src, dst = sys.argv[1], sys.argv[2]
+anchor = os.environ["MUT_ANCHOR"]
+replacement = os.environ["MUT_REPLACEMENT"]
+s = open(src).read()
+hits = s.count(anchor)
+if hits != 1:
+    sys.stderr.write("hits=%d\n" % hits)
+    sys.exit(3)
+open(dst, "w").write(s.replace(anchor, replacement, 1))
+' "$original" "$mutant"
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    printf 'ANCHOR %-46s did not match exactly once — not applied\n' "$name" >&2
+    missed+=("$name (bad anchor)")
+    return
+  fi
+
+  # A mutant that no longer parses proves nothing about the cases.
+  if ! bash -n "$mutant" 2>/dev/null; then
+    printf 'SYNTAX %-46s the mutant does not parse — not applied\n' "$name" >&2
+    missed+=("$name (bad mutant)")
+    return
+  fi
+
+  # validation-test first: it is the largest and the fastest to fail. The
+  # others only run while nothing has caught the mutation yet.
+  out="$(ENTRYPOINT="$mutant" bash "${tests_dir}/validation-test" 2>&1)"
+  caught="$(printf '%s\n' "$out" | grep '^FAIL ' | sed 's/^FAIL //' | paste -sd, -)"
+  if [ -z "$caught" ]; then
+    out="$(ENTRYPOINT="$mutant" bash "${tests_dir}/config-test" 2>&1
+           ENTRYPOINT="$mutant" bash "${tests_dir}/gate-test" 2>&1
+           ENTRYPOINT="$mutant" bash "${tests_dir}/state-test" 2>&1)"
+    caught="$(printf '%s\n' "$out" | grep '^FAIL ' | sed 's/^FAIL //' | paste -sd, -)"
+  fi
+
+  if [ -n "$caught" ]; then
+    printf '%-46s caught by %s\n' "$name" "$caught"
+  else
+    printf '%-46s *** NOT CAUGHT ***\n' "$name" >&2
+    missed+=("$name")
+  fi
+}
+
+# --- phase 1 exists, and is where it says it is ----------------------------
+
+mutate 'validation runs after the writes' \
+  'required_vars=(
+  ANTHROPIC_API_KEY' \
+  'if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then openclaw onboard --non-interactive --accept-risk --mode local --auth-choice apiKey --anthropic-api-key "${ANTHROPIC_API_KEY:-}" --gateway-port 3000 --gateway-bind lan --skip-skills --skip-health; fi
+required_vars=(
+  ANTHROPIC_API_KEY'
+
+mutate 'the api key is not required' \
+  'required_vars=(
+  ANTHROPIC_API_KEY
+  HERMES_VIBE' \
+  'required_vars=(
+  HERMES_VIBE'
+
+mutate 'the timezone is not required' \
+  '  HERMES_TIMEZONE
+  HERMES_LOCALE' \
+  '  HERMES_LOCALE'
+
+mutate 'only the first missing variable is reported' \
+  '    missing+=("$var")' \
+  '    missing+=("$var"); break'
+
+mutate 'the reassurance about state is dropped' \
+  "    echo 'Nothing has been written. The persisted configuration is untouched.'" \
+  '    :'
+
+# --- the conditional rules -------------------------------------------------
+
+mutate 'the telegram allowlist is not required' \
+  '  missing+=(TELEGRAM_ALLOW_FROM)' \
+  '  :'
+
+mutate 'an empty telegram allowlist is accepted' \
+  'if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -z "$(list_entries "${TELEGRAM_ALLOW_FROM:-}")" ]; then' \
+  'if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -z "${TELEGRAM_ALLOW_FROM:-}" ]; then'
+
+mutate 'the slack app token is not required' \
+  '    missing+=(SLACK_APP_TOKEN)' \
+  '    :'
+
+mutate 'the slack allowlist is not required' \
+  '    missing+=(SLACK_ALLOW_FROM)' \
+  '    :'
+
+# --- the owner -------------------------------------------------------------
+
+mutate 'a channel with no usable owner is accepted' \
+  '  missing+=(HERMES_OWNER)' \
+  '  :'
+
+mutate 'a wildcard is accepted as an owner' \
+  "      *'*'*) rejected+=(\"HERMES_OWNER entry '\${entry}': a wildcard is not an owner identity\") ;;" \
+  "      *'*'*) owner_entries+=(\"\$entry\") ;;"
+
+mutate 'a rejected owner is also called missing' \
+  'if [ ${#missing[@]} -eq 0 ] && [ ${#rejected[@]} -eq 0 ] &&
+   [ ${#owner_entries[@]} -eq 0 ] && [ "$owner_candidates" -gt 0 ]; then' \
+  'if [ ${#missing[@]} -eq 0 ] &&
+   [ ${#owner_entries[@]} -eq 0 ] && [ "$owner_candidates" -gt 0 ]; then'
+
+mutate 'a rejected owner gets no guidance' \
+  'explain_vars=("${missing[@]}")
+if [ ${#rejected[@]} -gt 0 ] && [ -n "${HERMES_OWNER:-}" ]; then
+  explain_vars+=(HERMES_OWNER)
+fi' \
+  'explain_vars=("${missing[@]}")'
+
+mutate 'a malformed owner is passed through' \
+  '      *) rejected+=("HERMES_OWNER entry '"'"'${entry}'"'"': expected <channel>:<id>, for example telegram:123456789") ;;' \
+  '      *) owner_entries+=("$entry") ;;'
+
+mutate 'the owner is not channel-prefixed' \
+  '        *) owner_entries+=("telegram:${entry}") ;;' \
+  '        *) owner_entries+=("${entry}") ;;'
+
+mutate 'slack is derived before telegram' \
+  '  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+    while IFS= read -r entry; do
+      owner_candidates=$((owner_candidates + 1))
+      case "$entry" in
+        '"'"'*'"'"'|accessGroup:*) ;;
+        *) owner_entries+=("telegram:${entry}") ;;
+      esac
+    done < <(list_entries "${TELEGRAM_ALLOW_FROM:-}")
+  fi
+  if [ -n "${SLACK_BOT_TOKEN:-}" ]; then' \
+  '  if [ -n "${SLACK_BOT_TOKEN:-}" ]; then'
+
+mutate 'an access group is treated as an owner' \
+  "        '*'|accessGroup:*) ;;
+        *) owner_entries+=(\"slack:\${entry}\") ;;" \
+  "        '*') ;;
+        *) owner_entries+=(\"slack:\${entry}\") ;;"
+
+mutate 'the owner is never written to the config' \
+  '    config.commands.ownerAllowFrom = ownerAllowFrom;' \
+  '    config.commands.ownerAllowFrom = ownerAllowFrom.slice(0, 0);'
+
+# --- phase 2 ---------------------------------------------------------------
+
+mutate 'the tools guard returns below its first use' \
+  '  config.tools = config.tools || {};
+  config.tools.loopDetection = {' \
+  '  config.tools.loopDetection = {'
+
+mutate 'the heartbeat targets the last conversation' \
+  "    target: 'owner'," \
+  "    target: 'last',"
+
+mutate 'the api key keeps its undocumented path' \
+  '  config.env.vars.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;' \
+  '  config.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;'
+
+mutate 'the legacy api key is left in place' \
+  '  delete config.env.ANTHROPIC_API_KEY;' \
+  '  ;'
+
+mutate 'approvals are rewritten on every start' \
+  'if [ ! -f "$HOME/.openclaw/exec-approvals.json" ]; then' \
+  'if true; then'
+
+# --- phase 3 ---------------------------------------------------------------
+
+mutate 'the validate gate is removed' \
+  'if ! config_validation="$(openclaw config validate 2>&1)"; then' \
+  'if false; then'
+
+mutate 'the gate reports but does not stop the start' \
+  '  } >&2
+  exit 1
+fi
+
+echo '"'"'config: validated'"'"'' \
+  '  } >&2
+fi
+
+echo '"'"'config: validated'"'"''
+
+mutate 'the validator message is logged unredacted' \
+  '    redact_secrets "$config_validation" | sed '"'"'s/^/    /'"'"'' \
+  '    printf '"'"'%s\n'"'"' "$config_validation" | sed '"'"'s/^/    /'"'"''
+
+mutate 'the validator message is swallowed' \
+  '    redact_secrets "$config_validation" | sed '"'"'s/^/    /'"'"'' \
+  '    :'
+
+printf '\n'
+if [ "$skipped" -gt 0 ]; then
+  printf '%d mutation(s) skipped by the filter.\n' "$skipped"
+fi
+if [ ${#missed[@]} -eq 0 ]; then
+  printf 'Every mutation was caught.\n'
+  exit 0
+fi
+printf '%d mutation(s) survived or could not be applied:\n' "${#missed[@]}" >&2
+printf '  %s\n' "${missed[@]}" >&2
+exit 1

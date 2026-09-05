@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+#
+# What phase 2 writes into openclaw.json.
+#
+# The onboarded config these run against has no `tools` key, which is the shape
+# that exposed B2: the entrypoint set config.tools.loopDetection thirteen lines
+# above the guard that created config.tools. A stub that always supplied the key
+# would make every case here pass against the defect.
+#
+# One behaviour per case, named should_<behaviour>_when_<condition>.
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+TELEGRAM_ENV=(TELEGRAM_BOT_TOKEN=8123:AAFtelegram TELEGRAM_ALLOW_FROM=123456789)
+
+# --- B2: the guard above its first use -------------------------------------
+
+should_create_the_tools_object_when_onboarding_omitted_it() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  assert_equals "the entrypoint survived" "0" "$RUN_STATUS"
+  assert_not_contains "no TypeError" "$RUN_ERR" "TypeError"
+  assert_equals "loop detection landed" "true" "$(config_get '.tools.loopDetection.enabled')"
+  assert_equals "profile landed" "full" "$(config_get '.tools.profile')"
+  case_end
+}
+
+should_write_every_tools_key_when_onboarding_omitted_the_object() {
+  case_start "${FUNCNAME[0]}"
+  # The whole block after the guard, not only the first key past it: a guard
+  # moved to the wrong place would leave a later key on the floor.
+  run_entrypoint
+  assert_equals "deny list" '["gateway"]' "$(config_get '.tools.deny')"
+  assert_equals "exec security" "full" "$(config_get '.tools.exec.security')"
+  assert_equals "warning threshold" "5" "$(config_get '.tools.loopDetection.warningThreshold')"
+  assert_equals "critical threshold" "10" "$(config_get '.tools.loopDetection.criticalThreshold')"
+  assert_equals "circuit breaker" "15" "$(config_get '.tools.loopDetection.globalCircuitBreakerThreshold')"
+  assert_equals "no stale allow list" "null" "$(config_get '.tools.allow')"
+  case_end
+}
+
+should_preserve_an_existing_tools_object_when_onboarding_wrote_one() {
+  case_start "${FUNCNAME[0]}"
+  # The guard is `||`, not an assignment: a container whose onboarding does
+  # write the key must not have it replaced.
+  run_entrypoint OPENCLAW_STUB_ONBOARD_TOOLS=yes
+  assert_equals "the entrypoint survived" "0" "$RUN_STATUS"
+  assert_equals "loop detection landed" "true" "$(config_get '.tools.loopDetection.enabled')"
+  case_end
+}
+
+# --- B4c: the key moved to where the schema keeps it -----------------------
+
+should_write_the_api_key_under_env_vars() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint ANTHROPIC_API_KEY=sk-ant-placed
+  assert_equals "the documented path" "sk-ant-placed" "$(config_get '.env.vars.ANTHROPIC_API_KEY')"
+  case_end
+}
+
+should_not_leave_the_api_key_at_the_undocumented_path() {
+  case_start "${FUNCNAME[0]}"
+  # A bare env.<NAME> is an unrecognised key: env holds `vars` and `shellEnv`,
+  # nothing else. Left in place it fails the phase 3 gate.
+  run_entrypoint
+  assert_equals "the entrypoint succeeded" "0" "$RUN_STATUS"
+  assert_equals "no bare env key" "null" "$(config_get '.env.ANTHROPIC_API_KEY')"
+  # A start that wrote nothing at all would satisfy the assertion above.
+  assert_equals "the key is at the documented path" "sk-ant-stub" \
+    "$(config_get '.env.vars.ANTHROPIC_API_KEY')"
+  case_end
+}
+
+should_remove_the_legacy_key_when_an_older_config_carries_one() {
+  case_start "${FUNCNAME[0]}"
+  # The upgrade path. A container built from an earlier image persisted the key
+  # at the bare path, so a start that only wrote the new one would leave both —
+  # and the gate would reject a config the container wrote itself.
+  run_entrypoint OPENCLAW_STUB_ONBOARD_EXTRA='{"env":{"ANTHROPIC_API_KEY":"sk-ant-legacy"}}'
+  assert_equals "the entrypoint survived" "0" "$RUN_STATUS"
+  assert_equals "legacy key removed" "null" "$(config_get '.env.ANTHROPIC_API_KEY')"
+  assert_equals "current key present" "sk-ant-stub" "$(config_get '.env.vars.ANTHROPIC_API_KEY')"
+  if ! gateway_started; then fail "the gateway was never reached"; fi
+  case_end
+}
+
+# --- B5: the heartbeat needs somewhere to report to ------------------------
+
+should_target_the_owner_when_the_heartbeat_is_configured() {
+  case_start "${FUNCNAME[0]}"
+  # 'last' follows the most recent external conversation. On a fresh container
+  # there is none, so the heartbeat was skipped; once there is one it may be a
+  # group chat, which is not where a summary of the user's inbox belongs.
+  run_entrypoint "${TELEGRAM_ENV[@]}"
+  assert_equals "target" "owner" "$(config_get '.agents.defaults.heartbeat.target')"
+  case_end
+}
+
+should_derive_the_owner_from_the_telegram_allowlist() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint "${TELEGRAM_ENV[@]}"
+  assert_equals "owner" '["telegram:123456789"]' "$(config_get '.commands.ownerAllowFrom')"
+  case_end
+}
+
+should_derive_the_owner_from_the_slack_allowlist() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint SLACK_BOT_TOKEN=xoxb-test SLACK_APP_TOKEN=xapp-test SLACK_ALLOW_FROM=U0123ABCDE
+  assert_equals "owner" '["slack:U0123ABCDE"]' "$(config_get '.commands.ownerAllowFrom')"
+  case_end
+}
+
+should_list_telegram_before_slack_when_both_channels_are_configured() {
+  case_start "${FUNCNAME[0]}"
+  # The first resolvable entry is the operator DM the heartbeat delivers to, so
+  # the order is part of the contract rather than an accident of the loop.
+  run_entrypoint "${TELEGRAM_ENV[@]}" \
+    SLACK_BOT_TOKEN=xoxb-test SLACK_APP_TOKEN=xapp-test SLACK_ALLOW_FROM=U0123ABCDE
+  assert_equals "owner" '["telegram:123456789","slack:U0123ABCDE"]' \
+    "$(config_get '.commands.ownerAllowFrom')"
+  case_end
+}
+
+should_prefer_the_explicit_owner_over_the_derived_one() {
+  case_start "${FUNCNAME[0]}"
+  # An allowlist may hold several people; only one of them is the operator.
+  run_entrypoint TELEGRAM_BOT_TOKEN=8123:AAFtelegram \
+    TELEGRAM_ALLOW_FROM=123456789,987654321 HERMES_OWNER=telegram:123456789
+  assert_equals "owner" '["telegram:123456789"]' "$(config_get '.commands.ownerAllowFrom')"
+  case_end
+}
+
+should_skip_an_access_group_when_deriving_the_owner() {
+  case_start "${FUNCNAME[0]}"
+  # accessGroup:<name> names a group rather than an account, so nothing can be
+  # DM'd at it. It stays valid in the allowlist and is simply not an owner.
+  run_entrypoint SLACK_BOT_TOKEN=xoxb-test SLACK_APP_TOKEN=xapp-test \
+    SLACK_ALLOW_FROM='accessGroup:on-call,U0123ABCDE'
+  assert_equals "owner" '["slack:U0123ABCDE"]' "$(config_get '.commands.ownerAllowFrom')"
+  assert_equals "the allowlist itself is untouched" '["accessGroup:on-call","U0123ABCDE"]' \
+    "$(config_get '.channels.slack.allowFrom')"
+  case_end
+}
+
+should_trim_the_owner_entries_when_the_allowlist_has_whitespace() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint TELEGRAM_BOT_TOKEN=8123:AAFtelegram TELEGRAM_ALLOW_FROM='  123456789 , 987654321  '
+  assert_equals "owner" '["telegram:123456789","telegram:987654321"]' \
+    "$(config_get '.commands.ownerAllowFrom')"
+  case_end
+}
+
+should_not_write_an_owner_when_no_channel_is_configured() {
+  case_start "${FUNCNAME[0]}"
+  # There is nobody to be the owner. An empty array would read as a configured
+  # allowlist admitting nobody rather than as an unanswered question.
+  run_entrypoint
+  assert_equals "the entrypoint succeeded" "0" "$RUN_STATUS"
+  assert_equals "no commands key" "null" "$(config_get '.commands')"
+  # Same trap: absence has to be absence from a config that was written.
+  assert_equals "the rest of the config landed" "full" "$(config_get '.tools.profile')"
+  case_end
+}
+
+# --- what the reordering must not have moved -------------------------------
+
+should_keep_the_rest_of_the_config_when_the_block_is_reordered() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  assert_equals "skipBootstrap" "true" "$(config_get '.agents.defaults.skipBootstrap')"
+  assert_equals "model" "anthropic/claude-haiku-4-5" "$(config_get '.agents.defaults.model')"
+  assert_equals "heartbeat interval" "59m" "$(config_get '.agents.defaults.heartbeat.every')"
+  assert_equals "active hours start" "08:00" "$(config_get '.agents.defaults.heartbeat.activeHours.start')"
+  assert_equals "active hours end" "20:00" "$(config_get '.agents.defaults.heartbeat.activeHours.end')"
+  assert_equals "active hours timezone" "UTC" "$(config_get '.agents.defaults.heartbeat.activeHours.timezone')"
+  assert_equals "compaction model" "anthropic/claude-haiku-4-5" "$(config_get '.agents.defaults.compaction.model')"
+  assert_equals "cache retention" "long" \
+    "$(config_get '.agents.defaults.models."anthropic/claude-haiku-4-5".params.cacheRetention')"
+  assert_equals "cron enabled" "true" "$(config_get '.cron.enabled')"
+  assert_equals "legacy agent key removed" "null" "$(config_get '.agent')"
+  assert_equals "legacy heartbeat key removed" "null" "$(config_get '.heartbeat')"
+  case_end
+}
+
+should_export_the_timezone_when_validation_passes() {
+  case_start "${FUNCNAME[0]}"
+  # TZ moved below phase 1, so it is now set later in the file than it was.
+  # Everything that reads it is later still, and the heartbeat's copy is the
+  # observable one.
+  run_entrypoint --omit HERMES_TIMEZONE HERMES_TIMEZONE=Australia/Melbourne
+  assert_equals "exit status" "0" "$RUN_STATUS"
+  assert_equals "timezone reached the config" "Australia/Melbourne" \
+    "$(config_get '.agents.defaults.heartbeat.activeHours.timezone')"
+  case_end
+}
+
+should_create_the_tools_object_when_onboarding_omitted_it
+should_write_every_tools_key_when_onboarding_omitted_the_object
+should_preserve_an_existing_tools_object_when_onboarding_wrote_one
+should_write_the_api_key_under_env_vars
+should_not_leave_the_api_key_at_the_undocumented_path
+should_remove_the_legacy_key_when_an_older_config_carries_one
+should_target_the_owner_when_the_heartbeat_is_configured
+should_derive_the_owner_from_the_telegram_allowlist
+should_derive_the_owner_from_the_slack_allowlist
+should_list_telegram_before_slack_when_both_channels_are_configured
+should_prefer_the_explicit_owner_over_the_derived_one
+should_skip_an_access_group_when_deriving_the_owner
+should_trim_the_owner_entries_when_the_allowlist_has_whitespace
+should_not_write_an_owner_when_no_channel_is_configured
+should_keep_the_rest_of_the_config_when_the_block_is_reordered
+should_export_the_timezone_when_validation_passes
+
+report_totals "config-test"

@@ -81,22 +81,31 @@ Owned regions: `:1-99` and the internal ordering of `:30-75`.
 
 ## Task List
 
-1. [ ] runtime-config: move the `required_vars` block above `export TZ`. Smallest diff,
+1. [x] runtime-config: move the `required_vars` block above `export TZ`. Smallest diff,
        fixes B4b outright.
-2. [ ] runtime-config: add `ANTHROPIC_API_KEY` to `required_vars` (B4c).
-3. [ ] runtime-config: add the conditional Telegram and Slack rules (B3a).
-4. [ ] runtime-config: move the `config.tools` guard above its first use; audit for siblings
+2. [x] runtime-config: add `ANTHROPIC_API_KEY` to `required_vars` (B4c).
+3. [x] runtime-config: add the conditional Telegram and Slack rules (B3a).
+4. [x] runtime-config: move the `config.tools` guard above its first use; audit for siblings
        (B2).
-5. [ ] runtime-config: make `exec-approvals.json` write-if-absent (B6).
-6. [ ] runtime-config: set `commands.ownerAllowFrom` (B5).
-7. [ ] runtime-config: add the `openclaw config validate` gate before `exec` (D2).
-8. [ ] tests: env-permutation matrix — each required variable omitted in turn; assert the
+5. [x] runtime-config: make `exec-approvals.json` write-if-absent (B6).
+6. [x] runtime-config: set `commands.ownerAllowFrom` (B5), and change `heartbeat.target`
+       from `last` to `owner` — setting the allowlist alone does not satisfy the acceptance
+       criterion, because `last` is documented to skip when there is no prior conversation.
+       See SPEC.md § Open Questions 2.
+7. [x] runtime-config: add the `openclaw config validate` gate before `exec` (D2).
+       The mitigation this task carries — *run it against the current config first* — could
+       only be done on paper: there is no image here. Doing it on paper found that
+       `config.env.ANTHROPIC_API_KEY` is an unrecognised key and would have failed the gate
+       on the container's own config, so the migration to `env.vars.<NAME>` landed with it.
+       Four further keys are still unverified; see SPEC.md § Still unverified. **Running the
+       real validator remains owed.**
+8. [x] tests: env-permutation matrix — each required variable omitted in turn; assert the
        named error, exit code, and that no file was written.
-9. [ ] tests: state-preservation — configure fully, restart without `ANTHROPIC_API_KEY`,
+9. [x] tests: state-preservation — configure fully, restart without `ANTHROPIC_API_KEY`,
        assert the persisted key is intact.
-10. [ ] tests: approvals-preservation — edit `exec-approvals.json`, restart, assert the edit
+10. [x] tests: approvals-preservation — edit `exec-approvals.json`, restart, assert the edit
         survives.
-11. [ ] docs: correct the README's Telegram section and environment table.
+11. [x] docs: correct the README's Telegram section and environment table.
 
 Tasks 1–3 are worth landing as one commit; they are the fail-fast behaviour and are hard to
 test in isolation.
@@ -146,3 +155,48 @@ No test framework exists. Verification is container-level:
   configured. → **Mitigation:** Open Question 2; prefer an explicit `HERMES_OWNER`.
 - **Risk:** touching `:241` collides with 002's Slack work. → **Mitigation:** region
   ownership; Phase 1 fixes B3a without editing the Telegram block at all.
+
+## What Landed
+
+Sixty-four checks in [`tests/`](tests/), all passing; 56 of them fail against the pre-change
+entrypoint, and twenty-seven mutations are each caught by at least one. See
+[`tests/README.md`](tests/README.md) for what they can and cannot answer.
+
+The defects were reproduced before being fixed, and the reproductions are what the cases were
+written against:
+
+| Finding | Before |
+|---|---|
+| B2 | `TypeError: Cannot set properties of undefined (setting 'loopDetection')` when onboarding leaves no `tools` key |
+| B3a | `TypeError: Cannot read properties of undefined (reading 'split')`, after onboarding and after the config was written |
+| B4b | `entrypoint.sh: line 4: HERMES_TIMEZONE: unbound variable` |
+| B4c | Restart without the key exits **0**, having deleted `env.ANTHROPIC_API_KEY` from the persisted config |
+| B6 | An operator's `"security": "ask"` reverted to `"full"` by the next start |
+
+Three specs' files were touched outside 004's region, each for a reason this change created:
+
+- `003/tests/stub-openclaw` — gained `config validate`, which the new gate calls before the
+  registrar is forked. Without it every 003 case aborted on `unsupported invocation`.
+- `002/tests/harness.sh` — `config_get` now reads an absent config as an empty one. 002 asserts
+  that a rejected Slack configuration leaves no `channels.slack`; under phase 1 there is no
+  config file at all, which is the same answer and a stronger one.
+- `README.md` — the Telegram section, the environment table, and three new sections.
+
+003's suite passes unchanged: 42 cases, and its twenty-one mutations are all still caught.
+
+002 needed one case back. Its `writes-before-validating` mutation was caught by a case whose
+input phase 1 now rejects before the Slack block runs, so the mutation survived while the suite
+stayed green — a coverage loss no suite run would have shown. 002 gained
+`should_not_leave_slack_configured_when_the_allowlist_lists_no_ids`, which reaches that block
+with an allowlist phase 1 accepts and it rejects; its mutation-check reports every mutation
+caught again. 29 cases.
+
+Two defects in this change were found the same way, after the code was written:
+
+- An operator who *set* `HERMES_OWNER` to something unusable was told it was missing. Found by
+  probing wildcard forms by hand; fixed, and pinned by
+  `should_not_call_the_owner_missing_when_it_was_supplied_and_rejected`.
+- The gate passes the validator's message through, and the config it reads holds four tokens,
+  so a validator that quoted an offending value would put one in `docker logs` — the thing 002
+  went to lengths to prevent. The message is redacted before it is printed; pinned by
+  `should_not_log_a_token_when_the_gate_fails`.

@@ -1,6 +1,245 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# Phase 1 — validate. No writes, no network, no side effects.
+#
+# Every environment check the container needs happens here: before onboarding,
+# before the Google credential is written, and before a single key of the
+# persisted config is touched. The ordering is the whole point. These checks
+# used to sit below all three, so a typo left a half-configured container
+# behind — and a restart without ANTHROPIC_API_KEY exited *zero* after
+# silently deleting the copy of the key the previous start had persisted.
+#
+# It also has to precede `export TZ="${HERMES_TIMEZONE}"`. Under `set -u` that
+# line aborts with `unbound variable` before any friendly message can print,
+# so the operator's first symptom was a bash error naming a shell builtin.
+#
+# One error block lists every violation. A three-variable misconfiguration
+# should cost one restart, not three.
+# ---------------------------------------------------------------------------
+
+required_vars=(
+  ANTHROPIC_API_KEY
+  HERMES_VIBE
+  HERMES_TONE
+  HERMES_USER_NAME
+  HERMES_TIMEZONE
+  HERMES_LOCALE
+  HERMES_CRON_SCHEDULE
+  HERMES_QUIET_HOURS_START
+  HERMES_QUIET_HOURS_END
+)
+
+missing=()
+rejected=()
+
+# One trimmed, non-empty entry per line. Every allowlist this script reads is a
+# comma-separated list an operator typed, so all of them have to survive
+# spaces. `read -a` rather than word splitting: a lone `*` is a legal allowlist
+# entry and must not be glob-expanded into the working directory.
+list_entries() {
+  local raw="${1:-}" entry
+  local -a parts=()
+  IFS=',' read -r -a parts <<< "$raw"
+  for entry in "${parts[@]}"; do
+    entry="${entry#"${entry%%[![:space:]]*}"}"
+    entry="${entry%"${entry##*[![:space:]]}"}"
+    if [ -n "$entry" ]; then
+      printf '%s\n' "$entry"
+    fi
+  done
+  return 0
+}
+
+# Why a variable matters, printed under the list and only for the ones actually
+# missing. A name alone tells an operator what to type, not what they lost.
+explain_variable() {
+  case "$1" in
+    ANTHROPIC_API_KEY)
+      printf '%s\n' \
+        'ANTHROPIC_API_KEY is required on every start, not only the first.' \
+        '  The persisted config keeps a copy of it. A start without the variable' \
+        '  used to overwrite that copy with nothing and then exit zero, so the key' \
+        '  configured once was silently deleted by the next restart.'
+      ;;
+    TELEGRAM_ALLOW_FROM)
+      printf '%s\n' \
+        'TELEGRAM_ALLOW_FROM is required when TELEGRAM_BOT_TOKEN is set.' \
+        '  The Telegram DM policy is allowlist and there is no fallback to' \
+        '  anything else. Without the list the container used to crash on the' \
+        '  unset variable before the gateway ever started.' \
+        '  Set it to a comma-separated list of numeric Telegram user IDs:' \
+        '    TELEGRAM_ALLOW_FROM=123456789,987654321' \
+        '  Find an ID by messaging a bot such as @userinfobot in Telegram.'
+      ;;
+    SLACK_APP_TOKEN)
+      printf '%s\n' \
+        'SLACK_APP_TOKEN is required when SLACK_BOT_TOKEN is set.' \
+        '  Socket Mode needs an app-level token carrying the connections:write' \
+        '  scope; the channel cannot open a connection without one:' \
+        '    SLACK_APP_TOKEN=xapp-...' \
+        '  Generate it under Basic Information, then App-Level Tokens.'
+      ;;
+    SLACK_ALLOW_FROM)
+      # Deliberately the same words the Slack block prints for the same
+      # mistake. That block is 002's region and still owns the shapes this
+      # presence check cannot see — a list holding only separators, a channel
+      # name where an ID belongs. Whichever layer catches the misconfiguration,
+      # the operator should read the same sentence.
+      printf '%s\n' \
+        'SLACK_ALLOW_FROM is required when SLACK_BOT_TOKEN is set.' \
+        '  Without it any member of the Slack workspace could DM the assistant,' \
+        '  and every DM starts an agent turn holding an unrestricted shell.' \
+        '  Set it to a comma-separated list of Slack user IDs:' \
+        '    SLACK_ALLOW_FROM=U0123ABCDE,U0456FGHIJ' \
+        '  Find a user ID in Slack: click the person, then More, then Copy member ID.'
+      ;;
+    HERMES_OWNER)
+      # Printed for a HERMES_OWNER that is absent and for one that was supplied
+      # and could not be used, so it says what the variable is for rather than
+      # what is wrong with it — the line above already said that.
+      printf '%s\n' \
+        'HERMES_OWNER names who the heartbeat reports to.' \
+        '  It becomes commands.ownerAllowFrom, which is what the heartbeat' \
+        '  target "owner" resolves against. With no owner the heartbeat has no' \
+        '  route and is skipped — which looks exactly like nothing happening.' \
+        '  It is derived from the channel allowlists when unset; set it' \
+        '  explicitly when none of their entries can be an owner.' \
+        '  Comma-separated <channel>:<id> identities:' \
+        '    HERMES_OWNER=telegram:123456789' \
+        '    HERMES_OWNER=slack:U0123ABCDE' \
+        '  A wildcard is not an identity and is rejected here.'
+      ;;
+  esac
+}
+
+for var in "${required_vars[@]}"; do
+  if [ -z "${!var:-}" ]; then
+    missing+=("$var")
+  fi
+done
+
+# Conditional requirements. Presence only: the shape of a Slack allowlist is
+# 002's block to judge, and it produces a Slack-specific message this cannot.
+# Telegram has no such second reader, so an allowlist that lists nothing is
+# caught here — otherwise it would reach the config as ['', '', ''], an
+# allowlist admitting nobody, which is the silent lockout 002 refused for Slack.
+if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -z "$(list_entries "${TELEGRAM_ALLOW_FROM:-}")" ]; then
+  missing+=(TELEGRAM_ALLOW_FROM)
+fi
+
+if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
+  if [ -z "${SLACK_APP_TOKEN:-}" ]; then
+    missing+=(SLACK_APP_TOKEN)
+  fi
+  if [ -z "${SLACK_ALLOW_FROM:-}" ]; then
+    missing+=(SLACK_ALLOW_FROM)
+  fi
+fi
+
+# Who the heartbeat reports to.
+#
+# `commands.ownerAllowFrom` entries are '<channel>:<identifier>' — doc-verified,
+# and the first resolvable one is the operator DM that heartbeat target "owner"
+# delivers to. Resolved here rather than in the config block so that a channel
+# configured with no usable owner fails before anything is written.
+#
+# HERMES_OWNER is the explicit form and wins outright. Without it the identities
+# are derived from the channel allowlists, Telegram first, because a container
+# that already lists its operator should not need a second variable saying so.
+owner_entries=()
+owner_candidates=0
+
+if [ -n "${HERMES_OWNER:-}" ]; then
+  while IFS= read -r entry; do
+    owner_candidates=$((owner_candidates + 1))
+    case "$entry" in
+      # A wildcard validates, grants nothing on current builds, and strips the
+      # owner-only tools while still reading like an owner. Never write one.
+      *'*'*) rejected+=("HERMES_OWNER entry '${entry}': a wildcard is not an owner identity") ;;
+      [a-z]*:?*) owner_entries+=("$entry") ;;
+      *) rejected+=("HERMES_OWNER entry '${entry}': expected <channel>:<id>, for example telegram:123456789") ;;
+    esac
+  done < <(list_entries "$HERMES_OWNER")
+else
+  # Only concrete, DM-capable identities. A wildcard is not one, and
+  # accessGroup:<name> names a group rather than an account.
+  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+    while IFS= read -r entry; do
+      owner_candidates=$((owner_candidates + 1))
+      case "$entry" in
+        '*'|accessGroup:*) ;;
+        *) owner_entries+=("telegram:${entry}") ;;
+      esac
+    done < <(list_entries "${TELEGRAM_ALLOW_FROM:-}")
+  fi
+  if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
+    while IFS= read -r entry; do
+      owner_candidates=$((owner_candidates + 1))
+      case "$entry" in
+        '*'|accessGroup:*) ;;
+        *) owner_entries+=("slack:${entry}") ;;
+      esac
+    done < <(list_entries "${SLACK_ALLOW_FROM:-}")
+  fi
+fi
+
+# Demanded only when there was something to derive from and none of it was
+# usable. An allowlist holding nothing at all is the allowlist's problem, and
+# it is already on the list above — naming HERMES_OWNER as well would send the
+# operator after a second variable they do not need.
+#
+# Nor is it *missing* when it was supplied and every entry was rejected: the
+# rejection above names the variable and the entry, and calling it missing as
+# well tells an operator who set it that they did not.
+if [ ${#missing[@]} -eq 0 ] && [ ${#rejected[@]} -eq 0 ] &&
+   [ ${#owner_entries[@]} -eq 0 ] && [ "$owner_candidates" -gt 0 ]; then
+  missing+=(HERMES_OWNER)
+fi
+
+# Whose guidance to print: everything missing, plus HERMES_OWNER when it was
+# the thing rejected.
+explain_vars=("${missing[@]}")
+if [ ${#rejected[@]} -gt 0 ] && [ -n "${HERMES_OWNER:-}" ]; then
+  explain_vars+=(HERMES_OWNER)
+fi
+
+if [ ${#missing[@]} -gt 0 ] || [ ${#rejected[@]} -gt 0 ]; then
+  {
+    if [ ${#missing[@]} -gt 0 ]; then
+      echo 'Error: missing required environment variables:'
+      printf '  %s\n' "${missing[@]}"
+    fi
+    if [ ${#rejected[@]} -gt 0 ]; then
+      echo 'Error: environment variables that could not be used as given:'
+      printf '  %s\n' "${rejected[@]}"
+    fi
+    for var in "${explain_vars[@]}"; do
+      explanation="$(explain_variable "$var")"
+      if [ -n "$explanation" ]; then
+        echo
+        printf '%s\n' "$explanation"
+      fi
+    done
+    echo
+    echo 'Nothing has been written. The persisted configuration is untouched.'
+  } >&2
+  exit 1
+fi
+
+# Comma-joined for the config block below, which is the only reader.
+HERMES_OWNER_ALLOW_FROM=''
+if [ ${#owner_entries[@]} -gt 0 ]; then
+  printf -v HERMES_OWNER_ALLOW_FROM '%s,' "${owner_entries[@]}"
+  HERMES_OWNER_ALLOW_FROM="${HERMES_OWNER_ALLOW_FROM%,}"
+fi
+export HERMES_OWNER_ALLOW_FROM
+
+# ---------------------------------------------------------------------------
+# Phase 2 — configure. Everything below this line writes.
+# ---------------------------------------------------------------------------
+
 export TZ="${HERMES_TIMEZONE}"
 
 if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
@@ -18,7 +257,15 @@ if [ -n "${GOG_GOOGLE_ACCOUNT:-}" ] && [ -n "${GOG_SERVICE_ACCOUNT_KEY:-}" ]; th
   gog auth service-account set "$GOG_GOOGLE_ACCOUNT" --key "$GOG_SERVICE_ACCOUNT_KEY"
 fi
 
-cat > "$HOME/.openclaw/exec-approvals.json" <<'EXECAPPROVALS'
+# Written once, then left alone. Approvals are the operator's to tighten, and
+# rewriting the file on every start silently reverted a `security: ask` they had
+# set — a restart quietly widening what the agent is allowed to run.
+#
+# The cost is that changing the shipped default no longer reaches an existing
+# container. The file is operator-owned after first creation; adopting a new
+# default means deleting it.
+if [ ! -f "$HOME/.openclaw/exec-approvals.json" ]; then
+  cat > "$HOME/.openclaw/exec-approvals.json" <<'EXECAPPROVALS'
 {
   "version": 1,
   "defaults": {
@@ -26,6 +273,7 @@ cat > "$HOME/.openclaw/exec-approvals.json" <<'EXECAPPROVALS'
   }
 }
 EXECAPPROVALS
+fi
 
 node -e "
   const fs = require('fs');
@@ -37,7 +285,13 @@ node -e "
   config.agents.defaults.model = 'anthropic/claude-haiku-4-5';
   config.agents.defaults.heartbeat = {
     every: '59m',
-    target: 'last',
+    // 'last' follows the most recent external conversation, so on a fresh
+    // container there is nothing to follow and the heartbeat is skipped with
+    // reason=no-route. Once there is something, it may be a group chat — not
+    // where a summary of the user's inbox belongs. 'owner' resolves against
+    // commands.ownerAllowFrom below, which phase 1 populates whenever a
+    // channel is configured, and never resolves to a group.
+    target: 'owner',
     model: 'anthropic/claude-haiku-4-5',
     lightContext: true,
     isolatedSession: true,
@@ -48,6 +302,7 @@ node -e "
       timezone: process.env.HERMES_TIMEZONE
     }
   };
+  config.tools = config.tools || {};
   config.tools.loopDetection = {
     enabled: true,
     warningThreshold: 5,
@@ -61,42 +316,37 @@ node -e "
     }
   };
   config.cron = { enabled: true };
-  config.tools = config.tools || {};
   config.tools.profile = 'full';
   delete config.tools.allow;
   config.tools.deny = ['gateway'];
   config.tools.exec = config.tools.exec || {};
   config.tools.exec.security = 'full';
+  // env.vars.<NAME>, not env.<NAME>. An inline environment variable is
+  // documented to live one level deeper than this used to write it, so the
+  // bare spelling is an unrecognised key that the phase 3 gate rejects. It is
+  // deleted rather than left alongside, because a container upgrading from an
+  // older image carries one and would fail that gate on a config it wrote
+  // itself.
   config.env = config.env || {};
-  config.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+  delete config.env.ANTHROPIC_API_KEY;
+  config.env.vars = config.env.vars || {};
+  config.env.vars.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+  // Who the heartbeat reports to. Resolved in phase 1, from HERMES_OWNER or
+  // else the channel allowlists; empty only when no channel is configured at
+  // all, in which case there is nobody to be the owner and the key is left
+  // unwritten rather than written empty.
+  const ownerAllowFrom = (process.env.HERMES_OWNER_ALLOW_FROM || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (ownerAllowFrom.length > 0) {
+    config.commands = config.commands || {};
+    config.commands.ownerAllowFrom = ownerAllowFrom;
+  }
   delete config.agent;
   delete config.heartbeat;
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
 "
-
-required_vars=(
-  HERMES_VIBE
-  HERMES_TONE
-  HERMES_USER_NAME
-  HERMES_TIMEZONE
-  HERMES_LOCALE
-  HERMES_CRON_SCHEDULE
-  HERMES_QUIET_HOURS_START
-  HERMES_QUIET_HOURS_END
-)
-
-missing=()
-for var in "${required_vars[@]}"; do
-  if [ -z "${!var:-}" ]; then
-    missing+=("$var")
-  fi
-done
-
-if [ ${#missing[@]} -gt 0 ]; then
-  echo "Error: missing required environment variables:" >&2
-  printf '  %s\n' "${missing[@]}" >&2
-  exit 1
-fi
 
 mkdir -p "$HOME/.openclaw/workspace"
 mkdir -p "$HOME/.openclaw/workspace/tmp"
@@ -330,6 +580,51 @@ if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
     );
   "
 fi
+
+# ---------------------------------------------------------------------------
+# Phase 3 — verify. The configuration is written; prove the gateway can read it.
+#
+# `openclaw config validate` checks the file against the active schema without
+# starting the gateway, which is the guard this container never had. Every key
+# above is hand-written into a strict schema, so an upstream rename turned a
+# working image into one that bricked on restart, saying nothing useful. This
+# costs one startup instead, and the validator names the key path.
+#
+# Placed after the channel blocks, which also write, and before the briefing
+# registrar is forked, so an invalid config never reaches it.
+# ---------------------------------------------------------------------------
+
+# The validator's message is the whole value of this gate, so it is passed
+# through rather than summarised — and it is passed through a filter first.
+# What it prints on failure is not documented, the config it is reading holds
+# four tokens, and a validator that quoted an offending value would put one in
+# `docker logs`. 002 established that tokens never reach the log; a gate added
+# above it must not be the exception. Substitution is bash's own, so a token
+# containing regex or sed metacharacters is still matched literally.
+redact_secrets() {
+  local text="$1" secret
+  for secret in "${ANTHROPIC_API_KEY:-}" "${TELEGRAM_BOT_TOKEN:-}" \
+                "${SLACK_BOT_TOKEN:-}" "${SLACK_APP_TOKEN:-}"; do
+    if [ -n "$secret" ]; then
+      text="${text//"$secret"/[redacted]}"
+    fi
+  done
+  printf '%s\n' "$text"
+}
+
+if ! config_validation="$(openclaw config validate 2>&1)"; then
+  {
+    echo 'Error: the configuration this container just wrote is not valid.'
+    echo '  openclaw config validate said:'
+    redact_secrets "$config_validation" | sed 's/^/    /'
+    echo
+    echo '  The gateway was not started, because it would fail to load this.'
+    echo '  Compare the key it names against: openclaw config schema'
+  } >&2
+  exit 1
+fi
+
+echo 'config: validated'
 
 # The morning briefing is registered through `openclaw automations` (`openclaw
 # cron` is an alias). Cron data lives in the Gateway's own store, so the
