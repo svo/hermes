@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "id": "msg-uppercase-sender",
+      "subject": "Quarterly numbers",
+      "from": "BOB <BOB@EXAMPLE.COM>"
+    }
+  ]
+}

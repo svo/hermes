@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "id": "msg-spoofed",
+      "subject": "wire the money",
+      "from": "\"boss@example.com\" <mallory@evil.invalid>"
+    }
+  ]
+}

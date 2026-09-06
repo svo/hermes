@@ -1,0 +1,35 @@
+{
+  "events": [
+    {
+      "id": "ev-design-review",
+      "summary": "Design review",
+      "start": {
+        "dateTime": "2099-01-01T09:00:00+00:00"
+      },
+      "end": {
+        "dateTime": "2099-01-01T10:00:00+00:00"
+      },
+      "startLocal": "2099-01-01T09:00:00+00:00",
+      "endLocal": "2099-01-01T10:00:00+00:00",
+      "startDayOfWeek": "Thursday",
+      "endDayOfWeek": "Thursday",
+      "timezone": "UTC"
+    },
+    {
+      "id": "ev-budget-sync",
+      "summary": "Budget sync",
+      "start": {
+        "dateTime": "2099-01-01T09:30:00+00:00"
+      },
+      "end": {
+        "dateTime": "2099-01-01T10:30:00+00:00"
+      },
+      "startLocal": "2099-01-01T09:30:00+00:00",
+      "endLocal": "2099-01-01T10:30:00+00:00",
+      "startDayOfWeek": "Thursday",
+      "endDayOfWeek": "Thursday",
+      "timezone": "UTC"
+    }
+  ],
+  "nextPageToken": ""
+}

@@ -20,8 +20,11 @@ CURRENT_CASE=""
 TMP_ROOT="$(mktemp -d)"
 BIN_DIR="${TMP_ROOT}/bin"
 mkdir -p "$BIN_DIR"
-cp "${TESTS_DIR}/stub-gog" "${BIN_DIR}/gog"
-cp "${TESTS_DIR}/stub-fasttext" "${BIN_DIR}/fasttext"
+# The stubs live with 005's harness, which owns them. Two copies would drift,
+# and 005's is the one `bin/hermes-check-test` drives.
+STUBS="${REPO_ROOT}/.specs/005-hermes-check-correctness/tests"
+cp "${STUBS}/stub-gog" "${BIN_DIR}/gog"
+cp "${STUBS}/stub-fasttext" "${BIN_DIR}/fasttext"
 chmod +x "${BIN_DIR}/gog" "${BIN_DIR}/fasttext"
 
 cleanup() { rm -rf "$TMP_ROOT"; }

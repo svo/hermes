@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+#
+# Message classification and the counts: finding C2.
+#
+# URGENT and VIP were independent counters, so a message that was both
+# incremented each of them while being listed once. OTHER was then derived as
+# `new - urgent - vip`, subtracting that message twice and printing `OTHER: -1`.
+#
+# The fix is structural: exactly one bucket per message, and OTHER counted in
+# its own branch rather than derived. So the assertion that matters is not
+# "OTHER is no longer negative for this fixture" but the invariant itself, on
+# every fixture — which is why assert_universal_invariants checks it on every
+# run in this whole suite.
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+# AC: a message that is both urgent and VIP keeps the counts consistent and
+# OTHER non-negative.
+should_keep_the_counts_consistent_when_a_message_is_both_urgent_and_vip() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'bob@example.com' gmail-vip-sender.json calendar-empty.json \
+    FASTTEXT_LABEL=urgent
+  assert_universal_invariants
+  assert_equals "one message" "1" "$(field NEW_UNREAD)"
+  assert_equals "counted once, as urgent" "1" "$(field URGENT)"
+  assert_equals "not counted again as VIP" "0" "$(field VIP)"
+  assert_equals "and not left over" "0" "$(field OTHER)"
+  case_end
+}
+
+should_list_a_message_once_when_it_is_both_urgent_and_vip() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'bob@example.com' gmail-vip-sender.json calendar-empty.json \
+    FASTTEXT_LABEL=urgent
+  assert_equals "listed exactly once" "1" "$(printf '%s\n' "$(listed_lines)" | grep -c .)"
+  assert_equals "under the urgent bucket" "1" \
+    "$(count_matching_lines "$RUN_OUT" '^  - \[URGENT\] ')"
+  assert_equals "and not also under VIP" "0" \
+    "$(count_matching_lines "$RUN_OUT" '^  - \[VIP\] ')"
+  assert_universal_invariants
+  case_end
+}
+
+# The count and the listing must agree: a bucket counter that is incremented
+# somewhere other than the branch that emits the line is how they came apart.
+should_match_each_count_to_its_listed_lines_when_buckets_are_mixed() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'bob@example.net' gmail-clean.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "URGENT count matches its lines" "$(field URGENT)" \
+    "$(count_matching_lines "$RUN_OUT" '^  - \[URGENT\] ')"
+  assert_equals "VIP count matches its lines" "$(field VIP)" \
+    "$(count_matching_lines "$RUN_OUT" '^  - \[VIP\] ')"
+  assert_equals "OTHER count matches its lines" "$(field OTHER)" \
+    "$(count_matching_lines "$RUN_OUT" '^  - [^[]')"
+  assert_equals "every message listed once" "$(field NEW_UNREAD)" \
+    "$(printf '%s\n' "$(listed_lines)" | grep -c .)"
+  case_end
+}
+
+should_bucket_every_message_as_urgent_when_all_are_classified_urgent() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-clean.json calendar-empty.json FASTTEXT_LABEL=urgent
+  assert_universal_invariants
+  assert_equals "two messages" "2" "$(field NEW_UNREAD)"
+  assert_equals "both urgent" "2" "$(field URGENT)"
+  assert_equals "none other" "0" "$(field OTHER)"
+  assert_contains "reason names the count" "$RUN_OUT" "2 urgent email(s)"
+  case_end
+}
+
+should_bucket_a_message_as_vip_when_it_is_vip_and_not_urgent() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'bob@example.com' gmail-vip-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "one VIP" "1" "$(field VIP)"
+  assert_equals "not urgent" "0" "$(field URGENT)"
+  assert_equals "not other" "0" "$(field OTHER)"
+  case_end
+}
+
+should_bucket_every_message_as_other_when_none_is_urgent_or_vip() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-clean.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "two other" "2" "$(field OTHER)"
+  assert_equals "no alert" "no" "$(field ACTION_NEEDED)"
+  case_end
+}
+
+should_report_all_zero_counts_when_the_inbox_is_empty() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-empty.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "nothing new" "0" "$(field NEW_UNREAD)"
+  assert_equals "no urgent" "0" "$(field URGENT)"
+  assert_equals "no vip" "0" "$(field VIP)"
+  assert_equals "no other" "0" "$(field OTHER)"
+  assert_equals "no lines listed" "0" "$(printf '%s\n' "$(listed_lines)" | grep -c .)"
+  case_end
+}
+
+# The seen-message file is what makes NEW_UNREAD mean "new". A second run over
+# the same HOME must count nothing, and the invariant must still hold there.
+should_count_nothing_new_when_the_same_messages_are_seen_twice() {
+  case_start "${FUNCNAME[0]}"
+  local home
+  home="$(new_home)"
+  run_check --home "$home" gmail-clean.json calendar-empty.json
+  assert_equals "first run sees both" "2" "$(field NEW_UNREAD)"
+  run_check --home "$home" gmail-clean.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "second run sees none" "0" "$(field NEW_UNREAD)"
+  assert_equals "and lists none" "0" "$(printf '%s\n' "$(listed_lines)" | grep -c .)"
+  case_end
+}
+
+should_keep_the_counts_consistent_when_a_message_is_both_urgent_and_vip
+should_list_a_message_once_when_it_is_both_urgent_and_vip
+should_match_each_count_to_its_listed_lines_when_buckets_are_mixed
+should_bucket_every_message_as_urgent_when_all_are_classified_urgent
+should_bucket_a_message_as_vip_when_it_is_vip_and_not_urgent
+should_bucket_every_message_as_other_when_none_is_urgent_or_vip
+should_report_all_zero_counts_when_the_inbox_is_empty
+should_count_nothing_new_when_the_same_messages_are_seen_twice
+
+report_totals "classification-test"

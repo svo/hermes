@@ -1,0 +1,13 @@
+{
+  "messages": [
+    {
+      "subject": "PAGED",
+      "from": "boss@example.com"
+    },
+    {
+      "id": "msg-readable",
+      "subject": "ordinary",
+      "from": "someone@example.net"
+    }
+  ]
+}

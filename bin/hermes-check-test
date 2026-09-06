@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+#
+# The hermes-check harness. One entry point for everything that verifies the
+# script, so 006's `bin/test` has a single thing to call and there is no second
+# harness to drift from this one.
+#
+#   bin/hermes-check-test
+#
+# No credentials, no network, no Google account: a stub `gog` earlier on PATH
+# serves fixture JSON, and a stub `fasttext` makes urgency classification
+# deterministic. Fixtures live in
+# .specs/005-hermes-check-correctness/fixtures/ and are shared by every suite.
+#
+#   HERMES_CHECK  point the suites at another copy of the script — which is how
+#                 every case was shown to fail before the fixes landed.
+#
+# Exits zero only when every suite passes, and names each failing one; a run
+# should reveal every problem rather than the first.
+
+set -uo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+hermes_check="${HERMES_CHECK:-${repo_root}/infrastructure/ansible/roles/openclaw/files/hermes-check}"
+
+if [ ! -f "$hermes_check" ]; then
+  printf 'hermes-check not found at %s\n' "$hermes_check" >&2
+  exit 1
+fi
+export HERMES_CHECK="$hermes_check"
+
+for tool in jq bash; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    printf 'required tool missing: %s\n' "$tool" >&2
+    exit 1
+  fi
+done
+
+failed=()
+
+suite() {
+  local name="$1" path="$2"
+  if [ ! -x "$path" ] && [ ! -f "$path" ]; then
+    printf '\nSKIP %s (not present at %s)\n' "$name" "$path" >&2
+    return
+  fi
+  printf '\n######## %s ########\n' "$name"
+  if bash "$path"; then
+    return
+  fi
+  failed+=("$name")
+}
+
+# 005 owns the harness; 001's cases verify the same script through it, so both
+# run here.
+suite "005 hermes-check correctness" \
+  "${repo_root}/.specs/005-hermes-check-correctness/tests/run"
+suite "001 sanitize untrusted content" \
+  "${repo_root}/.specs/001-sanitize-untrusted-content/tests/run"
+
+printf '\n========================================\n'
+if [ ${#failed[@]} -eq 0 ]; then
+  printf 'hermes-check: all suites passed.\n'
+  exit 0
+fi
+
+printf 'hermes-check: failing suites:\n' >&2
+printf '  %s\n' "${failed[@]}" >&2
+exit 1

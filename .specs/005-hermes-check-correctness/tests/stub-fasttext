@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#
+# Stand-in for the urgency classifier, placed ahead of the real binary on PATH.
+#
+# The real model is 800 MB and costs about a second per message, and it is
+# present on a developer machine and absent in CI. Stubbing it makes bucket
+# assignment — and so every count these cases assert — identical everywhere.
+#
+# The classifier itself is out of scope here; SPEC Open Question 4 tracks it.
+# What these checks need from it is only that "urgent" is reachable on demand,
+# because a message that is both urgent and VIP is the one that made OTHER go
+# negative.
+#
+#   FASTTEXT_LABEL  label suffix to report (default: not_urgent)
+
+set -uo pipefail
+
+cat >/dev/null
+printf '__label__%s\n' "${FASTTEXT_LABEL:-not_urgent}"

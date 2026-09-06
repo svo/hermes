@@ -401,8 +401,25 @@ If ACTION_NEEDED is yes, notify the user with a concise summary.
 For deeper investigation (full email bodies, drafting replies, drive/contacts), use
 \`gog\` commands directly.
 
-VIP senders can be added to \`~/.openclaw/hermes-check/vip-senders.txt\` (one email or
-domain per line).
+VIP senders can be added to \`~/.openclaw/hermes-check/vip-senders.txt\`, one entry per
+line. An entry matches a sender only when it is **exactly** the sender's email address, or
+**exactly** the domain after the \`@\` (written either as \`example.com\` or \`@example.com\`).
+Matching is case-insensitive; blank lines and \`#\` comments are ignored. It is not a
+substring or suffix rule: \`example.com\` does not match \`mail.example.com\`, and a sender
+is never a VIP because some longer entry happens to contain their address.
+
+The sender is the address inside the angle brackets, not the display name in front of it.
+A stranger who sets their display name to a VIP's address is **not** a VIP.
+
+A message is reported in exactly one bucket, urgent before VIP before ordinary, so
+\`URGENT + VIP + OTHER\` always equals \`NEW_UNREAD\`. A message that is both urgent and VIP
+is counted once, as urgent.
+
+Three counters say what the run could not see: \`DATA_SOURCE_ERRORS\` for upstream calls that
+failed or returned something unusable, \`UNPARSEABLE_EVENTS\` for calendar events whose dates
+could not be read, and \`UNREADABLE_MESSAGES\` for messages that could not be tracked. Any of
+them being non-zero sets \`ACTION_NEEDED\`: the check ran but saw less than it should have,
+which is worth saying rather than hiding behind a quiet report.
 
 ## Document & File Operations
 

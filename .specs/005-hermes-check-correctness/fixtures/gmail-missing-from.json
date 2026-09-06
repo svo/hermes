@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "id": "msg-no-from-key",
+      "subject": "Where is the sender?"
+    }
+  ]
+}

@@ -85,8 +85,8 @@ non-colliding, each plan declares an owned region. No two specs modify the same 
 
 Regions are named by content, not by line number. Each spec that lands moves every line below
 it, so the numbers written into `SPEC.md` and `PLAN.md` are the ones that were true when they
-were written — anchor on the content instead. 001 and 002 have landed; 003 replaced a
-22-line block with a 230-line one.
+were written — anchor on the content instead. 001 through 005 have landed; 003 replaced a
+22-line block with a 230-line one, and 005 rewrote the calendar loops around a single parse.
 
 | File | Region | Owner |
 |---|---|---|

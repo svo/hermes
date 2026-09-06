@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "id": "aaa\nbbb",
+      "subject": "real subject",
+      "from": "boss@example.com"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "messages": [
+    {
+      "id": "msg-dash-e",
+      "subject": "decoy",
+      "from": "nobody@example.net"
+    },
+    {
+      "id": "-e",
+      "subject": "swallows the rest",
+      "from": "nobody@example.net"
+    },
+    {
+      "id": "msg-after-1",
+      "subject": "PRODUCTION DOWN",
+      "from": "boss@example.com"
+    },
+    {
+      "id": "msg-after-2",
+      "subject": "and another",
+      "from": "someone@example.net"
+    }
+  ]
+}

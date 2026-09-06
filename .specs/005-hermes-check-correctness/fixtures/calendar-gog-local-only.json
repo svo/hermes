@@ -1,0 +1,16 @@
+{
+  "events": [
+    {
+      "id": "ev-ny",
+      "summary": "NY meeting",
+      "start": {
+        "dateTime": "2099-01-01T09:00:00"
+      },
+      "end": {
+        "dateTime": "2099-01-01T10:00:00"
+      },
+      "startLocal": "2099-01-01T09:00:00-05:00",
+      "endLocal": "2099-01-01T10:00:00-05:00"
+    }
+  ]
+}

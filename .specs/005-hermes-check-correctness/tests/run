@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+#
+# Runs every check for 005. Accumulates failures rather than stopping at the
+# first, so one run reveals every problem.
+#
+# `bin/hermes-check-test` is the entry point 006's `bin/test` invokes; it runs
+# this file along with 001's, because both verify the same script.
+
+set -uo pipefail
+
+tests_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${tests_dir}/../../.." && pwd)"
+hermes_check="${HERMES_CHECK:-${repo_root}/infrastructure/ansible/roles/openclaw/files/hermes-check}"
+export HERMES_CHECK="$hermes_check"
+
+failed=()
+
+check() {
+  local name="$1"
+  shift
+  printf '\n== %s ==\n' "$name"
+  if "$@"; then
+    printf 'PASS %s\n' "$name"
+  else
+    printf 'FAIL %s\n' "$name" >&2
+    failed+=("$name")
+  fi
+}
+
+check "bash -n hermes-check" bash -n "$hermes_check"
+check "vip-matching-test" bash "${tests_dir}/vip-matching-test"
+check "classification-test" bash "${tests_dir}/classification-test"
+check "message-identity-test" bash "${tests_dir}/message-identity-test"
+check "data-source-test" bash "${tests_dir}/data-source-test"
+check "calendar-dates-test" bash "${tests_dir}/calendar-dates-test"
+check "upstream-shape-test" bash "${tests_dir}/upstream-shape-test"
+check "gog-invocation-test" bash "${tests_dir}/gog-invocation-test"
+check "lint-test" bash "${tests_dir}/lint-test"
+
+printf '\n'
+if [ ${#failed[@]} -eq 0 ]; then
+  printf 'All 005 checks passed.\n'
+  exit 0
+fi
+
+printf 'Failing checks:\n' >&2
+printf '  %s\n' "${failed[@]}" >&2
+exit 1

@@ -1,0 +1,28 @@
+{
+  "events": [
+    {
+      "id": "ev-holiday",
+      "summary": "Company holiday",
+      "start": {
+        "date": "2099-01-01"
+      },
+      "end": {
+        "date": "2099-01-02"
+      },
+      "startLocal": "2099-01-01T00:00:00+00:00",
+      "endLocal": "2099-01-02T00:00:00+00:00"
+    },
+    {
+      "id": "ev-standup",
+      "summary": "Standup",
+      "start": {
+        "dateTime": "2099-01-01T09:00:00+00:00"
+      },
+      "end": {
+        "dateTime": "2099-01-01T09:15:00+00:00"
+      },
+      "startLocal": "2099-01-01T09:00:00+00:00",
+      "endLocal": "2099-01-01T09:15:00+00:00"
+    }
+  ]
+}

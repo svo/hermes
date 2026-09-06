@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+#
+# The `.id` field, and the sender address extracted from `.from`.
+#
+# These are the two attacker-influenced values the rest of the pipeline trusts
+# without looking at, and an adversarial review of the finished change found
+# them still trusted. Every case here was a silent loss: the report read as an
+# ordinary quiet day and the missing thing was simply absent — no counter, no
+# stderr, `ACTION_NEEDED: no`. That is the one outcome SPEC.md § Operability
+# says must never happen, so they belong with the findings this spec set out to
+# fix rather than beside them.
+#
+# `.id` is a key into the seen-message file, not an identifier the script can
+# assume is present, unique, single-line, or safe to hand to `grep` unprefixed.
+# `.from` is a whole RFC 5322 header, and only the addr-spec inside it is the
+# sender's actual mailbox.
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+# GNU grep permutes its arguments, so an id beginning with `-` was read as an
+# option. The seen file then became the pattern, leaving no file operand, and
+# grep read the loop's own input instead — consuming every remaining message.
+should_read_every_message_when_an_id_looks_like_a_grep_option() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'boss@example.com' gmail-option-shaped-id.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "all four messages seen" "4" "$(field NEW_UNREAD)"
+  assert_equals "the VIP after the poisoned id survives" "1" "$(field VIP)"
+  assert_contains "and is reported" "$RUN_OUT" "PRODUCTION DOWN"
+  assert_equals "alerts" "yes" "$(field ACTION_NEEDED)"
+  case_end
+}
+
+should_not_emit_grep_output_when_an_id_is_a_grep_long_option() {
+  case_start "${FUNCNAME[0]}"
+  # `--version` and `--help` made grep print its own text onto the report's
+  # stdout, outside the fence and past the sanitizer — angle brackets included.
+  run_check '{"messages":[{"id":"--version","subject":"x","from":"a@example.net"}]}' \
+    calendar-empty.json
+  assert_universal_invariants
+  assert_not_contains "no grep banner" "$RUN_OUT" "GNU grep"
+  assert_not_contains "no licence text" "$RUN_OUT" "Copyright"
+  case_end
+}
+
+# The display name in front of the addr-spec is chosen by the sender.
+should_not_flag_vip_when_the_display_name_impersonates_one() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'boss@example.com' gmail-spoofed-display-name.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "not VIP" "0" "$(field VIP)"
+  assert_equals "listed as ordinary" "1" "$(field OTHER)"
+  assert_equals "no alert" "no" "$(field ACTION_NEEDED)"
+  case_end
+}
+
+should_flag_vip_when_a_decoy_address_precedes_the_real_sender() {
+  case_start "${FUNCNAME[0]}"
+  # The mirror image, and the reason this cannot be fixed by simply taking the
+  # last address instead of the first: it has to be the addr-spec.
+  run_check --vip 'boss@example.com' gmail-vip-behind-decoy.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "is VIP" "1" "$(field VIP)"
+  case_end
+}
+
+should_flag_vip_when_the_header_is_a_bare_address_with_no_brackets() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'example.com' '{"messages":[{"id":"m1","subject":"s","from":"bob@example.com"}]}' \
+    calendar-empty.json
+  assert_universal_invariants
+  assert_equals "is VIP" "1" "$(field VIP)"
+  case_end
+}
+
+should_keep_a_correct_sender_when_the_header_is_long_enough_to_fill_a_pipe() {
+  case_start "${FUNCNAME[0]}"
+  # Built here rather than kept as a fixture: it is ~110 KB of filler, and the
+  # property under test is its size, not its content.
+  #
+  # `grep | head -1` exits non-zero when head closes the pipe on grep mid-write.
+  # The address had already been extracted correctly; discarding it on exit
+  # status alone silently demoted a VIP.
+  local from json
+  from="bob@example.com$(printf ', x%s@filler.invalid' $(seq 1 5000))"
+  json="$(jq -nc --arg f "$from" \
+    '{messages:[{id:"m1",subject:"long header",from:$f}]}')"
+  run_check --vip 'bob@example.com' "$json" calendar-empty.json
+  assert_universal_invariants
+  assert_equals "is VIP" "1" "$(field VIP)"
+  assert_equals "no error output" "" "$RUN_ERR"
+  case_end
+}
+
+# An id that cannot key the seen-message file means a message that cannot be
+# tracked between runs. Reported, not dropped.
+should_report_an_unreadable_message_when_it_has_no_id() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'boss@example.com' gmail-missing-id.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "counted" "1" "$(field UNREADABLE_MESSAGES)"
+  assert_equals "the readable one still reported" "1" "$(field NEW_UNREAD)"
+  assert_equals "alerts" "yes" "$(field ACTION_NEEDED)"
+  assert_contains "reason names it" "$RUN_OUT" "1 unreadable message(s)"
+  case_end
+}
+
+should_report_an_unreadable_message_when_its_id_contains_a_newline() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-newline-id.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "counted" "1" "$(field UNREADABLE_MESSAGES)"
+  assert_equals "not split into phantoms" "0" "$(field NEW_UNREAD)"
+  assert_equals "and none listed" "0" "$(printf '%s\n' "$(listed_lines)" | grep -c .)"
+  case_end
+}
+
+# The seen file is one id per line. A multi-line id written into it evicted the
+# real ids under the 200-line cap, so messages already notified came back.
+should_not_evict_the_seen_file_when_an_id_contains_many_newlines() {
+  case_start "${FUNCNAME[0]}"
+  local home flood
+  home="$(new_home)"
+  run_check --home "$home" gmail-clean.json calendar-empty.json
+  assert_equals "first run sees both" "2" "$(field NEW_UNREAD)"
+  flood="$(jq -nc '{messages:[{id:([range(400)|"pad\(.)"]|join("\n")),subject:"s",from:"a@example.net"}]}')"
+  run_check --home "$home" "$flood" calendar-empty.json
+  assert_equals "the flood is reported, not stored" "1" "$(field UNREADABLE_MESSAGES)"
+  run_check --home "$home" gmail-clean.json calendar-empty.json
+  assert_equals "the original messages are still remembered" "0" "$(field NEW_UNREAD)"
+  case_end
+}
+
+should_keep_each_message_distinct_when_two_share_an_id() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'bob@example.com' gmail-duplicate-id.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "both messages" "2" "$(field NEW_UNREAD)"
+  assert_equals "the VIP among them is found" "1" "$(field VIP)"
+  assert_contains "each keeps its own subject" "$RUN_OUT" "Subject: AAA"
+  assert_contains "and its own sender" "$RUN_OUT" "From: bob@example.com | Subject: BBB"
+  assert_not_contains "nothing merged" "$RUN_OUT" "AAABBB"
+  case_end
+}
+
+should_report_no_unreadable_messages_when_every_message_is_well_formed() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-gog-shape.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "none unreadable" "0" "$(field UNREADABLE_MESSAGES)"
+  assert_equals "no alert" "no" "$(field ACTION_NEEDED)"
+  case_end
+}
+
+should_read_every_message_when_an_id_looks_like_a_grep_option
+should_not_emit_grep_output_when_an_id_is_a_grep_long_option
+should_not_flag_vip_when_the_display_name_impersonates_one
+should_flag_vip_when_a_decoy_address_precedes_the_real_sender
+should_flag_vip_when_the_header_is_a_bare_address_with_no_brackets
+should_keep_a_correct_sender_when_the_header_is_long_enough_to_fill_a_pipe
+should_report_an_unreadable_message_when_it_has_no_id
+should_report_an_unreadable_message_when_its_id_contains_a_newline
+should_not_evict_the_seen_file_when_an_id_contains_many_newlines
+should_keep_each_message_distinct_when_two_share_an_id
+should_report_no_unreadable_messages_when_every_message_is_well_formed
+
+report_totals "message-identity-test"

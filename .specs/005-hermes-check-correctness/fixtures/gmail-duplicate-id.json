@@ -1,0 +1,14 @@
+{
+  "messages": [
+    {
+      "id": "same",
+      "subject": "AAA",
+      "from": "nobody@example.net"
+    },
+    {
+      "id": "same",
+      "subject": "BBB",
+      "from": "bob@example.com"
+    }
+  ]
+}

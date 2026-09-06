@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+#
+# The upstream contract: SPEC Open Question 2, PLAN task 1.
+#
+# The field names `hermes-check` reads were never checked against gogcli. They
+# have been now, against the code that emits them:
+#
+#   gmail    internal/cmd/gmail_messages.go — {"messages":[...],"nextPageToken":...}
+#            per message: id, threadId, date, internalDateIso, from, subject,
+#            labels. The three the script reads are correct.
+#
+#   calendar internal/cmd/calendar_list.go — {"events":[...],"nextPageToken":...}
+#            where each event is the raw Google Calendar v3 Event resource with
+#            six strings merged in by internal/cmd/calendar_event_days.go. So
+#            `start` and `end` are OBJECTS. That one was wrong.
+#
+# It was wrong in the worst available way. `@tsv` refuses an object, so jq
+# failed, the loop read nothing, and the report showed EVENTS_TODAY next to no
+# next event and no conflicts — every reminder and every clash dropped, with the
+# reason on stderr where nothing was reading. These cases are the reason the
+# fixtures are pinned to a real response rather than to what the script hoped
+# for; without them the harness would agree with the script and both would be
+# wrong together.
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+should_read_the_calendar_when_the_response_has_the_real_gog_shape() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-empty.json calendar-gog-shape.json
+  assert_universal_invariants
+  assert_equals "both events counted" "2" "$(field EVENTS_TODAY)"
+  assert_equals "nothing lost as unparseable" "0" "$(field UNPARSEABLE_EVENTS)"
+  assert_contains "the timed event is found" "$RUN_OUT" "NEXT_EVENT: Design review at 09:00"
+  case_end
+}
+
+should_not_write_to_stderr_when_the_response_has_the_real_gog_shape() {
+  case_start "${FUNCNAME[0]}"
+  # The jq failure this replaces went to stderr and nowhere else.
+  run_check gmail-empty.json calendar-gog-shape.json
+  assert_equals "stderr is empty" "" "$RUN_ERR"
+  assert_not_contains "no jq complaint" "$RUN_ERR" "not valid in a csv row"
+  assert_universal_invariants
+  case_end
+}
+
+should_detect_a_conflict_when_the_response_has_the_real_gog_shape() {
+  case_start "${FUNCNAME[0]}"
+  # Parsing is not enough; the analysis has to reach the same answer it reaches
+  # for the flat shape.
+  run_check gmail-empty.json calendar-gog-shape-conflict.json
+  assert_universal_invariants
+  assert_equals "one conflict" "1" "$(field CONFLICTS)"
+  assert_contains "named" "$RUN_OUT" \
+    "Design review (until 10:00) overlaps Budget sync (starts 09:30)"
+  case_end
+}
+
+should_recognise_an_all_day_event_when_it_arrives_as_a_date_object() {
+  case_start "${FUNCNAME[0]}"
+  # An all-day event is `start.date`, not `start.dateTime` — that is the
+  # distinction Google draws, and the only way to tell one apart.
+  run_check gmail-empty.json calendar-gog-shape.json
+  assert_equals "counted as all-day" "1" "$(field ALL_DAY_EVENTS)"
+  assert_equals "and so raises no conflict" "0" "$(field CONFLICTS)"
+  assert_universal_invariants
+  case_end
+}
+
+should_read_the_calendar_when_gog_omits_its_local_time_fields() {
+  case_start "${FUNCNAME[0]}"
+  # startLocal/endLocal are `omitempty` and a --fields mask can drop them, so
+  # the raw start.dateTime / start.date objects have to be readable on their own.
+  run_check gmail-empty.json calendar-gog-no-local.json
+  assert_universal_invariants
+  assert_equals "nothing lost" "0" "$(field UNPARSEABLE_EVENTS)"
+  assert_equals "all-day still recognised" "1" "$(field ALL_DAY_EVENTS)"
+  assert_contains "timed event still found" "$RUN_OUT" "NEXT_EVENT: Design review at 09:00"
+  assert_equals "stderr is empty" "" "$RUN_ERR"
+  case_end
+}
+
+should_use_the_offset_gog_supplies_when_a_timestamp_carries_none() {
+  case_start "${FUNCNAME[0]}"
+  # Google's other timed form is `dateTime` with no offset and a separate
+  # `timeZone`. gog's startLocal carries the offset, and reading the bare
+  # dateTime instead puts a 09:00 New York meeting at 09:00 UTC — five hours out,
+  # silently, in the one number the operator is being asked to act on.
+  run_check gmail-empty.json calendar-gog-timezone.json
+  assert_universal_invariants
+  assert_contains "09:00 New York is 14:00 UTC" "$RUN_OUT" "NEXT_EVENT: NY meeting at 14:00"
+  case_end
+}
+
+should_prefer_the_local_timestamp_when_nothing_else_carries_an_offset() {
+  case_start "${FUNCNAME[0]}"
+  # `dateTime` with no offset and no `timeZone` either: the raw resource says
+  # "09:00" and nothing about 09:00 where. Only gog's startLocal can answer.
+  # This is also what holds when the container has no zone database — TZ with a
+  # named zone silently falls back to UTC without tzdata, while an explicit
+  # offset needs nothing installed — so reading startLocal first is the reading
+  # that does not depend on the image.
+  run_check gmail-empty.json calendar-gog-local-only.json
+  assert_universal_invariants
+  assert_contains "the offset gog supplied is used" "$RUN_OUT" "NEXT_EVENT: NY meeting at 14:00"
+  case_end
+}
+
+should_apply_the_event_timezone_when_gog_supplies_no_offset() {
+  case_start "${FUNCNAME[0]}"
+  # The same event with gog's normalisation absent, so `timeZone` is the only
+  # thing left that says what the time means.
+  run_check gmail-empty.json calendar-gog-timezone-no-local.json
+  assert_universal_invariants
+  assert_contains "still 14:00 UTC" "$RUN_OUT" "NEXT_EVENT: NY meeting at 14:00"
+  case_end
+}
+
+should_still_read_a_flat_string_timestamp_when_an_event_carries_one() {
+  case_start "${FUNCNAME[0]}"
+  # The shape the fixtures assumed before this was pinned. Keeping it readable
+  # costs one branch and means the change cannot break a response that already
+  # worked.
+  run_check gmail-empty.json calendar-conflict.json
+  assert_universal_invariants
+  assert_equals "one conflict" "1" "$(field CONFLICTS)"
+  case_end
+}
+
+should_recognise_an_all_day_event_when_its_local_timestamp_carries_an_offset() {
+  case_start "${FUNCNAME[0]}"
+  # `start.date` is what makes an event all-day, and it is available in the same
+  # jq expression. Deciding from the text shape of `startLocal` instead brought
+  # C11 straight back the moment gog rendered that string with an offset.
+  run_check gmail-empty.json calendar-all-day-with-offset.json
+  assert_universal_invariants
+  assert_equals "recognised" "1" "$(field ALL_DAY_EVENTS)"
+  assert_equals "no conflict against the timed event" "0" "$(field CONFLICTS)"
+  assert_contains "the timed event is the next one" "$RUN_OUT" "NEXT_EVENT: Standup at 09:00"
+  case_end
+}
+
+should_keep_a_timed_event_when_its_local_timestamp_is_a_bare_date() {
+  case_start "${FUNCNAME[0]}"
+  # The other direction of the same mistake: an eight-hour meeting classified
+  # all-day left the report entirely, title and all.
+  run_check gmail-empty.json calendar-timed-with-bare-local.json
+  assert_universal_invariants
+  assert_equals "not all-day" "0" "$(field ALL_DAY_EVENTS)"
+  assert_contains "and still reported" "$RUN_OUT" "NEXT_EVENT: Board meeting at 09:00"
+  case_end
+}
+
+should_read_the_inbox_when_the_response_has_the_real_gog_shape() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'bob@example.com' gmail-gog-shape.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "the message is seen" "1" "$(field NEW_UNREAD)"
+  assert_equals "and its sender read" "1" "$(field VIP)"
+  assert_contains "subject read" "$RUN_OUT" "Subject: Quarterly numbers"
+  assert_contains "sender read" "$RUN_OUT" "From: Bob bob@example.com"
+  case_end
+}
+
+should_ignore_the_extra_envelope_keys_when_gog_sends_them() {
+  case_start "${FUNCNAME[0]}"
+  # `nextPageToken` sits beside `messages` and `events`. It is not an array and
+  # must not be read as one, nor make the response look unusable.
+  run_check gmail-gog-shape.json calendar-gog-shape.json
+  assert_universal_invariants
+  assert_equals "no data-source error" "0" "$(field DATA_SOURCE_ERRORS)"
+  case_end
+}
+
+should_report_an_error_when_the_calendar_events_cannot_be_read_at_all() {
+  case_start "${FUNCNAME[0]}"
+  # The failure mode that started this: whatever shape defeats the extraction
+  # must be named, never left as an empty calendar under a non-zero event count.
+  run_check gmail-empty.json '{"events":["not-an-object-and-not-a-record"]}'
+  assert_equals "exit status" "0" "$RUN_STATUS"
+  assert_equals "exactly one SUMMARY section" "1" \
+    "$(count_exact_lines "$RUN_OUT" '--- SUMMARY ---')"
+  assert_equals "the event is counted" "1" "$(field EVENTS_TODAY)"
+  # A non-object element is skipped by the extraction rather than crashing it,
+  # so it lands as an event that could not be read.
+  assert_equals "no next event invented" "none" "$(field NEXT_EVENT)"
+  assert_equals "no conflict invented" "0" "$(field CONFLICTS)"
+  assert_universal_invariants
+  case_end
+}
+
+should_read_the_calendar_when_the_response_has_the_real_gog_shape
+should_not_write_to_stderr_when_the_response_has_the_real_gog_shape
+should_detect_a_conflict_when_the_response_has_the_real_gog_shape
+should_recognise_an_all_day_event_when_it_arrives_as_a_date_object
+should_read_the_calendar_when_gog_omits_its_local_time_fields
+should_use_the_offset_gog_supplies_when_a_timestamp_carries_none
+should_prefer_the_local_timestamp_when_nothing_else_carries_an_offset
+should_apply_the_event_timezone_when_gog_supplies_no_offset
+should_still_read_a_flat_string_timestamp_when_an_event_carries_one
+should_recognise_an_all_day_event_when_its_local_timestamp_carries_an_offset
+should_keep_a_timed_event_when_its_local_timestamp_is_a_bare_date
+should_read_the_inbox_when_the_response_has_the_real_gog_shape
+should_ignore_the_extra_envelope_keys_when_gog_sends_them
+should_report_an_error_when_the_calendar_events_cannot_be_read_at_all
+
+report_totals "upstream-shape-test"

@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+#
+# VIP matching: findings C1 and C5.
+#
+# Both were substring tests. C1 searched the VIP file for the sender's address,
+# so a sender with no readable address searched for the empty string and
+# matched every line in the file. C5 searched in the same direction for the
+# domain, so a VIP entry of `notexample.com` matched a sender at `example.com`
+# because the entry *contains* the domain.
+#
+# The rule these cases pin is the one SPEC Open Question 1 recommends: an entry
+# is an exact address, or an exact domain, compared case-insensitively. There
+# is no substring test left in either direction, so C1 and C5 are not
+# expressible rather than merely fixed.
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+# AC: given a message whose From yields no parseable address, it is not VIP.
+should_not_flag_vip_when_the_sender_has_no_parseable_address() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'alice@example.net' gmail-unparseable-from.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "both messages seen" "2" "$(field NEW_UNREAD)"
+  assert_equals "neither is VIP" "0" "$(field VIP)"
+  assert_equals "both are ordinary" "2" "$(field OTHER)"
+  assert_equals "no VIP line emitted" "0" "$(count_matching_lines "$RUN_OUT" '^  - \[VIP\] ')"
+  case_end
+}
+
+# The same header shape used to abort the run outright: `grep -oE` exits 1 when
+# it finds no address, and under `pipefail` that killed the script before a
+# single count was printed. A complete report is the assertion.
+should_emit_a_complete_report_when_the_sender_has_no_parseable_address() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'alice@example.net' gmail-unparseable-from.json calendar-empty.json
+  assert_equals "exit status" "0" "$RUN_STATUS"
+  assert_contains "header" "$RUN_OUT" "=== HERMES CHECK ==="
+  assert_contains "email section" "$RUN_OUT" "--- EMAIL ---"
+  assert_contains "calendar section" "$RUN_OUT" "--- CALENDAR ---"
+  assert_contains "summary section" "$RUN_OUT" "--- SUMMARY ---"
+  assert_equals "no error output" "" "$RUN_ERR"
+  assert_universal_invariants
+  case_end
+}
+
+# SPEC Open Question 2's shape: the field is absent rather than unreadable.
+should_not_flag_vip_when_the_from_field_is_absent() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'alice@example.net' gmail-missing-from.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "message seen" "1" "$(field NEW_UNREAD)"
+  assert_equals "not VIP" "0" "$(field VIP)"
+  case_end
+}
+
+# AC: given an empty vip-senders.txt, no message is VIP.
+should_not_flag_vip_when_the_vip_file_is_empty() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-clean.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "two messages" "2" "$(field NEW_UNREAD)"
+  assert_equals "none VIP" "0" "$(field VIP)"
+  case_end
+}
+
+should_not_flag_vip_when_the_vip_file_holds_only_blanks_and_comments() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip '# a comment
+
+   ' gmail-vip-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "not VIP" "0" "$(field VIP)"
+  case_end
+}
+
+# AC: sender domain example.com with a VIP entry notexample.com is NOT VIP.
+should_not_flag_vip_when_an_entry_merely_contains_the_sender_domain() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'notexample.com' gmail-vip-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "not VIP" "0" "$(field VIP)"
+  assert_equals "listed as ordinary" "1" "$(field OTHER)"
+  case_end
+}
+
+should_not_flag_vip_when_an_entry_merely_contains_the_sender_address() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'notbob@example.com.attacker.test' gmail-vip-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "not VIP" "0" "$(field VIP)"
+  case_end
+}
+
+# The containment test also ran the other way for addresses: a short entry that
+# is a substring of the sender must not match either.
+should_not_flag_vip_when_the_sender_merely_contains_an_entry() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'ob@example.co' gmail-vip-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "not VIP" "0" "$(field VIP)"
+  case_end
+}
+
+# AC: sender bob@example.com with a VIP entry example.com IS VIP.
+should_flag_vip_when_an_entry_is_the_sender_domain() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'example.com' gmail-vip-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "is VIP" "1" "$(field VIP)"
+  assert_equals "not also counted as other" "0" "$(field OTHER)"
+  assert_equals "one VIP line" "1" "$(count_matching_lines "$RUN_OUT" '^  - \[VIP\] ')"
+  assert_contains "reason names it" "$RUN_OUT" "REASONS: 1 VIP email(s)"
+  assert_contains "and alerts" "$RUN_OUT" "ACTION_NEEDED: yes"
+  case_end
+}
+
+should_flag_vip_when_an_entry_is_the_sender_address() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'bob@example.com' gmail-vip-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "is VIP" "1" "$(field VIP)"
+  case_end
+}
+
+# "one email or domain per line" is what the operator is told, and a domain is
+# naturally written either way round.
+should_flag_vip_when_a_domain_entry_carries_a_leading_at_sign() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip '@example.com' gmail-vip-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "is VIP" "1" "$(field VIP)"
+  case_end
+}
+
+should_flag_vip_when_an_entry_differs_only_in_case() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'BOB@Example.COM' gmail-vip-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "is VIP" "1" "$(field VIP)"
+  case_end
+}
+
+should_flag_vip_when_the_sender_address_is_upper_case() {
+  case_start "${FUNCNAME[0]}"
+  # Both sides have to be folded. Folding only the entry reads as
+  # case-insensitive right up until someone writes their address in capitals.
+  run_check --vip 'bob@example.com' gmail-uppercase-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "is VIP" "1" "$(field VIP)"
+  case_end
+}
+
+should_flag_vip_when_the_sender_domain_is_upper_case() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'example.com' gmail-uppercase-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "is VIP" "1" "$(field VIP)"
+  case_end
+}
+
+should_flag_vip_when_the_matching_entry_is_not_the_first_line() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip '# VIPs
+carol@example.net
+bob@example.com
+dave@example.org' gmail-vip-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "is VIP" "1" "$(field VIP)"
+  case_end
+}
+
+# A file whose last line has no trailing newline must still be read in full —
+# `read` returns non-zero on that line, and a loop that trusts its status drops
+# it.
+should_flag_vip_when_the_entry_is_on_an_unterminated_last_line() {
+  case_start "${FUNCNAME[0]}"
+  local home
+  home="$(new_home)"
+  mkdir -p "${home}/.openclaw/hermes-check"
+  printf 'carol@example.net\nbob@example.com' \
+    > "${home}/.openclaw/hermes-check/vip-senders.txt"
+  run_check --home "$home" gmail-vip-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "is VIP" "1" "$(field VIP)"
+  case_end
+}
+
+should_ignore_surrounding_whitespace_when_an_entry_is_indented() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip '   bob@example.com   ' gmail-vip-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "is VIP" "1" "$(field VIP)"
+  case_end
+}
+
+should_ignore_a_trailing_comment_when_an_entry_carries_one() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'bob@example.com # the CFO' gmail-vip-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "is VIP" "1" "$(field VIP)"
+  case_end
+}
+
+should_not_flag_vip_when_only_a_different_sender_is_listed() {
+  case_start "${FUNCNAME[0]}"
+  run_check --vip 'alice@example.net' gmail-vip-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "not VIP" "0" "$(field VIP)"
+  case_end
+}
+
+should_not_flag_vip_when_the_entry_is_a_parent_domain() {
+  case_start "${FUNCNAME[0]}"
+  # Subdomain suffix matching is deliberately not implemented: SPEC Open
+  # Question 1 asks for a stated rule and recommends exact matching, so
+  # `example.com` must not silently cover `mail.example.com` or the reverse.
+  run_check --vip 'com' gmail-vip-sender.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "not VIP" "0" "$(field VIP)"
+  case_end
+}
+
+should_not_flag_vip_when_the_sender_has_no_parseable_address
+should_emit_a_complete_report_when_the_sender_has_no_parseable_address
+should_not_flag_vip_when_the_from_field_is_absent
+should_not_flag_vip_when_the_vip_file_is_empty
+should_not_flag_vip_when_the_vip_file_holds_only_blanks_and_comments
+should_not_flag_vip_when_an_entry_merely_contains_the_sender_domain
+should_not_flag_vip_when_an_entry_merely_contains_the_sender_address
+should_not_flag_vip_when_the_sender_merely_contains_an_entry
+should_flag_vip_when_an_entry_is_the_sender_domain
+should_flag_vip_when_an_entry_is_the_sender_address
+should_flag_vip_when_a_domain_entry_carries_a_leading_at_sign
+should_flag_vip_when_an_entry_differs_only_in_case
+should_flag_vip_when_the_sender_address_is_upper_case
+should_flag_vip_when_the_sender_domain_is_upper_case
+should_flag_vip_when_the_matching_entry_is_not_the_first_line
+should_flag_vip_when_the_entry_is_on_an_unterminated_last_line
+should_ignore_surrounding_whitespace_when_an_entry_is_indented
+should_ignore_a_trailing_comment_when_an_entry_carries_one
+should_not_flag_vip_when_only_a_different_sender_is_listed
+should_not_flag_vip_when_the_entry_is_a_parent_domain
+
+report_totals "vip-matching-test"

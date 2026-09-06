@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "id": "msg-decoyed",
+      "subject": "the real thing",
+      "from": "\"noreply@lists.invalid\" <boss@example.com>"
+    }
+  ]
+}

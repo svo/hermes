@@ -1,0 +1,348 @@
+#!/usr/bin/env bash
+#
+# Sensitivity check. Not part of `run`: it is slow, and it is a check on the
+# cases rather than on hermes-check.
+#
+# Each mutation changes exactly one behaviour in a copy of hermes-check and
+# asserts that at least one case notices. A mutation nothing catches is a hole
+# in the suite — or, occasionally, a change with no observable effect, which is
+# worth knowing too and is recorded in README.md § Mutation-checked.
+#
+#   .specs/005-hermes-check-correctness/tests/mutation-check [name-substring]
+#
+# With an argument, only mutations whose name contains it are run.
+#
+# Every anchor is asserted to occur exactly once in the whole file before it is
+# applied, and a bad anchor is reported as a bad anchor rather than as a caught
+# or uncaught mutation. 002 learned that the hard way: two of its mutations
+# anchored on a string that also occurred in a neighbouring block.
+
+# The anchors below are literal fragments of hermes-check, so every $ in them is
+# meant to stay a $. Single quotes are the point.
+# shellcheck disable=SC2016
+
+set -uo pipefail
+
+tests_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${tests_dir}/../../.." && pwd)"
+original="${repo_root}/infrastructure/ansible/roles/openclaw/files/hermes-check"
+
+only="${1:-}"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+missed=()
+skipped=0
+
+# The suites, cheapest and most sensitive first: the loop stops as soon as
+# something catches the mutation.
+suites=(
+  vip-matching-test
+  classification-test
+  message-identity-test
+  calendar-dates-test
+  data-source-test
+  upstream-shape-test
+  gog-invocation-test
+)
+
+selected() {
+  if [ -z "$only" ]; then
+    return 0
+  fi
+  case "$1" in
+    *"$only"*) return 0 ;;
+    *) skipped=$((skipped + 1)); return 1 ;;
+  esac
+}
+
+# mutate <name> <anchor> <replacement>
+#
+# The anchor is a fixed string, matched against the whole file so that it may
+# span lines; the replacement takes its place. Both are passed through the
+# environment, never interpolated into a pattern.
+mutate() {
+  local name="$1" anchor="$2" replacement="$3"
+  local mutant="${work}/hermes-check" status caught out suite
+
+  selected "$name" || return 0
+
+  MUT_ANCHOR="$anchor" MUT_REPLACEMENT="$replacement" \
+    python3 -c '
+import os, sys
+src, dst = sys.argv[1], sys.argv[2]
+anchor = os.environ["MUT_ANCHOR"]
+replacement = os.environ["MUT_REPLACEMENT"]
+s = open(src).read()
+hits = s.count(anchor)
+if hits != 1:
+    sys.stderr.write("hits=%d\n" % hits)
+    sys.exit(3)
+open(dst, "w").write(s.replace(anchor, replacement, 1))
+' "$original" "$mutant"
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    printf 'ANCHOR %-46s did not match exactly once — not applied\n' "$name" >&2
+    missed+=("$name (bad anchor)")
+    return
+  fi
+
+  # A mutant that no longer parses proves nothing about the cases.
+  if ! bash -n "$mutant" 2>/dev/null; then
+    printf 'SYNTAX %-46s the mutant does not parse — not applied\n' "$name" >&2
+    missed+=("$name (bad mutant)")
+    return
+  fi
+
+  caught=""
+  for suite in "${suites[@]}"; do
+    out="$(HERMES_CHECK="$mutant" bash "${tests_dir}/${suite}" 2>&1)"
+    caught="$(printf '%s\n' "$out" | grep '^FAIL ' | sed 's/^FAIL //' | head -2 | paste -sd, -)"
+    if [ -n "$caught" ]; then
+      break
+    fi
+  done
+
+  if [ -n "$caught" ]; then
+    printf '%-46s caught by %s\n' "$name" "$caught"
+  else
+    printf '%-46s *** NOT CAUGHT ***\n' "$name" >&2
+    missed+=("$name")
+  fi
+}
+
+# Two further mutations are deliberately absent, and README.md § Mutation-checked
+# says why: deriving OTHER by subtraction again, and dropping the counter on the
+# calendar-extraction failure path. Neither is observable — the first because the
+# buckets are disjoint, the second because the extraction cannot fail. They are
+# named there rather than left here as permanent red.
+
+# --- VIP matching: C1 and C5 ----------------------------------------------
+
+mutate 'vip matches an address by containment' \
+  '    if [ "$entry" = "$addr" ]; then' \
+  '    if [ "${addr#*"$entry"}" != "$addr" ]; then'
+
+mutate 'vip matches a domain by containment' \
+  '    if [ -n "$domain" ] && { [ "$entry" = "$domain" ] || [ "$entry" = "@${domain}" ]; }; then' \
+  '    if [ -n "$domain" ] && [ "${entry#*"$domain"}" != "$entry" ]; then'
+
+mutate 'vip comparison is case sensitive' \
+  '    entry="${entry,,}"' \
+  '    :'
+
+mutate 'vip ignores an unterminated last line' \
+  '  while IFS= read -r entry || [ -n "$entry" ]; do' \
+  '  while IFS= read -r entry; do'
+
+mutate 'the sender address is not lowercased' \
+  '    from_addr="${from_addr,,}"' \
+  '    :'
+
+mutate 'an unreadable sender aborts the run' \
+  "      | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' | head -1) || true" \
+  "      | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' | head -1)"
+
+# --- classification and the counts: C2 -------------------------------------
+
+mutate 'vip is counted independently of the bucket' \
+  '    if [ "$is_urgent" = "yes" ]; then
+      urgent_count=$((urgent_count + 1))' \
+  '    if [ "$is_vip" = "yes" ]; then vip_count=$((vip_count + 1)); fi
+    if [ "$is_urgent" = "yes" ]; then
+      urgent_count=$((urgent_count + 1))'
+
+mutate 'a message can land in two buckets' \
+  '    elif [ "$is_vip" = "yes" ]; then
+      vip_count=$((vip_count + 1))' \
+  '    fi
+    if [ "$is_vip" = "yes" ]; then
+      vip_count=$((vip_count + 1))'
+
+# --- data acquisition: C3 and C3b ------------------------------------------
+
+mutate 'the response shape is not validated' \
+  '  if [ "$status" -eq 0 ] && printf '"'"'%s'"'"' "$raw" | jq -e -s --arg k "$key" \
+    '"'"'length == 1 and (.[0] | type == "object"
+       and ((has($k) | not) or .[$k] == null or (.[$k] | type) == "array"))'"'"' \
+    >/dev/null 2>&1; then' \
+  '  if [ "$status" -eq 0 ]; then'
+
+mutate 'an empty response counts as usable' \
+  '    '"'"'length == 1 and (.[0] | type == "object"' \
+  '    '"'"'length >= 0 and (.[0] // {} | type == "object"'
+
+mutate 'a data source failure is not counted' \
+  '  data_source_errors=$((data_source_errors + 1))
+  # Named, and emitted in the section it belongs to' \
+  '  # Named, and emitted in the section it belongs to'
+
+mutate 'a data source failure raises no alert' \
+  '  add_reason "${name} data source unavailable"' \
+  '  :'
+
+mutate 'the failing source is not named' \
+  '  echo "DATA_SOURCE_ERROR: ${name}"' \
+  '  :'
+
+# --- date handling: C4 -----------------------------------------------------
+
+mutate 'an absent timestamp is parsed as now' \
+  '  if [ -z "$value" ] || [ "$value" = "$ABSENT" ]; then
+    return 0
+  fi' \
+  '  :'
+
+mutate 'an unparseable event is not counted' \
+  '  if [ -z "$start_epoch" ]; then
+    unparseable_events=$((unparseable_events + 1))
+    continue
+  fi' \
+  '  if [ -z "$start_epoch" ]; then
+    continue
+  fi'
+
+mutate 'an unreadable end is not counted' \
+  '  if [ -z "$end_epoch" ]; then
+    unparseable_events=$((unparseable_events + 1))
+    end_epoch="$ABSENT"
+  fi' \
+  '  if [ -z "$end_epoch" ]; then
+    end_epoch="$ABSENT"
+  fi'
+
+mutate 'a missing end is left as an empty field' \
+  '    end_epoch="$ABSENT"' \
+  '    end_epoch=""'
+
+mutate 'unparseable events raise no alert' \
+  '[ "$unparseable_events" -gt 0 ] && add_reason "${unparseable_events} unparseable calendar event(s)"' \
+  ':'
+
+mutate 'the unparseable count is not reported' \
+  'echo "UNPARSEABLE_EVENTS: ${unparseable_events}"' \
+  ':'
+
+# --- all-day events and ordering: C11 --------------------------------------
+
+mutate 'events are not ordered by start time' \
+  'done <<< "$(printf '"'"'%s'"'"' "$parsed_events" | sort -t$'"'"'\t'"'"' -k1,1n)"' \
+  'done <<< "$parsed_events"'
+
+mutate 'the sort key runs to the end of the line' \
+  "sort -t\$'\\t' -k1,1n" \
+  "sort -t\$'\\t' -k1"
+
+# --- the upstream shape: SPEC Open Question 2 ------------------------------
+
+mutate 'a start object is not unwrapped' \
+  '        if ($raw | type) == "object" then
+          (if ($raw | has("date")) then ($raw.date // "")
+           elif ($local | type) == "string" and ($local | test("T")) then $local
+           else ($raw.dateTime // "") end)' \
+  '        if ($raw | type) == "object" then ("")'
+
+mutate "gog's local timestamps are ignored" \
+  '           elif ($local | type) == "string" and ($local | test("T")) then $local' \
+  '           elif false then $local'
+
+# --- message identity, and the sender address ------------------------------
+
+mutate 'grep is called without an option terminator' \
+  '  if ! grep -qFx -- "$msg_id" "$SEEN_FILE" 2>/dev/null; then' \
+  '  if ! grep -qFx "$msg_id" "$SEEN_FILE" 2>/dev/null; then'
+
+mutate 'the sender is read from the whole header' \
+  '    case "$from" in
+      *'"'"'<'"'"'*'"'"'>'"'"'*)
+        addr_spec="${from##*<}"
+        addr_spec="${addr_spec%%>*}"
+        ;;
+      *) addr_spec="$from" ;;
+    esac' \
+  '    addr_spec="$from"'
+
+mutate 'a non-zero pipe status blanks the address' \
+  '      | grep -oE '"'"'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+'"'"' | head -1) || true' \
+  '      | grep -oE '"'"'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+'"'"' | head -1) || from_addr=""'
+
+mutate 'a message with an unusable id is dropped' \
+  '    '"''"' | *[[:space:]]*)
+      unreadable_messages=$((unreadable_messages + 1))
+      continue
+      ;;' \
+  '    '"''"' | *[[:space:]]*)
+      continue
+      ;;'
+
+mutate 'an id carrying whitespace is accepted' \
+  '    '"''"' | *[[:space:]]*)' \
+  '    '"''"')'
+
+mutate 'message fields are looked up by id' \
+  "      '.messages[\$i].subject // \"(no subject)\"')" \
+  "      '.messages[]?.subject // \"(no subject)\"')"
+
+mutate 'unreadable messages raise no alert' \
+  '[ "$unreadable_messages" -gt 0 ] && add_reason "${unreadable_messages} unreadable message(s)"' \
+  ':'
+
+mutate 'the unreadable message count is not reported' \
+  'echo "UNREADABLE_MESSAGES: ${unreadable_messages}"' \
+  ':'
+
+# --- the authoritative all-day signal, and event accounting ----------------
+
+mutate 'the all-day flag is ignored' \
+  '  if [ "$all_day" = "all-day" ]; then
+    all_day_events=$((all_day_events + 1))
+    continue
+  fi' \
+  '  if false; then
+    all_day_events=$((all_day_events + 1))
+    continue
+  fi'
+
+mutate 'all-day is decided by the local string' \
+  '          (if ($raw | has("date")) then "all-day" else "" end)' \
+  '          (if (($local // "") | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))
+             then "all-day" else "" end)'
+
+mutate 'a non-object event is filtered away' \
+  '        else
+          ["Untitled", $absent, $absent, $absent, $absent, $absent]
+        end' \
+  '        else
+          empty
+        end'
+
+mutate 'zero is the no-previous-event sentinel again' \
+  '  if [ -n "$prev_end_epoch" ] && [ "$start_epoch" -lt "$prev_end_epoch" ]; then' \
+  '  if [ "${prev_end_epoch:-0}" -gt 0 ] && [ "$start_epoch" -lt "$prev_end_epoch" ]; then'
+
+# --- how gog is invoked: C10 -----------------------------------------------
+
+mutate 'an empty account argument is passed' \
+  'gog_args=()' \
+  'gog_args=("")'
+
+mutate 'the account flag is always passed' \
+  'gog_args=()
+if [ -n "$GOG_ACCOUNT" ]; then
+  gog_args=(--account "$GOG_ACCOUNT")
+fi' \
+  'gog_args=(--account "$GOG_ACCOUNT")'
+
+printf '\n'
+if [ "$skipped" -gt 0 ]; then
+  printf '%d mutation(s) skipped by the "%s" filter.\n' "$skipped" "$only"
+fi
+if [ ${#missed[@]} -eq 0 ]; then
+  printf 'Every mutation was caught.\n'
+  exit 0
+fi
+
+printf 'Mutations nothing caught:\n' >&2
+printf '  %s\n' "${missed[@]}" >&2
+exit 1

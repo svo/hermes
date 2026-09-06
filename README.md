@@ -527,8 +527,10 @@ NEW_UNREAD: 2
 URGENT: 0
 VIP: 0
 OTHER: 2
+UNREADABLE_MESSAGES: 0
 <untrusted-email>
   - From: alice@example.net | Subject: Q3 planning notes
+  - From: bob@example.net | Subject: Re: invoice 4471
 </untrusted-email>
 ```
 
@@ -561,3 +563,91 @@ someone is probing, and the check reads as a breach when it is the design workin
 
 This reduces the efficacy of prompt injection; it does not eliminate it. The heartbeat agent
 still runs with a full tool profile and an unrestricted shell.
+
+## Monitoring Output
+
+`hermes-check` is the pre-processing pipeline the heartbeat runs. Its report is a
+line-oriented summary, and the counts outside the fences are what the agent acts on.
+
+### VIP senders
+
+`~/.openclaw/hermes-check/vip-senders.txt`, one entry per line. An entry matches only when
+it is **exactly** the sender's address, or **exactly** the domain after the `@` — written
+either way round:
+
+```
+bob@example.com     # this address
+example.com         # anyone at this domain
+@example.com        # the same thing
+# blank lines and comments are ignored
+```
+
+Matching is case-insensitive. It is **not** a substring or suffix rule: `example.com` does
+not match `mail.example.com`, and no sender becomes a VIP because a longer entry happens to
+contain their address.
+
+The sender is the address inside the angle brackets of the `From` header, not the display
+name in front of it. A stranger whose display name is `"ceo@example.com"` is not a VIP —
+which matters, because the display name is theirs to choose and the mailbox is not.
+
+If you have an existing list, re-read it against that rule. Matching previously ran on
+substring containment in the wrong direction, which meant an entry of `notexample.com`
+flagged mail from `example.com`, and a sender whose `From` header carried no readable
+address matched every line in the file. Some lists will have been flagging more than their
+owner intended.
+
+### The counts add up
+
+A message lands in exactly one bucket — urgent, else VIP, else ordinary — so:
+
+```
+URGENT + VIP + OTHER == NEW_UNREAD
+```
+
+holds on every run and `OTHER` is never negative. A message that is both urgent and VIP is
+counted once, as urgent. (It used to be counted in both and subtracted twice, which printed
+`OTHER: -1`.)
+
+### When monitoring itself is degraded
+
+Three counters report what the run could not see. Any of them being non-zero sets
+`ACTION_NEEDED`, because a check that ran but saw less than it should have is worth saying
+out loud rather than reporting as a quiet day. A fourth line reports all-day events, which
+are ordinary rather than a problem.
+
+| Line | Meaning |
+|---|---|
+| `DATA_SOURCE_ERRORS: <n>` | upstream calls that failed or returned unusable data |
+| `UNPARSEABLE_EVENTS: <n>` | calendar events excluded because their dates could not be read |
+| `UNREADABLE_MESSAGES: <n>` | messages with no usable id, which cannot be tracked between runs |
+| `ALL_DAY_EVENTS: <n>` | all-day events, reported separately and excluded from conflicts |
+
+`ALL_DAY_EVENTS` is ordinary and does not raise `ACTION_NEEDED`; the other three do.
+
+A failing upstream also names itself where it happened, as `DATA_SOURCE_ERROR: gmail` or
+`DATA_SOURCE_ERROR: calendar`. The report is always complete: every section is emitted on
+every path, including one where every upstream call fails. Silence is never a valid output —
+previously a `gog` response that was not JSON aborted the script mid-report with no summary
+at all, which reads exactly like a quiet inbox.
+
+All-day events are reported rather than folded into conflict detection. An all-day event has
+no start time and its end date is exclusive, so treating it as a timed event running from
+midnight made it overlap every other event that day.
+
+Operator check — the counts should reconcile and both error lines should be zero. `tail` will
+not do here: the counts and the error lines sit in different sections, so ask for them by
+name.
+
+```bash
+docker exec hermes hermes-check \
+  | grep -E '^(NEW_UNREAD|URGENT|VIP|OTHER|UNREADABLE_MESSAGES|UNPARSEABLE_EVENTS|DATA_SOURCE_ERRORS):'
+```
+
+### Testing it
+
+`hermes-check` runs end to end with no credentials, no network and no Google account, against
+fixture responses served by a stub `gog`:
+
+```bash
+bin/hermes-check-test
+```

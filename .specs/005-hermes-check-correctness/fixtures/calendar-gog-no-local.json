@@ -1,0 +1,25 @@
+{
+  "events": [
+    {
+      "id": "ev-design-review",
+      "summary": "Design review",
+      "start": {
+        "dateTime": "2099-01-01T09:00:00+00:00"
+      },
+      "end": {
+        "dateTime": "2099-01-01T10:00:00+00:00"
+      }
+    },
+    {
+      "id": "ev-company-holiday",
+      "summary": "Company holiday",
+      "start": {
+        "date": "2099-01-01"
+      },
+      "end": {
+        "date": "2099-01-02"
+      }
+    }
+  ],
+  "nextPageToken": ""
+}

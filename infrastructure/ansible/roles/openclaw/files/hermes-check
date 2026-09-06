@@ -29,15 +29,29 @@ UNTRUSTED_CALENDAR_CLOSE="</untrusted-calendar>"
 mkdir -p "$STATE_DIR"
 touch "$SEEN_FILE" "$VIP_FILE"
 
-gog_account_flag=""
+# An array, not a string. The string form had to be left unquoted to split into
+# two arguments, and quoting it — the obvious reading of shellcheck SC2086 —
+# would pass one empty argument to `gog` whenever GOG_GOOGLE_ACCOUNT is unset.
+# An empty array expands to no words at all, so both readings are correct here.
+gog_args=()
 if [ -n "$GOG_ACCOUNT" ]; then
-  gog_account_flag="--account $GOG_ACCOUNT"
+  gog_args=(--account "$GOG_ACCOUNT")
 fi
+
+# Stands in for any absent field in the tab-separated records below. A literal
+# empty field would be lost: `read` with IFS set to tab treats a run of tabs as
+# one delimiter, and strips leading and trailing ones, because tab is IFS
+# whitespace. So an empty field shifts every later field left — an event with no
+# start would silently adopt its end as its start, and a summary would land in a
+# variable the numeric tests read. Nothing emitted below is ever empty.
+ABSENT="-"
 
 action_needed="no"
 reasons=""
 sanitized_count=0
 SANITIZED_VALUE=""
+data_source_errors=0
+FETCHED_JSON=""
 
 # The single choke point for attacker-controlled text: email subjects, sender
 # headers, calendar titles. Pure — stdin to stdout, no state, no globals beyond
@@ -97,6 +111,115 @@ add_reason() {
   action_needed="yes"
 }
 
+# Fetch a JSON document from an upstream call, or substitute a documented empty
+# structure and report a named error.
+#
+#   fetch_json <source-name> <top-level-key> <command> [args...]
+#
+# The result comes back in FETCHED_JSON rather than on stdout: like sanitize(),
+# this has to run in the current shell or the error counter — and the error
+# line — would be swallowed by the command substitution that captured it.
+#
+# Two failure modes, and the `|| echo '{"messages":[]}'` guard this replaces
+# handled neither. On a non-zero exit the guard *appended* its fallback to
+# whatever the call had already written, so jq was handed a two-document stream
+# and reported counts from both. On a zero exit with output that is not the
+# JSON we need — an HTML error page, a login prompt — the guard never fired at
+# all, and the unguarded jq that followed took the whole run down under
+# `set -e`, with the report abandoned part-written.
+#
+# A response is usable when it is exactly one JSON object whose top-level key
+# holds an array, or omits it. Omitted counts as empty rather than broken, so
+# an upstream that drops the key for an empty result is not reported as an
+# error. Anything else — a bare array, a bare string, a key of the wrong type —
+# is reported, which also turns the "gog renamed a field" failure from a silent
+# zero into something an operator can see.
+#
+# The document count is part of the check, not decoration. `jq -e` reports the
+# status of the last value it produced, and over empty input it produces none
+# and exits zero — so a call that succeeded and printed nothing would otherwise
+# validate, and the empty string would reach the report as `EVENTS_TODAY: `
+# with no number after it. Slurping makes "no documents" and "more than one"
+# both answerable in the same expression.
+fetch_json() {
+  local name="$1" key="$2"
+  shift 2
+  local raw status=0
+  raw=$("$@" 2>/dev/null) || status=$?
+
+  if [ "$status" -eq 0 ] && printf '%s' "$raw" | jq -e -s --arg k "$key" \
+    'length == 1 and (.[0] | type == "object"
+       and ((has($k) | not) or .[$k] == null or (.[$k] | type) == "array"))' \
+    >/dev/null 2>&1; then
+    FETCHED_JSON="$raw"
+    return 0
+  fi
+
+  FETCHED_JSON="$(printf '{"%s":[]}' "$key")"
+  data_source_errors=$((data_source_errors + 1))
+  # Named, and emitted in the section it belongs to: broken monitoring has to be
+  # distinguishable from a quiet inbox, and "which upstream" is the first thing
+  # an operator needs.
+  echo "DATA_SOURCE_ERROR: ${name}"
+  add_reason "${name} data source unavailable"
+}
+
+# An epoch for a calendar timestamp, or the empty string when there is not one.
+#
+# The absent check is not redundant with the parse: `date -d ""` succeeds and
+# answers "now", so an event with a missing timestamp would otherwise be
+# silently placed at the moment the check ran — ending now, or starting now —
+# rather than reported as one that could not be read. That is the same class of
+# failure as the one this spec is repairing, arriving by a different route.
+#
+# The zone matters for Google's other timed form, `{"dateTime": "...", 
+# "timeZone": "..."}`, where the timestamp carries no offset of its own and is
+# meaningless without it — read in the container's UTC, a 09:00 New York meeting
+# lands five hours out. Applying the zone is safe either way: when the timestamp
+# does carry an offset, that offset wins and TZ affects nothing.
+parse_epoch() {
+  local value="$1" zone="${2:-}"
+  if [ -z "$value" ] || [ "$value" = "$ABSENT" ]; then
+    return 0
+  fi
+  if [ -n "$zone" ] && [ "$zone" != "$ABSENT" ]; then
+    TZ="$zone" date -d "$value" +%s 2>/dev/null || true
+  else
+    date -d "$value" +%s 2>/dev/null || true
+  fi
+}
+
+# True when a sender matches an entry in the VIP file. An entry is an exact
+# email address, or an exact domain written with or without a leading `@`;
+# comparison is case-insensitive, blank lines and `#` comments are ignored.
+#
+# Matching is equality against a whole entry, never substring containment in
+# either direction. Containment is what made a sender whose From header carried
+# no parseable address match every entry in the file, and what made a VIP entry
+# of `notexample.com` match a sender at `example.com` — the test ran the wrong
+# way round. Neither is expressible here.
+vip_matches() {
+  local addr="$1" domain="$2" entry
+  if [ -z "$addr" ] || [ ! -s "$VIP_FILE" ]; then
+    return 1
+  fi
+  while IFS= read -r entry || [ -n "$entry" ]; do
+    entry="${entry%%#*}"
+    entry="${entry//[[:space:]]/}"
+    entry="${entry,,}"
+    if [ -z "$entry" ]; then
+      continue
+    fi
+    if [ "$entry" = "$addr" ]; then
+      return 0
+    fi
+    if [ -n "$domain" ] && { [ "$entry" = "$domain" ] || [ "$entry" = "@${domain}" ]; }; then
+      return 0
+    fi
+  done < "$VIP_FILE"
+  return 1
+}
+
 echo "=== HERMES CHECK ==="
 echo "TIMESTAMP: $(date --iso-8601=seconds)"
 echo ""
@@ -105,44 +228,104 @@ echo ""
 
 echo "--- EMAIL ---"
 
-email_json=$(gog gmail messages search 'is:unread newer_than:2h' --max 50 --json $gog_account_flag 2>/dev/null || echo '{"messages":[]}')
-all_ids=$(echo "$email_json" | jq -r '.messages[]?.id // empty' 2>/dev/null)
+fetch_json gmail messages \
+  gog gmail messages search 'is:unread newer_than:2h' --max 50 --json "${gog_args[@]}"
+email_json="$FETCHED_JSON"
+
+message_count=$(printf '%s' "$email_json" | jq '(.messages // []) | length')
 
 new_ids=""
 new_count=0
 urgent_count=0
 vip_count=0
+other_count=0
+unreadable_messages=0
 urgent_lines=""
 vip_lines=""
 other_lines=""
 
-while IFS= read -r msg_id; do
-  [ -z "$msg_id" ] && continue
-  if ! grep -qFx "$msg_id" "$SEEN_FILE" 2>/dev/null; then
+# Walk the messages by position, and read each one's fields by that position
+# too. Looking them up by `.id` instead meant two messages sharing an id had
+# their subjects and senders concatenated into one string, and both were then
+# rendered as a line belonging to neither — with the VIP check run against the
+# merged value. A position is unique by construction; an id is not.
+msg_index=0
+while [ "$msg_index" -lt "$message_count" ]; do
+  index="$msg_index"
+  msg_index=$((msg_index + 1))
+
+  msg_id=$(printf '%s' "$email_json" | jq -r --argjson i "$index" \
+    '.messages[$i] | if type == "object" then (.id // empty) else empty end')
+
+  # The id is the key into the seen-message file, which is one id per line, so
+  # it has to exist and be a single line. A message whose id is missing or
+  # carries whitespace is one we cannot track between runs: report it rather
+  # than drop it. Untracked, a newline-bearing id also split into several
+  # phantom entries and — being appended to the seen file — evicted the real
+  # ids from it, so messages already notified came back as new.
+  case "$msg_id" in
+    '' | *[[:space:]]*)
+      unreadable_messages=$((unreadable_messages + 1))
+      continue
+      ;;
+  esac
+
+  # `--` matters: GNU grep permutes its arguments, so an id beginning with `-`
+  # was read as an option. The seen file then became the *pattern*, leaving no
+  # file operand, and grep read the loop's own input instead — swallowing every
+  # remaining message. One `-e` in an id silently emptied the rest of the inbox.
+  if ! grep -qFx -- "$msg_id" "$SEEN_FILE" 2>/dev/null; then
     new_ids="${new_ids}${msg_id}"$'\n'
     new_count=$((new_count + 1))
 
-    subject=$(echo "$email_json" | jq -r --arg id "$msg_id" '.messages[] | select(.id == $id) | .subject // "(no subject)"' 2>/dev/null)
-    from=$(echo "$email_json" | jq -r --arg id "$msg_id" '.messages[] | select(.id == $id) | .from // "unknown"' 2>/dev/null)
-    from_addr=$(echo "$from" | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' | head -1)
-    from_domain=$(echo "$from_addr" | cut -d@ -f2)
+    subject=$(printf '%s' "$email_json" | jq -r --argjson i "$index" \
+      '.messages[$i].subject // "(no subject)"')
+    from=$(printf '%s' "$email_json" | jq -r --argjson i "$index" \
+      '.messages[$i].from // "unknown"')
+
+    # Take the address from the angle-bracketed addr-spec when there is one.
+    # The display name in front of it is chosen by the sender, and scanning the
+    # whole header for the first address-shaped token read that name as the
+    # address: a stranger who set their display name to a VIP's address was
+    # flagged VIP, and a real VIP whose header carried a list address in front
+    # of theirs was demoted. Tightening the VIP file comparison achieved nothing
+    # while the value being compared was the sender's to choose.
+    case "$from" in
+      *'<'*'>'*)
+        addr_spec="${from##*<}"
+        addr_spec="${addr_spec%%>*}"
+        ;;
+      *) addr_spec="$from" ;;
+    esac
+
+    # `|| true`, not `|| from_addr=""`: grep exits 1 when the header carries no
+    # address — normal, not fatal, and under `pipefail` it used to take the whole
+    # run down. But the pipeline also exits non-zero when `head` closes the pipe
+    # on grep mid-write, and there the address was already extracted correctly;
+    # blanking it on status alone silently demoted a VIP whose header was long
+    # enough to fill the pipe buffer. The captured value is kept either way, and
+    # it is empty exactly when nothing matched.
+    from_addr=$(printf '%s' "$addr_spec" \
+      | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' | head -1) || true
+    from_addr="${from_addr,,}"
+    from_domain="${from_addr#*@}"
+    if [ "$from_domain" = "$from_addr" ]; then
+      from_domain=""
+    fi
 
     is_urgent="no"
     is_vip="no"
 
     if [ -f "$MODEL_FILE" ] && command -v fasttext >/dev/null 2>&1; then
-      label=$(echo "$subject" | fasttext predict "$MODEL_FILE" - 2>/dev/null | awk '{print $1}')
+      label=$(printf '%s' "$subject" \
+        | fasttext predict "$MODEL_FILE" - 2>/dev/null | awk '{print $1}') || label=""
       if [ "$label" = "__label__urgent" ]; then
         is_urgent="yes"
-        urgent_count=$((urgent_count + 1))
       fi
     fi
 
-    if [ -s "$VIP_FILE" ]; then
-      if grep -qiF "$from_addr" "$VIP_FILE" 2>/dev/null || grep -qiF "$from_domain" "$VIP_FILE" 2>/dev/null; then
-        is_vip="yes"
-        vip_count=$((vip_count + 1))
-      fi
+    if vip_matches "$from_addr" "$from_domain"; then
+      is_vip="yes"
     fi
 
     # Trust boundary. Everything above operates on the raw values; nothing below
@@ -152,16 +335,25 @@ while IFS= read -r msg_id; do
     sanitize "$subject"
     safe_subject="$SANITIZED_VALUE"
 
+    # Exactly one bucket per message, with an explicit precedence, and the
+    # counter incremented in the same branch that emits the line. OTHER is a
+    # count of its own bucket. Deriving it as new - urgent - vip made it go
+    # negative for a message that was both urgent and VIP, because that message
+    # was subtracted twice and listed once; with one branch per message the
+    # arithmetic that could disagree with the listing no longer exists.
     line="From: ${safe_from} | Subject: ${safe_subject}"
     if [ "$is_urgent" = "yes" ]; then
+      urgent_count=$((urgent_count + 1))
       urgent_lines="${urgent_lines}  - [URGENT] ${line}"$'\n'
     elif [ "$is_vip" = "yes" ]; then
+      vip_count=$((vip_count + 1))
       vip_lines="${vip_lines}  - [VIP] ${line}"$'\n'
     else
+      other_count=$((other_count + 1))
       other_lines="${other_lines}  - ${line}"$'\n'
     fi
   fi
-done <<< "$all_ids"
+done
 
 # Update seen file (keep last 200)
 if [ -n "$new_ids" ]; then
@@ -172,7 +364,16 @@ tail -200 "$SEEN_FILE" > "${SEEN_FILE}.tmp" && mv "${SEEN_FILE}.tmp" "$SEEN_FILE
 echo "NEW_UNREAD: ${new_count}"
 echo "URGENT: ${urgent_count}"
 echo "VIP: ${vip_count}"
-echo "OTHER: $((new_count - urgent_count - vip_count))"
+echo "OTHER: ${other_count}"
+echo "UNREADABLE_MESSAGES: ${unreadable_messages}"
+
+# The operator can add these three up against NEW_UNREAD directly from the
+# output; this asserts the same invariant from the inside. It cannot fire while
+# every message takes exactly one branch above, which is the point of keeping
+# it — it fires if that ever stops being true.
+if [ "$((urgent_count + vip_count + other_count))" -ne "$new_count" ]; then
+  add_reason "internal count mismatch"
+fi
 
 # Counts stay outside the fence — the agent acts on those. Inside it is only
 # third-party text, to be summarised and never obeyed.
@@ -184,6 +385,7 @@ echo "$UNTRUSTED_EMAIL_CLOSE"
 
 [ "$urgent_count" -gt 0 ] && add_reason "${urgent_count} urgent email(s)"
 [ "$vip_count" -gt 0 ] && add_reason "${vip_count} VIP email(s)"
+[ "$unreadable_messages" -gt 0 ] && add_reason "${unreadable_messages} unreadable message(s)"
 
 echo ""
 
@@ -191,29 +393,151 @@ echo ""
 
 echo "--- CALENDAR ---"
 
-cal_json=$(gog calendar events primary --today --json $gog_account_flag 2>/dev/null || echo '{"events":[]}')
-event_count=$(echo "$cal_json" | jq '.events | length' 2>/dev/null || echo 0)
+fetch_json calendar events \
+  gog calendar events primary --today --json "${gog_args[@]}"
+cal_json="$FETCHED_JSON"
+event_count=$(printf '%s' "$cal_json" | jq '(.events // []) | length')
 echo "EVENTS_TODAY: ${event_count}"
 
 now_epoch=$(date +%s)
+
+# Extract every event into a tab-separated record the loop below can read.
+#
+# `gog calendar events` emits the raw Google Calendar v3 Event resource with a
+# few string fields merged in, so `start` and `end` are OBJECTS, not strings: a
+# timed event carries `{"dateTime": ...}` and an all-day one `{"date": ...}`,
+# and the `date` form is what makes an event all-day. Reading `.start` as a
+# string fed an object to `@tsv`, which refuses one — so jq failed, the loop
+# read nothing, and the calendar reported EVENTS_TODAY alongside no next event
+# and no conflicts. Every reminder and every clash, gone, with the reason on
+# stderr where nobody was looking.
+#
+# `startLocal`/`endLocal` are gog's own normalisation, RFC3339 with an offset,
+# so they are preferred for a timed event — but only when they actually look
+# like a timestamp, and never for an all-day one. `start.date` is the
+# authoritative all-day signal and it decides both what is read and what is
+# flagged; keying that off the *text shape* of `startLocal` instead let an
+# all-day event whose `startLocal` carried an offset come back as a
+# midnight-to-midnight event overlapping everything on the day, and let a timed
+# event whose `startLocal` was a bare date vanish from the report as all-day. A
+# plain string is accepted too, which is the shape the fixtures used before this
+# was pinned to the real one.
+#
+# `allday` decides all-day for every shape, in one place: `start.date` for the
+# real resource, and a bare-date string for the flat shape the fixtures used
+# before this was pinned. It is the only thing that decides — a second check in
+# the shell, keyed on how the timestamp happened to render, would mask this one
+# and neither could then be shown to matter.
+#
+# An element that is not an object becomes an all-absent record rather than
+# being filtered away, so it is counted as an event that could not be read
+# instead of disappearing between EVENTS_TODAY and every other counter.
+#
+# Every branch yields a string, so no event shape can make the extraction fail;
+# if one ever does, it is reported rather than silently emptying the calendar.
+events_tsv=""
+if ! events_tsv="$(printf '%s' "$cal_json" | jq -r --arg absent "$ABSENT" '
+      def stamp($raw; $local):
+        if ($raw | type) == "object" then
+          (if ($raw | has("date")) then ($raw.date // "")
+           elif ($local | type) == "string" and ($local | test("T")) then $local
+           else ($raw.dateTime // "") end)
+        elif ($raw | type) == "string" then $raw
+        elif ($local | type) == "string" then $local
+        else "" end;
+      def zone($raw):
+        if ($raw | type) == "object" then ($raw.timeZone // "") else "" end;
+      def allday($raw; $local):
+        if ($raw | type) == "object" then
+          (if ($raw | has("date")) then "all-day" else "" end)
+        elif ($raw | type) == "string" then
+          (if ($raw | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) then "all-day" else "" end)
+        elif ($local | type) == "string" and ($local | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) then
+          "all-day"
+        else "" end;
+      def present($s):
+        if ($s | type) == "string" and $s != "" then $s else $absent end;
+      .events[]?
+      | if type == "object" then
+          [ (if (.summary | type) == "string" and .summary != ""
+               then .summary else "Untitled" end),
+            present(stamp(.start; .startLocal)),
+            present(stamp(.end; .endLocal)),
+            present(zone(.start)),
+            present(zone(.end)),
+            present(allday(.start; .startLocal)) ]
+        else
+          ["Untitled", $absent, $absent, $absent, $absent, $absent]
+        end
+      | @tsv' 2>/dev/null)"; then
+  events_tsv=""
+  data_source_errors=$((data_source_errors + 1))
+  echo "DATA_SOURCE_ERROR: calendar-events"
+  add_reason "calendar events unreadable"
+fi
+
+# Parse every event once, here, into a normalized record — start epoch, end
+# epoch, summary — and let both consumers below read numbers.
+#
+# Parsing inside each consumer is what required `date -d ... || continue`
+# inside a command substitution. That `continue` never skipped the iteration:
+# it ended the subshell, left the epoch empty, and let the loop carry on with
+# it, so every later numeric test wrote "integer expression expected" to stderr
+# while the event itself disappeared from conflict detection with nothing said.
+# Parsing once also means an unparseable event is counted once rather than once
+# per loop.
+#
+# An event is counted as unparseable when either end of its range will not
+# parse, and is excluded from conflict detection. An all-day event — a
+# date-only start, and an end date that is exclusive — has no start *time* and
+# no meaningful duration, so it gets its own counter and takes part in neither
+# consumer. Treating one as a timed event beginning at midnight is what made it
+# overlap every other event on the day.
+parsed_events=""
+unparseable_events=0
+all_day_events=0
+
+while IFS=$'\t' read -r summary start_str end_str start_zone end_zone all_day; do
+  if [ -z "$summary" ] && [ -z "$start_str" ]; then
+    continue
+  fi
+  if [ "$all_day" = "all-day" ]; then
+    all_day_events=$((all_day_events + 1))
+    continue
+  fi
+  start_epoch="$(parse_epoch "$start_str" "$start_zone")"
+  if [ -z "$start_epoch" ]; then
+    unparseable_events=$((unparseable_events + 1))
+    continue
+  fi
+  end_epoch="$(parse_epoch "$end_str" "$end_zone")"
+  if [ -z "$end_epoch" ]; then
+    unparseable_events=$((unparseable_events + 1))
+    end_epoch="$ABSENT"
+  fi
+  parsed_events="${parsed_events}${start_epoch}"$'\t'"${end_epoch}"$'\t'"${summary}"$'\n'
+done <<< "$events_tsv"
+
+echo "UNPARSEABLE_EVENTS: ${unparseable_events}"
+echo "ALL_DAY_EVENTS: ${all_day_events}"
 
 # Find next upcoming event
 next_summary=""
 next_start_time=""
 next_mins=""
-while IFS=$'\t' read -r summary start_str end_str; do
-  [ -z "$start_str" ] && continue
-  start_epoch=$(date -d "$start_str" +%s 2>/dev/null || continue)
+while IFS=$'\t' read -r start_epoch end_epoch summary; do
+  if [ -z "$start_epoch" ]; then
+    continue
+  fi
   if [ "$start_epoch" -gt "$now_epoch" ]; then
     mins=$(( (start_epoch - now_epoch) / 60 ))
     if [ -z "$next_mins" ] || [ "$mins" -lt "$next_mins" ]; then
       next_mins="$mins"
-      start_time=$(date -d "$start_str" +%H:%M)
       next_summary="$summary"
-      next_start_time="$start_time"
+      next_start_time=$(date -d "@${start_epoch}" +%H:%M)
     fi
   fi
-done < <(echo "$cal_json" | jq -r '.events[]? | [.summary // "Untitled", .start // "", .end // ""] | @tsv' 2>/dev/null)
+done <<< "$parsed_events"
 
 if [ -n "$next_mins" ]; then
   sanitize "$next_summary"
@@ -230,17 +554,23 @@ fi
 # Detect conflicts (overlapping events)
 conflict_count=0
 conflict_lines=""
-prev_summary="" prev_end_epoch=0
+# The empty string means "no previous event", which 0 cannot: 0 is a real end
+# time, and using it as the sentinel meant an event ending before 1970 was
+# never carried forward and so never overlapped anything.
+prev_summary="" prev_end_epoch=""
 
-while IFS=$'\t' read -r summary start_str end_str; do
-  [ -z "$start_str" ] && continue
-  start_epoch=$(date -d "$start_str" +%s 2>/dev/null || continue)
-  end_epoch=$(date -d "$end_str" +%s 2>/dev/null || continue)
+# The sort key is bounded to one field and numeric. Unbounded, it ran from the
+# start of field 2 to the end of the line, so the end time and the title took
+# part in ordering the events by their start.
+while IFS=$'\t' read -r start_epoch end_epoch summary; do
+  if [ -z "$start_epoch" ] || [ "$end_epoch" = "$ABSENT" ]; then
+    continue
+  fi
 
-  if [ "$prev_end_epoch" -gt 0 ] && [ "$start_epoch" -lt "$prev_end_epoch" ]; then
+  if [ -n "$prev_end_epoch" ] && [ "$start_epoch" -lt "$prev_end_epoch" ]; then
     conflict_count=$((conflict_count + 1))
     prev_end_time=$(date -d "@$prev_end_epoch" +%H:%M)
-    start_time=$(date -d "$start_str" +%H:%M)
+    start_time=$(date -d "@$start_epoch" +%H:%M)
     sanitize "$prev_summary"
     safe_prev_summary="$SANITIZED_VALUE"
     sanitize "$summary"
@@ -248,11 +578,11 @@ while IFS=$'\t' read -r summary start_str end_str; do
     conflict_lines="${conflict_lines}  - ${safe_prev_summary} (until ${prev_end_time}) overlaps ${safe_summary} (starts ${start_time})"$'\n'
   fi
 
-  if [ "$end_epoch" -gt "$prev_end_epoch" ]; then
+  if [ -z "$prev_end_epoch" ] || [ "$end_epoch" -gt "$prev_end_epoch" ]; then
     prev_end_epoch="$end_epoch"
     prev_summary="$summary"
   fi
-done < <(echo "$cal_json" | jq -r '.events[]? | [.summary // "Untitled", .start // "", .end // ""] | @tsv' 2>/dev/null | sort -t$'\t' -k2)
+done <<< "$(printf '%s' "$parsed_events" | sort -t$'\t' -k1,1n)"
 
 echo "CONFLICTS: ${conflict_count}"
 if [ -n "$conflict_lines" ]; then
@@ -261,6 +591,7 @@ if [ -n "$conflict_lines" ]; then
   echo "$UNTRUSTED_CALENDAR_CLOSE"
 fi
 [ "$conflict_count" -gt 0 ] && add_reason "${conflict_count} calendar conflict(s)"
+[ "$unparseable_events" -gt 0 ] && add_reason "${unparseable_events} unparseable calendar event(s)"
 
 echo ""
 
@@ -269,6 +600,7 @@ echo ""
 echo "--- SUMMARY ---"
 echo "ACTION_NEEDED: ${action_needed}"
 echo "SANITIZED: ${sanitized_count}"
+echo "DATA_SOURCE_ERRORS: ${data_source_errors}"
 if [ -n "$reasons" ]; then
   echo "REASONS: ${reasons}"
 fi

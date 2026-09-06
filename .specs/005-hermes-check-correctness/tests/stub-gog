@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+#
+# Stand-in for `gog`, placed ahead of the real binary on PATH so that
+# `hermes-check` can be run end to end with no credentials and no network.
+#
+# This is the harness 005 owns; 001's checks source it from here rather than
+# keeping a second copy, because two stubs would drift.
+#
+#   GOG_FIXTURE_GMAIL     file printed for `gog gmail ...`
+#   GOG_FIXTURE_CALENDAR  file printed for `gog calendar ...`
+#   GOG_FIXTURE           fallback for either
+#   GOG_FIXTURE_EXIT      exit status (default 0)
+#   GOG_ARGV_LOG          file to append this invocation's argv to
+#
+# A value that is not a readable file is printed verbatim, so a case can feed
+# malformed output without keeping a file for it.
+#
+# The argv log exists for one finding: `--account` was passed via an unquoted
+# string variable, and the obvious fix for the shellcheck warning it raised
+# would have sent `gog` an empty argument whenever GOG_GOOGLE_ACCOUNT was
+# unset. Nothing about the report's *content* reveals that, so the check has to
+# look at what the process was actually called with. Each argument is bracketed
+# so that an empty one is visible as `ARG []` rather than as nothing at all.
+
+set -uo pipefail
+
+if [ -n "${GOG_ARGV_LOG:-}" ]; then
+  {
+    printf 'INVOCATION %s %d\n' "${1:-none}" "$#"
+    for arg in "$@"; do
+      printf 'ARG [%s]\n' "$arg"
+    done
+  } >> "$GOG_ARGV_LOG"
+fi
+
+case "${1:-}" in
+  gmail) fixture="${GOG_FIXTURE_GMAIL:-${GOG_FIXTURE:-}}" ;;
+  calendar) fixture="${GOG_FIXTURE_CALENDAR:-${GOG_FIXTURE:-}}" ;;
+  *) fixture="${GOG_FIXTURE:-}" ;;
+esac
+
+if [ -n "$fixture" ]; then
+  if [ -f "$fixture" ]; then
+    cat "$fixture"
+  else
+    printf '%s\n' "$fixture"
+  fi
+fi
+
+exit "${GOG_FIXTURE_EXIT:-0}"

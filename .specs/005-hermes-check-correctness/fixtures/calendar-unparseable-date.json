@@ -1,0 +1,14 @@
+{
+  "events": [
+    {
+      "summary": "Broken",
+      "start": "not-a-date",
+      "end": "also-not-a-date"
+    },
+    {
+      "summary": "Real",
+      "start": "2099-01-01T09:00:00+00:00",
+      "end": "2099-01-01T10:00:00+00:00"
+    }
+  ]
+}

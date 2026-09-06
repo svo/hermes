@@ -1,0 +1,283 @@
+#!/usr/bin/env bash
+#
+# Calendar date handling: findings C4 and C11.
+#
+# C4: `start_epoch=$(date -d "$start_str" +%s || continue)`. The `continue` runs
+# inside the subshell the substitution created, so it never skipped the
+# iteration — it ended the subshell, left the epoch empty, and let the loop
+# carry on. Every later numeric test then wrote "integer expression expected" to
+# stderr, and the event vanished from conflict detection with nothing said about
+# it. shellcheck had been reporting this as SC2106 the whole time.
+#
+# C11: an all-day event has a date-only start and an exclusive end date. Read as
+# a timed event it begins at midnight and runs a full day, so it overlaps every
+# other event on that day and reports a conflict against each of them.
+#
+# Dates in the fixtures sit in 2099 so "next event" and "conflict" hold whenever
+# the suite runs.
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+# AC: an event with an unparseable date is counted in UNPARSEABLE_EVENTS and
+# excluded from conflicts — not silently dropped — and no "integer expression
+# expected" reaches stderr.
+should_count_an_unparseable_event_when_its_dates_cannot_be_read() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-empty.json calendar-unparseable-date.json
+  assert_universal_invariants
+  assert_equals "counted" "1" "$(field UNPARSEABLE_EVENTS)"
+  assert_equals "both events still counted in the total" "2" "$(field EVENTS_TODAY)"
+  assert_equals "no conflict invented" "0" "$(field CONFLICTS)"
+  case_end
+}
+
+should_not_write_to_stderr_when_an_event_date_cannot_be_read() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-empty.json calendar-unparseable-date.json
+  assert_equals "stderr is empty" "" "$RUN_ERR"
+  assert_universal_invariants
+  case_end
+}
+
+should_raise_action_needed_when_an_event_is_unparseable() {
+  case_start "${FUNCNAME[0]}"
+  # Silently dropping it is the failure being fixed; the operator has to be
+  # told the calendar was read incompletely.
+  run_check gmail-empty.json calendar-unparseable-date.json
+  assert_equals "alerts" "yes" "$(field ACTION_NEEDED)"
+  assert_contains "reason names it" "$RUN_OUT" "1 unparseable calendar event(s)"
+  assert_universal_invariants
+  case_end
+}
+
+should_still_use_the_readable_events_when_one_is_unparseable() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-empty.json calendar-unparseable-date.json
+  assert_contains "the readable event is still the next one" "$RUN_OUT" "NEXT_EVENT: Real at 09:00"
+  assert_universal_invariants
+  case_end
+}
+
+should_count_an_unparseable_event_when_only_its_end_cannot_be_read() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-empty.json calendar-missing-end.json
+  assert_universal_invariants
+  assert_equals "counted" "1" "$(field UNPARSEABLE_EVENTS)"
+  assert_equals "stderr is empty" "" "$RUN_ERR"
+  case_end
+}
+
+should_exclude_an_event_from_conflicts_when_it_has_no_readable_end() {
+  case_start "${FUNCNAME[0]}"
+  # It can be placed on the timeline, so it can still be the next event; it has
+  # no end, so there is nothing for it to overlap.
+  run_check gmail-empty.json calendar-missing-end.json
+  assert_equals "no conflict" "0" "$(field CONFLICTS)"
+  assert_contains "still the next event" "$RUN_OUT" "NEXT_EVENT: Open ended at 09:00"
+  assert_universal_invariants
+  case_end
+}
+
+should_report_no_unparseable_events_when_every_date_is_readable() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-empty.json calendar-conflict.json
+  assert_universal_invariants
+  assert_equals "none unparseable" "0" "$(field UNPARSEABLE_EVENTS)"
+  case_end
+}
+
+# AC: an all-day event does not produce a conflict against every other event
+# that day.
+should_not_conflict_with_every_event_when_the_day_has_an_all_day_event() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-empty.json calendar-all-day.json
+  assert_universal_invariants
+  assert_equals "three events counted" "3" "$(field EVENTS_TODAY)"
+  assert_equals "no conflicts" "0" "$(field CONFLICTS)"
+  assert_equals "no conflict lines" "0" \
+    "$(count_matching_lines "$RUN_OUT" '^  - .* overlaps ')"
+  case_end
+}
+
+should_report_an_all_day_event_separately_when_the_day_has_one() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-empty.json calendar-all-day.json
+  assert_equals "counted on its own line" "1" "$(field ALL_DAY_EVENTS)"
+  assert_equals "not counted as unparseable" "0" "$(field UNPARSEABLE_EVENTS)"
+  assert_universal_invariants
+  case_end
+}
+
+should_not_alert_when_the_only_finding_is_an_all_day_event() {
+  case_start "${FUNCNAME[0]}"
+  # An all-day event is ordinary. It is reported, not alerted on — unlike an
+  # unparseable one, which means the calendar was read incompletely.
+  run_check gmail-empty.json calendar-all-day-only.json
+  assert_universal_invariants
+  assert_equals "no alert" "no" "$(field ACTION_NEEDED)"
+  assert_equals "counted" "1" "$(field ALL_DAY_EVENTS)"
+  case_end
+}
+
+should_report_no_next_event_when_the_only_event_is_all_day() {
+  case_start "${FUNCNAME[0]}"
+  # It has no start time, so "in N minutes" would be an answer to a question
+  # nobody asked.
+  run_check gmail-empty.json calendar-all-day-only.json
+  assert_equals "one NEXT_EVENT line" "1" "$(count_matching_lines "$RUN_OUT" '^NEXT_EVENT: ')"
+  assert_equals "and it is none" "none" "$(field NEXT_EVENT)"
+  assert_universal_invariants
+  case_end
+}
+
+should_pick_a_timed_event_as_next_when_an_all_day_event_shares_the_day() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-empty.json calendar-all-day.json
+  assert_contains "the timed event wins" "$RUN_OUT" "NEXT_EVENT: Standup at 09:00"
+  assert_universal_invariants
+  case_end
+}
+
+# The conflict loop carries the previous event across iterations, so the order
+# it sees them in decides the answer. Ordering has to come from the start time
+# alone.
+should_order_events_by_start_time_when_they_arrive_out_of_order() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-empty.json calendar-out-of-order.json
+  assert_universal_invariants
+  assert_equals "four events" "4" "$(field EVENTS_TODAY)"
+  # Sorted, the 09:00-13:00 event overlaps the 10:00 and the 12:00 ones and
+  # nothing else. Unsorted, the 14:00 event leads and swallows all three.
+  assert_equals "two conflicts" "2" "$(field CONFLICTS)"
+  assert_equals "two conflict lines" "2" \
+    "$(count_matching_lines "$RUN_OUT" '^  - .* overlaps ')"
+  assert_contains "the long event is the one overlapped" "$RUN_OUT" \
+    "Overlaps twice (until 13:00) overlaps Morning (starts 10:00)"
+  assert_contains "and for the second one too" "$RUN_OUT" \
+    "Overlaps twice (until 13:00) overlaps Midday (starts 12:00)"
+  case_end
+}
+
+should_pick_the_earliest_future_event_as_next_when_events_arrive_out_of_order() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-empty.json calendar-out-of-order.json
+  assert_contains "earliest start wins" "$RUN_OUT" "NEXT_EVENT: Overlaps twice at 09:00"
+  assert_universal_invariants
+  case_end
+}
+
+# Regression guards for the restructure: the ordinary paths must keep working.
+should_order_events_numerically_when_their_epochs_differ_in_width() {
+  case_start "${FUNCNAME[0]}"
+  # Either side of the 10**9 epoch boundary, so the two start times are nine and
+  # ten digits long. Sorted as text the nine-digit one comes last, which
+  # reverses the pair — and names the wrong event as the one being overlapped.
+  # This is the only fixture where a numeric sort key is distinguishable from a
+  # lexical one.
+  run_check gmail-empty.json calendar-epoch-width.json
+  assert_universal_invariants
+  assert_equals "one conflict" "1" "$(field CONFLICTS)"
+  assert_contains "the earlier, longer event is the one overlapped" "$RUN_OUT" \
+    "Long meeting (until 03:00) overlaps Short meeting (starts 02:00)"
+  case_end
+}
+
+should_count_an_unparseable_event_when_it_has_no_start_at_all() {
+  case_start "${FUNCNAME[0]}"
+  # The record for it has an empty field before a full one. `read` with IFS set
+  # to tab collapses a run of tabs, so an unguarded format would hand the end
+  # over as the start and place the event two hours early rather than report it.
+  run_check gmail-empty.json calendar-missing-start.json
+  assert_universal_invariants
+  assert_equals "counted" "1" "$(field UNPARSEABLE_EVENTS)"
+  assert_equals "stderr is empty" "" "$RUN_ERR"
+  assert_contains "the readable event is the next one" "$RUN_OUT" "NEXT_EVENT: Real at 14:00"
+  assert_equals "the end was not adopted as a start" "0" \
+    "$(count_matching_lines "$RUN_OUT" '^NEXT_EVENT: No start')"
+  case_end
+}
+
+should_report_one_conflict_when_two_events_overlap() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-empty.json calendar-conflict.json
+  assert_universal_invariants
+  assert_equals "one conflict" "1" "$(field CONFLICTS)"
+  assert_contains "named both ways round" "$RUN_OUT" \
+    "Design review (until 10:00) overlaps Budget sync (starts 09:30)"
+  assert_contains "reason reported" "$RUN_OUT" "1 calendar conflict(s)"
+  case_end
+}
+
+should_report_no_conflict_when_events_do_not_overlap() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-empty.json calendar-clean.json
+  assert_universal_invariants
+  assert_equals "no conflicts" "0" "$(field CONFLICTS)"
+  assert_contains "next event named" "$RUN_OUT" "NEXT_EVENT: Standup at 09:00"
+  case_end
+}
+
+should_count_an_unparseable_event_when_an_element_is_not_an_object() {
+  case_start "${FUNCNAME[0]}"
+  # These pass fetch_json — the key holds an array — and EVENTS_TODAY counts
+  # them, so filtering them out of the parse left the counters unable to
+  # reconcile against it with nothing said.
+  run_check gmail-empty.json calendar-non-object-events.json
+  assert_universal_invariants
+  assert_equals "all four counted" "4" "$(field EVENTS_TODAY)"
+  assert_equals "the three unreadable ones accounted for" "3" "$(field UNPARSEABLE_EVENTS)"
+  assert_contains "the readable one still works" "$RUN_OUT" "NEXT_EVENT: Real at 10:00"
+  assert_equals "alerts" "yes" "$(field ACTION_NEEDED)"
+  case_end
+}
+
+should_detect_a_conflict_when_both_events_end_before_the_epoch() {
+  case_start "${FUNCNAME[0]}"
+  # Their end epochs are negative. Using 0 as the "no previous event" sentinel
+  # meant neither was ever carried forward, so the overlap went unreported.
+  run_check gmail-empty.json calendar-pre-epoch.json
+  assert_universal_invariants
+  assert_equals "one conflict" "1" "$(field CONFLICTS)"
+  assert_contains "named" "$RUN_OUT" "Old (until 01:00) overlaps Older overlap (starts 00:30)"
+  case_end
+}
+
+should_report_zero_for_every_calendar_counter_when_there_are_no_events() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-empty.json calendar-empty.json
+  assert_universal_invariants
+  assert_equals "no events" "0" "$(field EVENTS_TODAY)"
+  assert_equals "none unparseable" "0" "$(field UNPARSEABLE_EVENTS)"
+  assert_equals "none all-day" "0" "$(field ALL_DAY_EVENTS)"
+  assert_equals "no conflicts" "0" "$(field CONFLICTS)"
+  assert_equals "no next event" "none" "$(field NEXT_EVENT)"
+  case_end
+}
+
+should_count_an_unparseable_event_when_its_dates_cannot_be_read
+should_not_write_to_stderr_when_an_event_date_cannot_be_read
+should_raise_action_needed_when_an_event_is_unparseable
+should_still_use_the_readable_events_when_one_is_unparseable
+should_count_an_unparseable_event_when_only_its_end_cannot_be_read
+should_exclude_an_event_from_conflicts_when_it_has_no_readable_end
+should_report_no_unparseable_events_when_every_date_is_readable
+should_not_conflict_with_every_event_when_the_day_has_an_all_day_event
+should_report_an_all_day_event_separately_when_the_day_has_one
+should_not_alert_when_the_only_finding_is_an_all_day_event
+should_report_no_next_event_when_the_only_event_is_all_day
+should_pick_a_timed_event_as_next_when_an_all_day_event_shares_the_day
+should_order_events_by_start_time_when_they_arrive_out_of_order
+should_pick_the_earliest_future_event_as_next_when_events_arrive_out_of_order
+should_order_events_numerically_when_their_epochs_differ_in_width
+should_count_an_unparseable_event_when_it_has_no_start_at_all
+should_report_one_conflict_when_two_events_overlap
+should_report_no_conflict_when_events_do_not_overlap
+should_count_an_unparseable_event_when_an_element_is_not_an_object
+should_detect_a_conflict_when_both_events_end_before_the_epoch
+should_report_zero_for_every_calendar_counter_when_there_are_no_events
+
+report_totals "calendar-dates-test"

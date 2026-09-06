@@ -1,0 +1,14 @@
+{
+  "messages": [
+    {
+      "id": "msg-no-address-1",
+      "subject": "Hello",
+      "from": "Undisclosed recipients"
+    },
+    {
+      "id": "msg-no-address-2",
+      "subject": "World",
+      "from": "Nobody At All"
+    }
+  ]
+}

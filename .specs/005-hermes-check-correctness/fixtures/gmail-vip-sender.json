@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "id": "msg-vip-sender",
+      "subject": "Quarterly numbers",
+      "from": "Bob <bob@example.com>"
+    }
+  ]
+}

@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+#
+# Data acquisition: findings C3 and C3b.
+#
+# The old guard was `gog ... 2>/dev/null || echo '{"messages":[]}'`, and it
+# mishandled both failure modes it was meant to cover.
+#
+#   - Zero exit, output that is not the JSON we need: the guard fires on exit
+#     status only, so it never ran. The unguarded jq that followed then failed
+#     under `set -euo pipefail` and took the whole run down — exit 4, with the
+#     report abandoned after `--- EMAIL ---` and no SUMMARY at all. That is the
+#     one failure the operator cannot distinguish from a quiet inbox, because
+#     there is nothing to read.
+#   - Non-zero exit: the guard did fire, but `||` only runs `echo` *after* the
+#     failing command has already written whatever it wrote, and both land in
+#     the same substitution. jq was handed two JSON documents and answered for
+#     both, so a failed call reported counts, and `EVENTS_TODAY` printed twice.
+#
+# fetch_json() replaces rather than appends, and validates rather than trusting
+# the exit status, so neither is reachable. Silence is never a valid output.
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+assert_report_is_complete() {
+  assert_equals "exit status" "0" "$RUN_STATUS"
+  assert_contains "header" "$RUN_OUT" "=== HERMES CHECK ==="
+  assert_contains "email section" "$RUN_OUT" "--- EMAIL ---"
+  assert_contains "calendar section" "$RUN_OUT" "--- CALENDAR ---"
+  assert_equals "exactly one SUMMARY section" "1" \
+    "$(count_exact_lines "$RUN_OUT" '--- SUMMARY ---')"
+}
+
+# AC: gog exits zero with non-JSON output — a complete report, including a
+# SUMMARY, and a named data-source error.
+should_emit_a_complete_report_when_gog_exits_zero_with_non_json() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-not-json.html calendar-empty.json
+  assert_report_is_complete
+  assert_universal_invariants
+  assert_equals "the failing source is named" "1" \
+    "$(count_exact_lines "$RUN_OUT" 'DATA_SOURCE_ERROR: gmail')"
+  assert_equals "and counted" "1" "$(field DATA_SOURCE_ERRORS)"
+  assert_contains "reason names it" "$RUN_OUT" "gmail data source unavailable"
+  case_end
+}
+
+should_raise_action_needed_when_a_data_source_fails() {
+  case_start "${FUNCNAME[0]}"
+  # Broken monitoring is itself actionable: a run that cannot see the inbox
+  # must not report the same "no" as a run that saw an empty one.
+  run_check gmail-not-json.html calendar-empty.json
+  assert_equals "alerts" "yes" "$(field ACTION_NEEDED)"
+  assert_universal_invariants
+  case_end
+}
+
+# AC: gog exits non-zero — the same holds.
+should_emit_a_complete_report_when_gog_exits_non_zero() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-clean.json calendar-clean.json GOG_FIXTURE_EXIT=1
+  assert_report_is_complete
+  assert_universal_invariants
+  assert_equals "both sources named" "2" "$(field DATA_SOURCE_ERRORS)"
+  assert_equals "gmail named" "1" "$(count_exact_lines "$RUN_OUT" 'DATA_SOURCE_ERROR: gmail')"
+  assert_equals "calendar named" "1" "$(count_exact_lines "$RUN_OUT" 'DATA_SOURCE_ERROR: calendar')"
+  case_end
+}
+
+# The fallback replaces the failed response; it is not appended to it. Appending
+# gave jq a two-document stream, so a call that failed still reported counts.
+should_report_nothing_found_when_a_failing_call_still_printed_output() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-clean.json calendar-clean.json GOG_FIXTURE_EXIT=1
+  assert_equals "no messages from a failed call" "0" "$(field NEW_UNREAD)"
+  assert_equals "no lines listed" "0" "$(printf '%s\n' "$(listed_lines)" | grep -c .)"
+  assert_equals "no events from a failed call" "0" "$(field EVENTS_TODAY)"
+  assert_universal_invariants
+  case_end
+}
+
+# The same append bug printed the count twice, because jq answered once per
+# document and the result was interpolated into a single echo.
+should_emit_one_events_today_line_when_the_calendar_call_fails() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-empty.json calendar-clean.json GOG_FIXTURE_EXIT=1
+  assert_equals "one EVENTS_TODAY line" "1" \
+    "$(count_matching_lines "$RUN_OUT" '^EVENTS_TODAY: ')"
+  assert_equals "reporting zero" "0" "$(field EVENTS_TODAY)"
+  assert_universal_invariants
+  case_end
+}
+
+should_emit_a_complete_report_when_gog_produces_no_output_at_all() {
+  case_start "${FUNCNAME[0]}"
+  run_check '' '' 
+  assert_report_is_complete
+  assert_universal_invariants
+  assert_equals "both sources reported" "2" "$(field DATA_SOURCE_ERRORS)"
+  case_end
+}
+
+should_emit_a_complete_report_when_gog_is_missing_entirely() {
+  case_start "${FUNCNAME[0]}"
+  # PATH without the stub dir: the command itself is not found, which is a
+  # different exit path from a command that ran and failed.
+  run_check gmail-clean.json calendar-clean.json PATH=/usr/bin:/bin
+  assert_report_is_complete
+  assert_equals "both sources reported" "2" "$(field DATA_SOURCE_ERRORS)"
+  assert_equals "alerts" "yes" "$(field ACTION_NEEDED)"
+  assert_universal_invariants
+  case_end
+}
+
+# Valid JSON of the wrong shape. Reading `.messages[]?` from a bare array
+# yields nothing, so without a shape check this reads as a quiet inbox — which
+# is exactly how a renamed upstream field would present (SPEC Open Question 2).
+should_report_an_error_when_the_response_is_valid_json_of_the_wrong_shape() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-bare-array.json calendar-empty.json
+  assert_report_is_complete
+  assert_universal_invariants
+  assert_equals "reported, not silently empty" "1" "$(field DATA_SOURCE_ERRORS)"
+  assert_equals "gmail named" "1" "$(count_exact_lines "$RUN_OUT" 'DATA_SOURCE_ERROR: gmail')"
+  case_end
+}
+
+# The other side of that rule: an upstream that omits the key for an empty
+# result is a quiet inbox, not a broken one. Reporting it would make every
+# empty inbox raise an alert, which is the noise the spec's risk section warns
+# about.
+should_report_no_error_when_the_response_omits_the_key_for_an_empty_result() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-absent-key.json calendar-empty.json
+  assert_report_is_complete
+  assert_universal_invariants
+  assert_equals "no error" "0" "$(field DATA_SOURCE_ERRORS)"
+  assert_equals "nothing new" "0" "$(field NEW_UNREAD)"
+  assert_equals "no alert" "no" "$(field ACTION_NEEDED)"
+  case_end
+}
+
+should_keep_the_calendar_working_when_only_the_gmail_call_fails() {
+  case_start "${FUNCNAME[0]}"
+  # One broken source must not take the other down with it.
+  run_check gmail-not-json.html calendar-conflict.json
+  assert_report_is_complete
+  assert_universal_invariants
+  assert_equals "gmail reported" "1" "$(field DATA_SOURCE_ERRORS)"
+  assert_equals "calendar still read" "2" "$(field EVENTS_TODAY)"
+  assert_equals "and still analysed" "1" "$(field CONFLICTS)"
+  case_end
+}
+
+should_report_no_error_when_both_calls_succeed() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-clean.json calendar-clean.json
+  assert_universal_invariants
+  assert_equals "no errors" "0" "$(field DATA_SOURCE_ERRORS)"
+  assert_equals "no error lines" "0" \
+    "$(count_matching_lines "$RUN_OUT" '^DATA_SOURCE_ERROR: ')"
+  case_end
+}
+
+should_emit_a_complete_report_when_gog_exits_zero_with_non_json
+should_raise_action_needed_when_a_data_source_fails
+should_emit_a_complete_report_when_gog_exits_non_zero
+should_report_nothing_found_when_a_failing_call_still_printed_output
+should_emit_one_events_today_line_when_the_calendar_call_fails
+should_emit_a_complete_report_when_gog_produces_no_output_at_all
+should_emit_a_complete_report_when_gog_is_missing_entirely
+should_report_an_error_when_the_response_is_valid_json_of_the_wrong_shape
+should_report_no_error_when_the_response_omits_the_key_for_an_empty_result
+should_keep_the_calendar_working_when_only_the_gmail_call_fails
+should_report_no_error_when_both_calls_succeed
+
+report_totals "data-source-test"

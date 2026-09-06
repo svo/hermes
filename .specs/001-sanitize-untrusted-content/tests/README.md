@@ -14,26 +14,25 @@ a stub `gog` on `PATH` serves fixture JSON instead.
 | `sanitize-unit-test` | `sanitize_field()` on its own, lifted out of the script. |
 | `sanitize-injection-test` | `hermes-check` end to end against attacker-shaped fixtures. |
 | `fence-drift-test` | The fence markers in `hermes-check` and in the heartbeat prompt are the same strings. |
-| `stub-gog` | Fake `gog`: prints a fixture, exits with a chosen status. |
-| `stub-fasttext` | Fake urgency classifier, so bucket assignment is identical everywhere. |
+
+The stub `gog` and stub `fasttext` come from
+[005's harness](../../005-hermes-check-correctness/tests/), which owns them.
 
 Fixtures live in [`../../005-hermes-check-correctness/fixtures/`](../../005-hermes-check-correctness/fixtures/README.md)
 so that 005 and 006 reuse them rather than duplicating.
 
-## Why the stubs are here
+## Where the stubs went
 
-005's `PLAN.md` owns the real harness (`bin/hermes-check-test`), and 001's plan assumes it.
-It does not exist yet, and without it none of 001's acceptance criteria is verifiable. These
-are the smallest stubs that close that gap, and they follow the environment contract 005
-describes (`GOG_FIXTURE`, `GOG_FIXTURE_EXIT`), widened so one run can serve both the gmail
-and the calendar call.
+001 carried its own `stub-gog` and `stub-fasttext` because 005's harness did not exist yet
+and without them none of these acceptance criteria was verifiable. 005 has landed, so they
+are gone and `harness.sh` copies 005's instead — which is what this file previously said to
+do, and the alternative was two harnesses drifting apart.
 
-**When 005 lands, point these cases at `bin/hermes-check-test` and delete the stubs.** Two
-harnesses would drift.
+Run everything that verifies `hermes-check`, these cases included, with:
 
-`stub-fasttext` is not part of that contract. It exists because `/opt/hermes/urgency.bin` is
-present on a developer machine and absent in CI, so without it the same fixture lands in a
-different bucket in each place.
+```bash
+bin/hermes-check-test
+```
 
 ## Red before green
 
