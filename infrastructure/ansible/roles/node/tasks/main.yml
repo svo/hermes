@@ -22,8 +22,22 @@
   become: true
 
 - name: Add NodeSource GPG key
-  ansible.builtin.shell:
-    cmd: cat /tmp/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+  # This was `cat <key> | gpg --dearmor -o <out>` under ansible.builtin.shell.
+  # ansible-lint never flagged it: risky-shell-pipe only inspects the free-form
+  # `shell: <string>` form, not the `shell: {cmd: ...}` mapping used here, so
+  # the rule that exists for exactly this defect could not see it.
+  #
+  # A pipeline reports only its last command's status, so cat's was discarded
+  # outright -- `( exit 42 ) | gpg ...` reports 0. The task did still fail on a
+  # missing or truncated key, but only because gpg rejects such input itself:
+  # the safety came from gpg's strictness, not from anything written here.
+  #
+  # gpg takes its input file as an argument, so the pipe is unnecessary rather
+  # than merely unguarded. Deleting it beats adding `set -o pipefail`, because
+  # then there is no pipeline whose exit status anyone has to reason about.
+  # With no shell metacharacters left, this is a plain command, not a shell.
+  ansible.builtin.command:
+    cmd: gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg /tmp/nodesource-repo.gpg.key
     creates: /etc/apt/keyrings/nodesource.gpg
   become: true
 

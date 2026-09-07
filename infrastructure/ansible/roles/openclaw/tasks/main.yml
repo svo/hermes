@@ -11,12 +11,48 @@
     return_content: true
   register: gog_release
 
+# The download URL interpolates both the release tag and the architecture, and
+# inline it ran to 283 characters -- well over the 160-character limit. Lifting
+# the pieces out follows this repository's own precedent: roles/claude-code
+# does the same with claude_code_gh_deb_arch, for the same reason.
+#
+# The stable half of the URL is a fact too, purely so the `src:` below fits the
+# line limit without being folded; a folded scalar would join its lines with a
+# space and quietly corrupt the URL.
+- name: Resolve the gog release asset for this architecture
+  ansible.builtin.set_fact:
+    openclaw_gog_base: https://github.com/steipete/gogcli/releases/download
+    openclaw_gog_version: "{{ gog_release.json.tag_name | regex_replace('^v', '') }}"
+    openclaw_gog_arch: "{{ ansible_facts['architecture'] | regex_replace('^aarch64$', 'arm64') | regex_replace('^x86_64$', 'amd64') }}"
+
 - name: Install gog (Google Suite CLI)
-  ansible.builtin.shell:
-    cmd: >
-      curl -L https://github.com/steipete/gogcli/releases/download/{{ gog_release.json.tag_name }}/gogcli_{{ gog_release.json.tag_name | regex_replace('^v', '') }}_linux_{{ ansible_facts["architecture"] | regex_replace('aarch64', 'arm64') | regex_replace('x86_64', 'amd64') }}.tar.gz
-      | tar -xz -C /usr/local/bin gog && chmod +x /usr/local/bin/gog
+  # This was `curl -L <url> | tar -xz -C /usr/local/bin gog`, which had one
+  # problem that is already live and one that is latent.
+  #
+  # Live: the release tarball's members are `./` and `./gog`, and GNU tar does
+  # not match a bare `gog` against `./gog`. Run against gogcli v0.39.1 the old
+  # command fails outright -- "tar: gog: Not found in archive", exit 2, nothing
+  # installed -- so the service image build breaks here. That is also why
+  # `include` below says `./gog` and not `gog`: unarchive appends these entries
+  # to its tar command line verbatim, so the bare name reproduces the bug.
+  #
+  # Latent: the pipeline discarded curl's exit status, and `curl -L` without
+  # `-f` exits 0 even on an HTTP 404, writing the error page to stdout. Nothing
+  # in the task noticed a bad download; only tar's refusal to parse non-gzip
+  # data did, so its correctness rested on a coincidence.
+  #
+  # unarchive deletes the pipe rather than guarding it with pipefail: it
+  # fetches and extracts in one step and fails on a bad download by
+  # construction. Fetching a remote archive this way is already the pattern
+  # here -- see roles/fasttext.
+  ansible.builtin.unarchive:
+    src: "{{ openclaw_gog_base }}/{{ gog_release.json.tag_name }}/gogcli_{{ openclaw_gog_version }}_linux_{{ openclaw_gog_arch }}.tar.gz"
+    dest: /usr/local/bin
+    remote_src: true
+    include:
+      - './gog'
     creates: /usr/local/bin/gog
+    mode: '0755'
   become: true
 
 - name: Install jq and zip for hermes-check and document workflows

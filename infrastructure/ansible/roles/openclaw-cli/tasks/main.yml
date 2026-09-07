@@ -1,0 +1,18 @@
+# The OpenClaw CLI, on the builder image, for its schema validator alone.
+#
+# `bin/test` generates a configuration by running the real entrypoint against a
+# stub and then checks it with `openclaw config validate`. Without the CLI that
+# check can only skip, and a skip in CI is how a config the gateway refuses to
+# load reaches an image build unnoticed — which is exactly what happened to
+# `tools.loopDetection`.
+#
+# This is deliberately not the `openclaw` role. That role provisions the
+# *service*: gog, jq, zip, hermes-check and the entrypoint itself. The builder
+# needs none of it, and pulling it in would put the thing under test into the
+# thing testing it. Only the validator is wanted here.
+- name: Install the OpenClaw CLI for config schema validation
+  community.general.npm:
+    name: openclaw
+    state: latest
+    global: true
+  become: true

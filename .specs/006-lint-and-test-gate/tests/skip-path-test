@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+#
+# PLAN.md § Configuration Contract:
+#
+#   | absent bin/hermes-check-test | that check skipped with a visible notice,
+#   |                              | not silently                             |
+#
+# and § Testing Strategy — Skip-path check: "with bin/hermes-check-test absent,
+# the notice appears and the overall result is still meaningful."
+#
+# A skip is the most dangerous thing a gate can print, because it is the only
+# outcome that looks like success while checking nothing. Three of this gate's
+# seven checks can skip on a normal developer machine — the container smoke
+# test with no docker, the config validator with no `openclaw`, the
+# hermes-check harness if 005 were ever reverted — so "meaningful" has to mean
+# three separate things at once:
+#
+#   the skip is stated, with a reason;
+#   it is not reported as a pass; and
+#   it does not stop the checks that can still run from failing the build.
+#
+# The third is the one worth a case of its own. A gate that quietly turned
+# green because half of it did not run is the failure mode 006 exists to close,
+# one level up.
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+require_bin_test
+
+# make_sandbox removes bin/hermes-check-test by default, which is exactly the
+# condition PLAN's table names. Everything else in the tree is untouched, so a
+# failure here is about the skip and nothing else.
+SANDBOX="$(make_sandbox)"
+run_gate --dir "$SANDBOX"
+CLEAN_OUT="$GATE_OUT"
+CLEAN_STATUS="$GATE_STATUS"
+
+# The config-schema check's own transcript, gathered once and only when it is
+# the interesting case. Two cases below read it: one asks whether the check
+# reports the validator it could not run, the other whether the gate passes
+# that on.
+CONFIG_SCHEMA_CHECK="${SANDBOX}/.specs/006-lint-and-test-gate/tests/config-schema-check"
+CONFIG_SCHEMA_DIRECT=""
+
+# The skip path has to be *forced*, not waited for. Reading `command -v
+# openclaw` and testing the notice only when it happens to be missing means the
+# assertion runs on a bare machine and silently evaporates on the builder
+# image — where openclaw is installed, and where a broken notice would matter
+# most. A case that tests nothing on the machine that matters is the same shape
+# of hole as the gate this spec is fixing.
+#
+# OPENCLAW_BIN is the seam config-schema-check offers for it. Pointing it at a
+# path that does not exist is the whole trick, and it works identically
+# everywhere. Deleting openclaw's directory from PATH was the first attempt and
+# was wrong: npm's global prefix in the builder image is /usr, so that removed
+# node, timeout and git as well and the check skipped for the wrong reason.
+readonly ABSENT_OPENCLAW='/nonexistent/openclaw'
+
+if [ -f "$CONFIG_SCHEMA_CHECK" ]; then
+  CONFIG_SCHEMA_DIRECT="$(
+    OPENCLAW_BIN="$ABSENT_OPENCLAW" bash "$CONFIG_SCHEMA_CHECK" 2>&1 || true
+  )"
+fi
+
+should_skip_hermes_check_when_the_harness_is_absent() {
+  case_start "${FUNCNAME[0]}"
+  GATE_OUT="$CLEAN_OUT"
+  assert_equals "hermes-check check result" "SKIP" "$(gate_result hermes-check)"
+  assert_contains "the notice names the missing file" "$CLEAN_OUT" \
+    "bin/hermes-check-test"
+  case_end
+}
+
+should_not_report_a_pass_when_a_check_is_skipped() {
+  case_start "${FUNCNAME[0]}"
+  # The distinction the whole file rests on. `PASS hermes-check` for a harness
+  # that was never run would be a lie the summary could not undo.
+  assert_equals "no PASS line for the skipped check" "0" \
+    "$(count_matching_lines "$CLEAN_OUT" '^PASS hermes-check')"
+  case_end
+}
+
+should_state_a_reason_when_a_check_is_skipped() {
+  case_start "${FUNCNAME[0]}"
+  # `SKIP <name> (<reason>)` — the reason is the difference between a check an
+  # operator can restore and one they will assume is fine. Asserted over every
+  # skip in the run, not just the interesting one, so a reasonless skip cannot
+  # be added later without a case noticing.
+  local skips reasoned
+  skips="$(count_matching_lines "$CLEAN_OUT" '^SKIP ')"
+  reasoned="$(count_matching_lines "$CLEAN_OUT" '^SKIP [a-z-]* (.*)$')"
+  if [ "$skips" -eq 0 ]; then
+    fail "no check skipped; this sandbox was built without the hermes-check harness"
+  fi
+  assert_equals "every skip states a reason" "$skips" "$reasoned"
+  case_end
+}
+
+should_repeat_every_skip_in_the_summary_when_the_run_ends() {
+  case_start "${FUNCNAME[0]}"
+  # One line near the top of a two-hundred-line transcript is not a notice.
+  # SPEC § Operability asks the summary to be the place a reader can trust, so
+  # the skips have to survive to the bottom alongside the failures.
+  GATE_OUT="$CLEAN_OUT"
+  local summary
+  summary="$(gate_summary_tail)"
+  assert_contains "the summary repeats the hermes-check skip" "$summary" \
+    "hermes-check"
+  case_end
+}
+
+should_exit_zero_when_the_only_absent_check_is_skipped() {
+  case_start "${FUNCNAME[0]}"
+  # The other half of "still meaningful": a skip is not a failure either. A
+  # contributor without docker must be able to reach a green run, or they will
+  # stop running the gate at all and the pre-push habit dies.
+  assert_equals "exit status" "0" "$CLEAN_STATUS"
+  case_end
+}
+
+should_still_fail_when_a_skipped_check_hides_a_real_failure() {
+  case_start "${FUNCNAME[0]}"
+  # The case that makes the three above worth having. Skips and failures in
+  # the same run: the skip must not suppress the failure, and the failure must
+  # not suppress the skip.
+  local sandbox
+  sandbox="$(make_sandbox)"
+  plant_shellcheck_violation "${sandbox}/bin/create-image"
+  run_gate --dir "$sandbox"
+
+  assert_equals "hermes-check is still skipped" "SKIP" "$(gate_result hermes-check)"
+  assert_equals "shellcheck still fails" "FAIL" "$(gate_result shellcheck)"
+  if [ "$GATE_STATUS" -eq 0 ]; then
+    fail "the gate exited zero with a live shellcheck finding and a skipped check"
+  fi
+  case_end
+}
+
+should_skip_the_container_smoke_test_when_skip_slow_is_set() {
+  case_start "${FUNCNAME[0]}"
+  # SPEC § Configuration Contract: `SKIP_SLOW=1` skips the container smoke
+  # test for fast local iteration. run_gate sets it on every run here, because
+  # a case cannot assume a docker daemon — so this is also the assertion that
+  # every other case in this directory is running the gate it thinks it is.
+  GATE_OUT="$CLEAN_OUT"
+  assert_equals "entrypoint-contract check result" "SKIP" \
+    "$(gate_result entrypoint-contract)"
+  assert_contains "the notice names the variable" "$CLEAN_OUT" "SKIP_SLOW"
+  case_end
+}
+
+should_skip_the_gate_tests_when_hermes_gate_test_is_set() {
+  case_start "${FUNCNAME[0]}"
+  # The recursion guard, asserted rather than assumed. harness.sh exports
+  # HERMES_GATE_TEST=1 for every run these cases start; if the gate ever
+  # stopped honouring it, this suite would invoke bin/test, which would invoke
+  # this suite, and the symptom would be a CI job that never ends. A hung job
+  # is far harder to diagnose than a red one, so the guard gets a case.
+  GATE_OUT="$CLEAN_OUT"
+  assert_equals "gate-tests check result" "SKIP" "$(gate_result gate-tests)"
+  assert_contains "the notice names the variable" "$CLEAN_OUT" "HERMES_GATE_TEST"
+  case_end
+}
+
+should_report_the_absent_validator_when_the_config_schema_check_runs() {
+  case_start "${FUNCNAME[0]}"
+  # The config-schema check runs the entrypoint against stubs and then asks the
+  # real `openclaw` whether the configuration it wrote is valid. Outside the
+  # container there is no `openclaw`, so that last layer cannot run — and the
+  # check has to say so. The alternative is a check reporting a pass for a
+  # schema it never consulted, which is finding D2 with extra steps.
+  if [ ! -f "$CONFIG_SCHEMA_CHECK" ]; then
+    fail "the config-schema check script is missing from the tree"
+    case_end
+    return
+  fi
+  assert_contains "the check names the tool it could not run" \
+    "$CONFIG_SCHEMA_DIRECT" "openclaw"
+  assert_contains "and says so as a skip" "$CONFIG_SCHEMA_DIRECT" "SKIP"
+  case_end
+}
+
+should_surface_the_absent_validator_when_the_gate_runs() {
+  case_start "${FUNCNAME[0]}"
+  # The case above proves the check says it. This one asks whether anybody
+  # hears it, and the two are separate because they fail for different
+  # reasons and need different fixes.
+  #
+  # `openclaw` is the word to look for. In a run where every check passes the
+  # gate prints nothing but its own lines, so the word cannot arrive from
+  # anywhere else — no path, no rule name and no tool banner contains it.
+  if [ ! -f "$CONFIG_SCHEMA_CHECK" ]; then
+    fail "the config-schema check script is missing from the tree"
+    case_end
+    return
+  fi
+
+  # A gate run of its own, with the validator taken off PATH the same way the
+  # case above takes it off, so this asks about the machine without one even
+  # when the machine running the suite has one.
+  run_gate --dir "$SANDBOX" --env "OPENCLAW_BIN=${ABSENT_OPENCLAW}"
+  local out="$GATE_OUT"
+
+  # Either shape of notice is accepted: the gate skipping the whole check, or
+  # the gate relaying what the check said about the layer that did not run.
+  if [ "$(gate_result config-schema)" = "SKIP" ]; then
+    case_end
+    return
+  fi
+  if printf '%s\n' "$out" | grep -qi 'openclaw'; then
+    case_end
+    return
+  fi
+
+  fail "the config-schema check reports the skipped validator and the gate does not relay it"
+  printf '       the check itself says:\n' >&2
+  printf '%s\n' "$CONFIG_SCHEMA_DIRECT" | grep -i 'openclaw' | sed 's/^/         /' >&2
+  printf '       %s\n' \
+    "bin/test prints a check's output only when that check fails, so a" \
+    "validator layer that never ran reads as a clean PASS. That is the" \
+    "silent-skip failure this spec exists to close, one level in: the gate" \
+    "reports green for something it did not check." >&2
+  case_end
+}
+
+should_skip_hermes_check_when_the_harness_is_absent
+should_not_report_a_pass_when_a_check_is_skipped
+should_state_a_reason_when_a_check_is_skipped
+should_repeat_every_skip_in_the_summary_when_the_run_ends
+should_exit_zero_when_the_only_absent_check_is_skipped
+should_still_fail_when_a_skipped_check_hides_a_real_failure
+should_skip_the_container_smoke_test_when_skip_slow_is_set
+should_skip_the_gate_tests_when_hermes_gate_test_is_set
+should_report_the_absent_validator_when_the_config_schema_check_runs
+should_surface_the_absent_validator_when_the_gate_runs
+
+report_totals "skip-path-test"

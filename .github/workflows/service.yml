@@ -2,20 +2,87 @@ name: Build Service
 
 on:
   workflow_dispatch:
+  # Deliberately unfiltered, unlike `push:` below. `paths:` on a
+  # pull_request trigger is a trap for a required status check: GitHub reports
+  # a check that never ran as pending for ever, so a pull request touching
+  # only, say, README.md could never be merged. The gate is one runner and one
+  # script; running it on every pull request costs less than one branch that
+  # cannot merge. Unfiltered by branch too, so a pull request into a feature
+  # branch is gated as well.
+  pull_request:
   push:
     branches:
       - main
+    # Widened for the gate: every input `./bin/test` reads has to be able to
+    # trigger it. Before this, editing bin/test or a test suite ran no gate at
+    # all. `bin/**` is the gate itself and the hermes-check harness; `"*.sh"`
+    # is the three root scripts it lints, quoted because a bare `*` opens a
+    # YAML alias; `"**/*.sh"` catches a shell script committed anywhere else;
+    # `.specs/**` holds the test suites; and `infrastructure/ansible/roles/**`
+    # already covers hermes-check and entrypoint.sh.
+    #
+    # The two sibling playbooks are left out on purpose. ansible-lint walks
+    # the whole tree, so an edit to one of them is caught by that image's own
+    # identical gate; listing them here as well would make every playbook
+    # edit rebuild and republish all three images.
+    #
+    # Two costs of the widening, both accepted deliberately rather than
+    # overlooked, because `paths:` filters a whole workflow and this one now
+    # holds both the gate and the publish:
+    #
+    #   * A commit touching only `.specs/**` — specification prose that goes
+    #     into no image — rebuilds and republishes all three images. Per-job
+    #     filtering would need a change-detection step and an `if:` on
+    #     `matrix`, which is more machinery and another way for the publish to
+    #     be skipped by accident. An unnecessary rebuild is the cheaper
+    #     mistake than an ungated change.
+    #   * Discovery finds scripts by shebang across the whole tree, so an
+    #     *extensionless* script outside these prefixes would be linted by the
+    #     gate and trigger no workflow on push. `pull_request:` above is
+    #     unfiltered, so it is still gated before merge; only a direct push to
+    #     main could slip past, which branch protection is the answer to.
     paths:
       - .github/workflows/service.yml
+      - .github/workflows/lint.yml
       - infrastructure/packer/service.pkr.hcl
       - infrastructure/ansible/playbook-service.yml
       - infrastructure/ansible/roles/**
-      - bin/create-image
+      - bin/**
+      - "*.sh"
+      - "**/*.sh"
+      - .specs/**
   schedule:
     - cron: 40 9 * * 4
 
 jobs:
+  # Named for what it gates, so a red entry in the pull request list explains
+  # itself without being opened (PLAN § Operability Plan).
+  #
+  # No `with:` and no `secrets:` — and deliberately not `secrets: inherit`. A
+  # workflow_call callee receives only what its caller passes, so passing
+  # nothing is what keeps DOCKER_USERNAME and DOCKER_TOKEN out of a job a
+  # fork's pull request can trigger. `secrets: inherit` here would be the
+  # mistake, not the convenience.
+  lint:
+    name: Lint and test gate (blocks build and push)
+    uses: ./.github/workflows/lint.yml
+
   matrix:
+    needs: [lint]
+
+    # An allowlist of the triggers permitted to publish, not a
+    # `!= 'pull_request'` denylist: the steps below hold the Docker Hub
+    # credentials and push svanosselaer/hermes-service, and a denylist would
+    # silently extend that to any trigger added later — `pull_request_target`,
+    # say, which does run with secrets. A pull request runs the gate and stops.
+    #
+    # `latest` needs `matrix`, and GitHub skips the dependents of a skipped
+    # job, so `latest` stops here too and needs no condition of its own.
+    if: >-
+      github.event_name == 'push'
+      || github.event_name == 'workflow_dispatch'
+      || github.event_name == 'schedule'
+
     strategy:
       matrix:
         configuration:

@@ -303,11 +303,21 @@ node -e "
     }
   };
   config.tools = config.tools || {};
+  // enabled is the only key this object accepts. The three thresholds that
+  // used to sit here — warningThreshold, criticalThreshold and
+  // globalCircuitBreakerThreshold — are gone from the schema, which declares
+  // additionalProperties: false, so writing them made the whole config
+  // invalid. Phase 3 then refused to start the gateway, and because the
+  // openclaw role installs state: latest, that landed on the next image
+  // build rather than on any change made here.
+  //
+  // This is the finding 006 exists to catch, caught by 006: the gate runs this
+  // block against a stub and validates the result, so an upstream schema change
+  // now fails a pipeline instead of every running container. Detection is what
+  // was missing, not this constant — the thresholds were valid when they were
+  // written. Loop detection itself stays on, at upstream's defaults.
   config.tools.loopDetection = {
-    enabled: true,
-    warningThreshold: 5,
-    criticalThreshold: 10,
-    globalCircuitBreakerThreshold: 15
+    enabled: true
   };
   config.agents.defaults.compaction = { model: 'anthropic/claude-haiku-4-5' };
   config.agents.defaults.models = {

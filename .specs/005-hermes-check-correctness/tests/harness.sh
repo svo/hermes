@@ -28,6 +28,19 @@ cp "${TESTS_DIR}/stub-gog" "${BIN_DIR}/gog"
 cp "${TESTS_DIR}/stub-fasttext" "${BIN_DIR}/fasttext"
 chmod +x "${BIN_DIR}/gog" "${BIN_DIR}/fasttext"
 
+# A stand-in for the urgency model. Stubbing `fasttext` on PATH is not enough:
+# hermes-check gates classification on the model *file* existing, so on an
+# image that has no /opt/hermes/urgency.bin the classifier is skipped and every
+# message lands in the wrong bucket. That is the builder image, which is where
+# 006's gate runs these suites — three classification cases failed there while
+# passing on any developer machine, because the 800 MB model is provisioned
+# there and the suites silently depended on it.
+#
+# The contents never matter; the stub classifier ignores its argument. Only the
+# existence of the path is load-bearing, so an empty file is the honest stub.
+MODEL_FILE_STUB="${TMP_ROOT}/urgency.bin"
+: > "$MODEL_FILE_STUB"
+
 cleanup() { rm -rf "$TMP_ROOT"; }
 trap cleanup EXIT
 
@@ -161,6 +174,7 @@ run_check() {
     HOME="$home_dir" \
     PATH="${BIN_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     TZ=UTC \
+    HERMES_MODEL_FILE="$MODEL_FILE_STUB" \
     GOG_FIXTURE_GMAIL="$gmail" \
     GOG_FIXTURE_CALENDAR="$calendar" \
     ${argv_log:+GOG_ARGV_LOG="$argv_log"} \

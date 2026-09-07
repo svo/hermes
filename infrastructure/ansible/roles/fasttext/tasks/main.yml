@@ -41,10 +41,28 @@
   ansible.builtin.copy:
     src: train.txt
     dest: /tmp/urgency-train.txt
+    # Without an explicit mode the file lands with whatever the remote umask
+    # happens to be, so what the build produces depends on the machine it ran
+    # on. Pinning it is the point; 0644 rather than 0600 only because nothing
+    # in this file is secret and a world-readable temp file is the least
+    # surprising thing to leave in /tmp between the copy above and the cleanup
+    # below. The reader is root and would manage at any mode.
+    mode: '0644'
 
 - name: Train urgency classification model
   ansible.builtin.command:
     cmd: fasttext supervised -input /tmp/urgency-train.txt -output /opt/hermes/urgency -lr 1.0 -epoch 25 -wordNgrams 2
+  # Training rewrites /opt/hermes/urgency.bin and urgency.vec on every run, so
+  # reporting `changed` is simply the truth.
+  #
+  # The tempting alternative, `creates: /opt/hermes/urgency.bin`, buys
+  # idempotence by keying on the *output* when the thing that varies is the
+  # *input*: edit train.txt and the model would not be retrained, the task
+  # would report ok, and hermes-check would keep classifying urgency with a
+  # model that no longer matches its training data. That failure is silent and
+  # survives every subsequent run -- exactly the class this spec exists to
+  # catch. A stale-able guard is worse than a task that admits it did work.
+  changed_when: true
   become: true
 
 - name: Clean up training data

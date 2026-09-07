@@ -1,0 +1,16 @@
+# jq, on the builder image, for `bin/test`.
+#
+# `bin/hermes-check-test` refuses to run without it — it checks for jq up front
+# and exits 1 rather than letting the suites fail one confusing assertion at a
+# time. The builder image had no jq, so the gate failed its `hermes-check`
+# check on every CI run, which blocked `matrix` in all three workflows through
+# `needs: [lint]`. builder.yml could not even publish a fixed image, because
+# its own build waits on the gate.
+#
+# jq is installed twice more in this repository, by the roles that provision
+# the images that *run* hermes-check: `claude-code` for development and
+# `openclaw` for the service. This is the third, for the image that lints it.
+- name: Install jq for the hermes-check test harness
+  ansible.builtin.apt:
+    pkg: jq
+  become: true

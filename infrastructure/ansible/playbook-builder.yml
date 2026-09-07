@@ -11,6 +11,11 @@
     - packer
     - shellcheck
     - ansible-lint
+    # What `bin/test` needs beyond the linters: jq for the hermes-check
+    # harness, and the OpenClaw CLI for the config schema validator. Not the
+    # service's `openclaw` role — just the CLI.
+    - jq
+    - openclaw-cli
 
   post_tasks:
     - name: Set python3 as default python

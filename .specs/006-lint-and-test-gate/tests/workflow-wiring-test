@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+#
+# PLAN.md § Testing Strategy — Injected-violation check:
+#
+#   "add a deliberate shellcheck violation on a scratch branch, confirm CI
+#    fails and no image is pushed. This verifies the `needs:` wiring, not just
+#    the script."
+#
+# The script half is covered by every other file here. This one covers the
+# wiring, and it covers it by reading the workflows rather than by pushing a
+# scratch branch: a branch proves one commit on one day, while a case proves
+# it on every run, and the failure mode being guarded against — someone
+# deletes `needs: [lint]` while chasing a red build — is a diff, not an event.
+#
+# Four things have to be true together, and each is worth nothing alone:
+#
+#   the gate exists as a reusable workflow (SPEC Open Question 4: one copy,
+#     not three that drift);
+#   every build workflow calls it and every build job waits on it;
+#   the workflows run on pull requests, so the gate runs before merge rather
+#     than after; and
+#   the gate never receives a secret, because a `pull_request` trigger is
+#     reachable from a fork.
+#
+# That last one is PLAN § Risks: "pull_request triggers expose secrets.DOCKER_*
+# to fork PRs — the lint job needs no secrets, do not grant it any." Adding the
+# trigger without checking it is how a repository ends up handing its registry
+# credentials to anyone who can open a pull request.
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+WORKFLOWS="${REPO_ROOT}/.github/workflows"
+readonly CALLERS="builder development service"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  printf 'SKIP workflow-wiring-test: python3 is not installed\n' >&2
+  exit 0
+fi
+
+# The workflows are parsed as YAML rather than grepped, because every question
+# below is structural. `needs: [lint]` under the wrong job, a `secrets:` key
+# indented one level too far, a `pull_request` that is a string in a comment —
+# grep answers all three wrongly, and each wrong answer is a gate that is not
+# actually wired up.
+#
+# One python invocation emits a flat `key=value` report and the cases assert
+# on lines of it. Splitting it into a call per question would parse the same
+# four files a dozen times and, worse, let two cases disagree about what the
+# file says.
+REPORT="$(python3 - "$WORKFLOWS" <<'PY' 2>&1
+import os
+import re
+import sys
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover - reported, not raised
+    print("yaml_available=no")
+    sys.exit(0)
+
+print("yaml_available=yes")
+workflows = sys.argv[1]
+callers = ("builder", "development", "service")
+
+
+def emit(key, value):
+    print("%s=%s" % (key, value))
+
+
+def yes(condition):
+    return "yes" if condition else "no"
+
+
+def load(name):
+    path = os.path.join(workflows, name + ".yml")
+    if not os.path.exists(path):
+        return None, None
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    try:
+        return yaml.safe_load(text), text
+    except yaml.YAMLError:
+        return False, text
+
+
+def triggers(document):
+    # YAML 1.1 reads a bare `on` as the boolean True, so a workflow's trigger
+    # block arrives under the key True rather than "on". Every YAML parser in
+    # this position has the same wart; looking under both keys is the fix, and
+    # forgetting to is why "the pull_request trigger is missing" is such a
+    # common false alarm.
+    if not isinstance(document, dict):
+        return {}
+    block = document.get("on", document.get(True))
+    if block is None:
+        return {}
+    if isinstance(block, str):
+        return {block: None}
+    if isinstance(block, list):
+        return dict((item, None) for item in block)
+    return block
+
+
+def event_names(expression, operator):
+    # The quoted values compared against github.event_name with `operator`.
+    # `if: github.event_name == 'push' || github.event_name == 'schedule'` is
+    # an allowlist; `if: github.event_name != 'pull_request'` is a denylist.
+    # Both keep the publishing steps away from a fork's pull request, and the
+    # assertion has to accept either without pretending to evaluate GitHub's
+    # expression language.
+    pattern = r"github\.event_name\s*%s\s*'([^']+)'" % re.escape(operator)
+    return set(re.findall(pattern, expression or ""))
+
+
+lint, lint_text = load("lint")
+emit("lint_present", yes(lint is not None))
+emit("lint_parsed", yes(isinstance(lint, dict)))
+if isinstance(lint, dict):
+    emit("lint_workflow_call", yes("workflow_call" in triggers(lint)))
+    # The comments in lint.yml discuss secrets at length and say so on
+    # purpose. What matters is whether any *instruction* reaches for one, so
+    # the comment lines come out before the search.
+    body = "\n".join(
+        line for line in lint_text.splitlines() if not line.lstrip().startswith("#")
+    )
+    emit("lint_mentions_secrets", yes("secrets" in body))
+
+for name in callers:
+    document, _ = load(name)
+    emit("%s_present" % name, yes(document is not None))
+    emit("%s_parsed" % name, yes(isinstance(document, dict)))
+    if not isinstance(document, dict):
+        continue
+
+    on = triggers(document)
+    emit("%s_pull_request" % name, yes("pull_request" in on))
+
+    push = on.get("push") or {}
+    paths = push.get("paths") or [] if isinstance(push, dict) else []
+    emit("%s_paths_bin" % name, yes("bin/**" in paths))
+    emit("%s_paths_specs" % name, yes(".specs/**" in paths))
+    emit("%s_paths_lint_workflow" % name,
+         yes(".github/workflows/lint.yml" in paths))
+
+    jobs = document.get("jobs") or {}
+    lint_job = jobs.get("lint") or {}
+    emit("%s_lint_job" % name, yes(bool(lint_job)))
+    emit("%s_lint_uses" % name, lint_job.get("uses", ""))
+    # `secrets: inherit` parses as the string "inherit" and `secrets: {...}`
+    # as a mapping; both are the mistake, and both are the presence of the
+    # key. Absence is the only safe answer, so absence is what is reported.
+    emit("%s_lint_secrets" % name, yes("secrets" in lint_job))
+
+    matrix = jobs.get("matrix") or {}
+    needs = matrix.get("needs") or []
+    if isinstance(needs, str):
+        needs = [needs]
+    emit("%s_matrix_needs_lint" % name, yes("lint" in needs))
+
+    condition = matrix.get("if") or ""
+    allowed = event_names(condition, "==")
+    denied = event_names(condition, "!=")
+    if allowed:
+        blocked = "pull_request" not in allowed
+    elif denied:
+        blocked = "pull_request" in denied
+    else:
+        blocked = False
+    emit("%s_matrix_blocks_pull_request" % name, yes(blocked))
+PY
+)"
+
+# The value of a `key=value` line of the report, or the empty string when the
+# key was never emitted — which is itself an answer, and a distinct one from
+# `no`: a key is missing only when the file could not be parsed at all.
+field() {
+  printf '%s\n' "$REPORT" | sed -n "s/^$1=//p" | head -1
+}
+
+should_exist_and_parse_when_the_gate_is_wired() {
+  case_start "${FUNCNAME[0]}"
+  # Deliberately a failure and not a skip when a file is absent. These
+  # workflows are the difference between a gate that runs in CI and a script
+  # that only ever runs on the author's laptop; "not written yet" and "broken"
+  # deserve the same colour.
+  assert_equals "python yaml is available" "yes" "$(field yaml_available)"
+  assert_equals "lint.yml exists" "yes" "$(field lint_present)"
+  assert_equals "lint.yml parses" "yes" "$(field lint_parsed)"
+  local name
+  for name in $CALLERS; do
+    assert_equals "${name}.yml exists" "yes" "$(field "${name}_present")"
+    assert_equals "${name}.yml parses" "yes" "$(field "${name}_parsed")"
+  done
+  case_end
+}
+
+should_be_a_reusable_workflow_when_lint_yml_is_parsed() {
+  case_start "${FUNCNAME[0]}"
+  # SPEC Open Question 4, answered: one definition called three times rather
+  # than three copies of the same job. Three copies is the same class of
+  # problem as the duplicated briefing prompt 003 had to unpick.
+  assert_equals "lint.yml is callable" "yes" "$(field lint_workflow_call)"
+  case_end
+}
+
+should_gate_the_build_when_each_caller_is_parsed() {
+  case_start "${FUNCNAME[0]}"
+  local name
+  for name in $CALLERS; do
+    assert_equals "${name}.yml has a lint job" "yes" "$(field "${name}_lint_job")"
+    assert_equals "${name}.yml calls the reusable gate" \
+      "./.github/workflows/lint.yml" "$(field "${name}_lint_uses")"
+    # The line that does the gating. Without it the lint job runs beside the
+    # build instead of before it, and a red gate still publishes an image —
+    # which would satisfy every other case in this file and none of the spec.
+    assert_equals "${name}.yml makes matrix wait for it" "yes" \
+      "$(field "${name}_matrix_needs_lint")"
+  done
+  case_end
+}
+
+should_run_before_merge_when_a_pull_request_is_opened() {
+  case_start "${FUNCNAME[0]}"
+  # PLAN task 8. Without this the gate runs only after merge, which catches
+  # the same problems one commit too late — on main, where the fix is a
+  # revert rather than a push.
+  local name
+  for name in $CALLERS; do
+    assert_equals "${name}.yml triggers on pull_request" "yes" \
+      "$(field "${name}_pull_request")"
+  done
+  case_end
+}
+
+should_pass_no_secrets_to_the_lint_job_when_each_caller_is_parsed() {
+  case_start "${FUNCNAME[0]}"
+  # PLAN § Risks, the fork exposure. A `workflow_call` callee gets only what
+  # its caller passes, so the safety is in the absence of a key — which means
+  # nothing in the diff will ever draw attention to its loss. This case is the
+  # only thing that would.
+  local name
+  for name in $CALLERS; do
+    assert_equals "${name}.yml passes no secrets to lint" "no" \
+      "$(field "${name}_lint_secrets")"
+  done
+  case_end
+}
+
+should_reach_for_no_secret_when_lint_yml_is_read() {
+  case_start "${FUNCNAME[0]}"
+  # The other side of the same risk: a callee can also name a secret itself.
+  # Comments are stripped before the search, because lint.yml discusses this
+  # exposure at length and should keep doing so.
+  assert_equals "lint.yml names no secret outside its comments" "no" \
+    "$(field lint_mentions_secrets)"
+  case_end
+}
+
+should_not_publish_from_a_pull_request_when_each_caller_is_parsed() {
+  case_start "${FUNCNAME[0]}"
+  # Adding a `pull_request` trigger to a workflow whose build job holds
+  # DOCKER_USERNAME and DOCKER_TOKEN is the risk PLAN names, and the gate is
+  # only half the mitigation. The publishing job has to decline to run for
+  # that trigger as well, or the trigger this spec added becomes the way a
+  # fork gets a push.
+  local name
+  for name in $CALLERS; do
+    assert_equals "${name}.yml keeps the push job off pull requests" "yes" \
+      "$(field "${name}_matrix_blocks_pull_request")"
+  done
+  case_end
+}
+
+should_cover_the_gate_inputs_when_each_paths_filter_is_parsed() {
+  case_start "${FUNCNAME[0]}"
+  # A paths filter that does not list the gate's own inputs is a gate that
+  # does not run when the gate changes. `bin/**` is bin/test itself and the
+  # hermes-check harness; `.specs/**` is every test suite it invokes; and
+  # lint.yml is the workflow doing the invoking.
+  local name
+  for name in $CALLERS; do
+    assert_equals "${name}.yml watches bin/**" "yes" \
+      "$(field "${name}_paths_bin")"
+    assert_equals "${name}.yml watches .specs/**" "yes" \
+      "$(field "${name}_paths_specs")"
+    assert_equals "${name}.yml watches the reusable workflow" "yes" \
+      "$(field "${name}_paths_lint_workflow")"
+  done
+  case_end
+}
+
+should_exist_and_parse_when_the_gate_is_wired
+should_be_a_reusable_workflow_when_lint_yml_is_parsed
+should_gate_the_build_when_each_caller_is_parsed
+should_run_before_merge_when_a_pull_request_is_opened
+should_pass_no_secrets_to_the_lint_job_when_each_caller_is_parsed
+should_reach_for_no_secret_when_lint_yml_is_read
+should_not_publish_from_a_pull_request_when_each_caller_is_parsed
+should_cover_the_gate_inputs_when_each_paths_filter_is_parsed
+
+report_totals "workflow-wiring-test"

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+#
+# Stand-in for `gog`, placed ahead of any real binary on PATH so that
+# `entrypoint.sh` can be run end to end with no Google account and no network.
+#
+# The entrypoint makes exactly one `gog` call — the service-account write it
+# performs when GOG_GOOGLE_ACCOUNT and GOG_SERVICE_ACCOUNT_KEY are both set —
+# and 006's config check runs it with both set, so that the branch is exercised
+# and so the generated configuration can be shown not to contain the key.
+#
+#   GOG_ARGV_LOG  file to append this invocation's argv to
+#
+# This is a second stub rather than a reuse of
+# `.specs/005-hermes-check-correctness/tests/stub-gog`, and the two have
+# opposite contracts. That one is permissive: it must answer any subcommand with
+# whatever a fixture told it to print, because that is how `hermes-check`'s
+# upstream is simulated. This one is strict: the entrypoint is supposed to call
+# `gog` once and for one purpose, so anything else exits non-zero rather than
+# being quietly absorbed. Sharing a file would mean one of those two properties
+# had to go, and each suite depends on its own.
+#
+# The argv log records arguments verbatim, credential included. That is what
+# makes it useful — it is how the check sees that the key arrived as a single
+# argument — and it is why this stub must only ever be handed a synthetic one.
+
+set -euo pipefail
+
+if [ -n "${GOG_ARGV_LOG:-}" ]; then
+  {
+    printf 'INVOCATION [%s %s] %d\n' "${1:-none}" "${2:-none}" "$#"
+    for arg in "$@"; do
+      printf 'ARG [%s]\n' "$arg"
+    done
+  } >> "$GOG_ARGV_LOG"
+fi
+
+# `gog auth service-account set <account> --key <key>`, and nothing else.
+# Matched on the three command words rather than on `auth` alone: a future
+# entrypoint that reached for `gog auth login` would be doing something with
+# credentials that this check has not been told about, and should stop here.
+if [ "${1:-}" = 'auth' ] && [ "${2:-}" = 'service-account' ] && [ "${3:-}" = 'set' ]; then
+  printf 'stub-gog: service account recorded (stub, nothing stored)\n'
+  exit 0
+fi
+
+{
+  printf 'stub-gog: unimplemented invocation: %s\n' "$*"
+  printf '  entrypoint.sh calls a gog subcommand this stub does not model.\n'
+  printf '  Extend the stub rather than loosening it: a stub that answered\n'
+  printf '  anything with success would hide a new credential path.\n'
+} >&2
+exit 64

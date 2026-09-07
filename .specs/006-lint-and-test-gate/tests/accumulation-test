@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+#
+# PLAN.md § Implementation Strategy:
+#
+#   "bin/test runs every check and accumulates failures rather than exiting on
+#    the first. One CI run should reveal every problem; a fail-fast gate turns
+#    a three-problem branch into three round trips."
+#
+# Accumulation is the one property of this gate that cannot be seen from a
+# green run, and it is easy to lose by accident: `set -euo pipefail` at the top
+# of the file — which the gate needs for its own correctness — kills the script
+# on the first failing check unless every check is invoked from a condition.
+# One careless `shellcheck "${scripts[@]}"` outside an `if` and the gate
+# silently becomes fail-fast again, still passing every green test.
+#
+# So the cases here break two independent things at once and insist on hearing
+# about both.
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+require_bin_test
+
+# Two defects, in two different checks, reached by two different tools. Using
+# one tool twice would not distinguish accumulation from a tool that happens to
+# report more than one finding per invocation.
+BROKEN="$(make_sandbox)"
+plant_shellcheck_violation "${BROKEN}/build.sh"
+
+# ansible-lint's `no-changed-when`: a command task that reports `changed` on
+# every run. Appending it to an existing role's task file keeps the tree
+# otherwise intact, so the only new complaint is this one.
+cat >> "${BROKEN}/infrastructure/ansible/roles/shellcheck/tasks/main.yml" <<'YAML'
+
+- name: Accumulation probe planted by 006
+  ansible.builtin.command: /bin/true
+YAML
+
+run_gate --dir "$BROKEN"
+BROKEN_OUT="$GATE_OUT"
+BROKEN_STATUS="$GATE_STATUS"
+
+should_report_every_failing_check_when_more_than_one_fails() {
+  case_start "${FUNCNAME[0]}"
+  GATE_OUT="$BROKEN_OUT"
+  assert_equals "shellcheck check result" "FAIL" "$(gate_result shellcheck)"
+  assert_equals "ansible-lint check result" "FAIL" "$(gate_result ansible-lint)"
+  case_end
+}
+
+should_exit_non_zero_when_any_check_fails() {
+  case_start "${FUNCNAME[0]}"
+  if [ "$BROKEN_STATUS" -eq 0 ]; then
+    fail "the gate exited zero with two broken checks"
+  fi
+  case_end
+}
+
+should_keep_running_after_a_failure_when_later_checks_remain() {
+  case_start "${FUNCNAME[0]}"
+  GATE_OUT="$BROKEN_OUT"
+  # The proof that nothing aborted early: the checks that come after the two
+  # broken ones still reported. A fail-fast gate would have stopped at the
+  # first failure and these lines would be missing entirely — which is why
+  # their absence is asserted as absence, not as a non-PASS.
+  local name
+  for name in hermes-check config-schema gate-tests entrypoint-contract; do
+    if [ -z "$(gate_result "$name")" ]; then
+      fail "no line for the ${name} check; the run stopped early"
+    fi
+  done
+  case_end
+}
+
+should_name_every_failing_check_in_the_summary_when_the_run_ends() {
+  case_start "${FUNCNAME[0]}"
+  GATE_OUT="$BROKEN_OUT"
+  # SPEC § Operability: "The summary names every failing check, not just the
+  # first." A reader who scrolled past a hundred lines of shellcheck output
+  # needs the list at the bottom to be complete, or they fix one thing and push
+  # again.
+  local summary
+  summary="$(gate_summary_tail)"
+  assert_contains "the summary names shellcheck" "$summary" "shellcheck"
+  assert_contains "the summary names ansible-lint" "$summary" "ansible-lint"
+  case_end
+}
+
+should_report_each_check_exactly_once_when_the_run_ends() {
+  case_start "${FUNCNAME[0]}"
+  GATE_OUT="$BROKEN_OUT"
+  # The output contract is one line per check. Two lines for one check means
+  # either a check ran twice or the summary is being mistaken for a result
+  # line, and both make the run's shape unreadable at a glance.
+  local name
+  for name in bash-n shellcheck ansible-lint hermes-check config-schema \
+    gate-tests entrypoint-contract; do
+    assert_equals "result lines for ${name}" "1" \
+      "$(count_matching_lines "$BROKEN_OUT" "^\(PASS\|FAIL\|SKIP\) ${name}\( \|\$\)")"
+  done
+  case_end
+}
+
+should_print_the_failing_tool_output_when_a_check_fails() {
+  case_start "${FUNCNAME[0]}"
+  GATE_OUT="$BROKEN_OUT"
+  # A gate that says only `FAIL shellcheck` sends the reader back to their own
+  # machine to find out why, which is exactly the round trip this spec exists
+  # to remove.
+  assert_contains "shellcheck's own finding is shown" "$BROKEN_OUT" "SC2086"
+  assert_contains "the file it found it in is named" "$BROKEN_OUT" "build.sh"
+  assert_contains "ansible-lint's rule is shown" "$BROKEN_OUT" "no-changed-when"
+  case_end
+}
+
+should_stay_quiet_when_every_check_passes() {
+  case_start "${FUNCNAME[0]}"
+  # The other half of "full tool output for failures only". A clean run that
+  # printed every tool's chatter would train the reader to skim it, and the one
+  # run that mattered would be skimmed too.
+  local clean
+  clean="$(make_sandbox)"
+  run_gate --dir "$clean"
+
+  assert_equals "exit status of a clean run" "0" "$GATE_STATUS"
+  assert_equals "bash-n check result" "PASS" "$(gate_result bash-n)"
+  assert_equals "shellcheck check result" "PASS" "$(gate_result shellcheck)"
+  assert_equals "ansible-lint check result" "PASS" "$(gate_result ansible-lint)"
+  assert_equals "no shellcheck findings printed" "0" \
+    "$(count_matching_lines "$GATE_OUT" 'SC[0-9][0-9][0-9][0-9]')"
+  case_end
+}
+
+should_report_every_failing_check_when_more_than_one_fails
+should_exit_non_zero_when_any_check_fails
+should_keep_running_after_a_failure_when_later_checks_remain
+should_name_every_failing_check_in_the_summary_when_the_run_ends
+should_report_each_check_exactly_once_when_the_run_ends
+should_print_the_failing_tool_output_when_a_check_fails
+should_stay_quiet_when_every_check_passes
+
+report_totals "accumulation-test"

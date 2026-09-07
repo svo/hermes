@@ -1,0 +1,132 @@
+# The gate this repository has always declared and never run.
+#
+# `infrastructure/packer/builder.pkr.hcl` sets ENTRYPOINT ["./bin/test"] and
+# WORKDIR /working-dir, and `bin/test` runs shellcheck, ansible-lint,
+# `bash -n`, the hermes-check harness and the config-schema checks. This
+# workflow is what finally connects the two to CI. It is reusable because all
+# three build workflows need it and three copies of the same job would drift
+# apart — the concern SPEC Open Question 4 raises.
+#
+# One command does the whole job:
+#
+#     docker run --rm -v "$PWD":/working-dir svanosselaer/hermes-builder
+#
+# It is the gate, and it is at the same time the proof of finding E1 and
+# acceptance criterion 4. With no `--entrypoint` override the image itself has
+# to run `./bin/test`, so an image that lost its ENTRYPOINT fails here rather
+# than quietly passing. It is also what makes acceptance criterion 8 true: a
+# contributor and this runner execute the same shellcheck and the same
+# ansible-lint, out of the same image, so "works on my machine" is not
+# reachable.
+#
+# SECURITY. The callers trigger on `pull_request`, so this workflow is
+# reachable from forks, and the code it runs — `bin/test` and everything under
+# `.specs/*/tests/` — comes from the pull request branch. Treat it as
+# untrusted:
+#
+#   * No secrets reach it. A `workflow_call` callee receives only what its
+#     caller hands over, and the three callers hand over nothing: no `with:`,
+#     no `secrets:`, and above all no `secrets: inherit`. Nothing below
+#     reaches for one directly either: strip the comments from this file and
+#     not one remaining line mentions `secrets` at all. Keep it that way.
+#   * `contents: read` and nothing more, so the job's GITHUB_TOKEN cannot
+#     write to the repository even if something it runs tries to.
+#   * The Docker socket is not mounted. `build.sh` mounts it because building
+#     an image needs a daemon; linting does not, and mounting it would hand
+#     pull-request-authored code root on the runner. A check inside `bin/test`
+#     that wants a daemon has to skip when it cannot reach one.
+#
+# None of that would be possible if the image were private. It is not:
+# `docker manifest inspect svanosselaer/hermes-builder:latest` succeeds with
+# no credentials at all, so the pull needs no Docker Hub login.
+
+name: Lint and test gate
+
+on:
+  workflow_call:
+
+# Only the checkout needs anything, and it needs only read.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ./bin/test
+    runs-on: [ubuntu-latest]
+
+    # One pull and one script. A hang should cost twenty minutes of a runner,
+    # not the default six hours.
+    timeout-minutes: 20
+
+    env:
+      # Named once. If the pull and the run could name different tags, the
+      # gate would verify something other than what it fetched.
+      BUILDER_IMAGE: svanosselaer/hermes-builder:latest
+
+    steps:
+      # `fetch-depth: 0` is load-bearing, not tidiness. `red-baseline-test` is
+      # the only thing that ever *sees* this gate fail — it restores the
+      # pre-005 hermes-check from `6e8932a^` and asserts the run goes red — and
+      # on the default depth-1 clone that commit has no object, so all five of
+      # its cases skip. A gate whose only proof of failure is skipped in CI is
+      # back to being a gate nobody has watched work.
+      - id: checkout
+        name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # A failed pull fails the job. The tempting alternatives — falling back
+      # to the runner's own shellcheck, or `continue-on-error: true` — would
+      # leave the pipeline green while checking nothing, which is the exact
+      # state this spec exists to end. They would also break acceptance
+      # criterion 8, because runner-local tools are not the image's tools.
+      #
+      # Two ways to land here, both needing a person:
+      #   * Docker Hub is rate limiting or down — re-run the job.
+      #   * the image is not published for this platform yet. `builder.yml`
+      #     cannot publish it either, because its own build now waits on this
+      #     gate. Break that cycle by hand: run packer over
+      #     infrastructure/packer/builder.pkr.hcl on a host that has packer
+      #     and docker, push svanosselaer/hermes-builder:amd64 and :arm64,
+      #     run ./create-latest.sh builder, then re-run this job.
+      - id: docker-pull
+        name: Docker:Pull
+        run: |
+          if docker pull "$BUILDER_IMAGE"; then
+            exit 0
+          fi
+          echo "Could not pull ${BUILDER_IMAGE}. The gate did not run;" >&2
+          echo "it is failing rather than being skipped. See the comment" >&2
+          echo "above this step in .github/workflows/lint.yml." >&2
+          echo "::error title=Gate did not run::cannot pull builder image"
+          exit 1
+
+      # The gate, and the E1 proof. No `--entrypoint`: the image's own
+      # ENTRYPOINT ["./bin/test"] and WORKDIR /working-dir have to be right,
+      # and the repository is mounted at /working-dir so `./bin/test` resolves
+      # to this commit's copy rather than to anything baked into the image.
+      #
+      # builder.pkr.hcl also sets CMD ["/usr/sbin/sshd", "-D"], so what
+      # actually starts is `./bin/test /usr/sbin/sshd -D`. `bin/test` ignores
+      # positional arguments for precisely this reason. Leave the CMD alone:
+      # overriding it would stop this step from exercising the plain
+      # `docker run svanosselaer/hermes-builder` that acceptance criterion 4
+      # is written about.
+      #
+      # The checkout belongs to uid 1001 (`runner`) and the container runs as
+      # root, so git refuses the mounted repository with "detected dubious
+      # ownership" and every history-reading case skips — the same five cases
+      # `fetch-depth: 0` above exists to keep alive. GIT_CONFIG_COUNT is the
+      # environment form of `git config`, so this needs no writable HOME and
+      # leaves no file behind. `--user` would fix the ownership too, but it
+      # would also change what else in the image is writable, and the point of
+      # this step is to run the image as `docker run` runs it.
+      - id: bin-test
+        name: Docker:Test
+        run: |
+          docker run --rm -v "$PWD":/working-dir \
+            -e GIT_CONFIG_COUNT=1 \
+            -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0=/working-dir \
+            "$BUILDER_IMAGE"

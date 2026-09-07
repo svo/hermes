@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+#
+# Stand-in for `openclaw`, placed ahead of any real binary on PATH so that
+# `entrypoint.sh` can be run end to end with no credentials, no network, and no
+# gateway process.
+#
+# 006's config check exists to prove that the configuration the entrypoint
+# *writes* is one the gateway can *read*. Getting to that file means onboarding,
+# a readiness probe, an automations round-trip and a final `exec` — so this stub
+# models each of those calls rather than the entrypoint being refactored into
+# something more convenient to test. Running the real code path is the whole
+# point; a fixture checked in beside it would drift the first time the
+# entrypoint gained a key.
+#
+#   OPENCLAW_ARGV_LOG    file to append this invocation's argv to
+#   STUB_OPENCLAW_STATE  directory for the automations store and the pristine
+#                        copy of the seed (default: $HOME/.stub-openclaw)
+#
+# Deliberately STRICT: an invocation this does not model exits non-zero and says
+# so. A permissive stub would answer a future `openclaw <something>` with
+# success and the check would then report a green verdict on a configuration the
+# container never really produced — the same "gate exists but checks nothing"
+# failure the whole spec is fixing. 005's `stub-gog` is permissive for the
+# opposite and equally deliberate reason: it has to answer whatever
+# `hermes-check` asks so that a fixture can drive the reply.
+#
+# It never validates anything. `config validate` here always succeeds, because
+# the verdict that matters comes from the real `openclaw` the check runs itself,
+# against the file this stub let the entrypoint write. A stub that returned a
+# verdict would be a gate marking its own homework.
+
+set -euo pipefail
+
+state_dir="${STUB_OPENCLAW_STATE:-${HOME}/.stub-openclaw}"
+automations_dir="${state_dir}/automations"
+config_path="${HOME}/.openclaw/openclaw.json"
+seed_path="${state_dir}/seed.json"
+
+# argv, in the shape 005's stub-gog logs it, so that a reader who knows one log
+# knows both. Each argument is bracketed so an empty one is visible as `ARG []`
+# rather than as nothing at all.
+#
+# The command name is the leading one or two non-flag words. Every call the
+# entrypoint makes is named by at most two — `config validate`,
+# `automations create` — and stopping at two keeps a cron expression and a
+# multi-line prompt out of the name.
+log_invocation() {
+  if [ -z "${OPENCLAW_ARGV_LOG:-}" ]; then
+    return 0
+  fi
+
+  local -a words=()
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      -*) break ;;
+    esac
+    words+=("$arg")
+    if [ "${#words[@]}" -ge 2 ]; then
+      break
+    fi
+  done
+
+  {
+    printf 'INVOCATION [%s] %d\n' "${words[*]:-none}" "$#"
+    for arg in "$@"; do
+      printf 'ARG [%s]\n' "$arg"
+    done
+  } >> "$OPENCLAW_ARGV_LOG"
+}
+
+unimplemented() {
+  {
+    printf 'stub-openclaw: unimplemented invocation: %s\n' "$*"
+    printf '  entrypoint.sh calls something this stub does not model. Extend the\n'
+    printf '  stub rather than loosening it: a stub that answered anything with\n'
+    printf '  success would report a configuration the container never wrote.\n'
+  } >&2
+  exit 64
+}
+
+# What onboarding leaves behind, trimmed to the keys that matter here: the ones
+# the entrypoint goes on to read or overwrite. It is shaped after a real
+# `openclaw onboard --non-interactive` run, and deliberately does NOT carry the
+# Anthropic key — the real wizard stores that outside the config, which is why
+# the entrypoint writes `env.vars.ANTHROPIC_API_KEY` itself and why that key
+# vanishing is a silent failure nothing else would notice.
+#
+# A copy is kept so the check can tell what the entrypoint changed from what it
+# was given. Without the copy, "every key the entrypoint sets is correct" could
+# still be true of a config that had also grown a key nobody accounted for.
+cmd_onboard() {
+  local port=3000 bind=lan
+
+  # One shift per iteration: a flag's value is consumed by the next pass, so a
+  # trailing `--gateway-port` with no value cannot shift past the end.
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --gateway-port) port="${2:-$port}" ;;
+      --gateway-bind) bind="${2:-$bind}" ;;
+    esac
+    shift
+  done
+
+  mkdir -p "${HOME}/.openclaw/workspace" "$state_dir"
+
+  # Only when absent, matching the real command's place in the entrypoint: it
+  # is called once, on a container with no configuration yet. Overwriting here
+  # would hide a second call that should not be happening.
+  if [ -f "$config_path" ]; then
+    printf 'stub-openclaw: onboard skipped, %s already exists\n' "$config_path"
+    return 0
+  fi
+
+  cat > "$config_path" <<SEED
+{
+  "agents": {
+    "defaults": {
+      "workspace": "${HOME}/.openclaw/workspace",
+      "model": {
+        "primary": "anthropic/claude-opus-5"
+      },
+      "models": {
+        "anthropic/claude-opus-5": {}
+      }
+    },
+    "entries": {
+      "main": {
+        "name": "main",
+        "workspace": "${HOME}/.openclaw/workspace",
+        "agentDir": "${HOME}/.openclaw/agents/main/agent",
+        "identity": {
+          "name": "main"
+        }
+      }
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "auth": {
+      "mode": "token",
+      "token": "stub-gateway-token-not-a-secret"
+    },
+    "port": ${port},
+    "bind": "${bind}",
+    "tailscale": {
+      "mode": "off"
+    }
+  },
+  "tools": {
+    "profile": "coding"
+  },
+  "plugins": {
+    "entries": {
+      "anthropic": {
+        "enabled": true
+      }
+    }
+  },
+  "auth": {
+    "profiles": {
+      "anthropic:default": {
+        "provider": "anthropic",
+        "mode": "api_key"
+      }
+    }
+  }
+}
+SEED
+
+  cp "$config_path" "$seed_path"
+  printf 'stub-openclaw: onboarded, wrote %s\n' "$config_path"
+}
+
+# The automations store. `create` then `list` has to round-trip, because the
+# entrypoint's registrar treats "created but not listed" as a failure it must
+# not retry — a store that forgot would turn one create into an error path the
+# check would then be measuring instead of the config.
+automation_id() {
+  printf 'stub-job-%s' "$1"
+}
+
+cmd_automations_list() {
+  local json='no' path name first='yes'
+  local -a names=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json) json='yes' ;;
+    esac
+    shift
+  done
+
+  # A glob rather than `ls`: a job name is a filename here, and parsing a
+  # listing would be one more place for a name to be mangled.
+  for path in "${automations_dir}"/*; do
+    if [ -e "$path" ]; then
+      names+=("${path##*/}")
+    fi
+  done
+
+  if [ "$json" = 'yes' ]; then
+    # Hand-built rather than piped through a JSON tool: the stub has to run in
+    # the builder image, which carries no guarantee of `jq`, and the shape is
+    # three fields wide.
+    printf '['
+    for name in "${names[@]}"; do
+      if [ "$first" = 'no' ]; then
+        printf ','
+      fi
+      first='no'
+      printf '{"id":"%s","name":"%s","schedule":"stub"}' "$(automation_id "$name")" "$name"
+    done
+    printf ']\n'
+    return 0
+  fi
+
+  if [ "${#names[@]}" -eq 0 ]; then
+    printf 'No automations registered.\n'
+    return 0
+  fi
+  for name in "${names[@]}"; do
+    printf '%s  %s\n' "$(automation_id "$name")" "$name"
+  done
+}
+
+cmd_automations_create() {
+  local name=''
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --name) name="${2:-}" ;;
+    esac
+    shift
+  done
+
+  if [ -z "$name" ]; then
+    unimplemented 'automations create with no --name'
+  fi
+  # A name is a filename here, so a separator in it would write outside the
+  # store. The entrypoint's name is a constant; anything else is a bug worth
+  # stopping on rather than silently mangling.
+  case "$name" in
+    */*|.|..) unimplemented "automations create with unusable --name '${name}'" ;;
+  esac
+
+  mkdir -p "$automations_dir"
+  printf '%s\n' "$name" > "${automations_dir}/${name}"
+  printf 'Created automation %s (%s)\n' "$name" "$(automation_id "$name")"
+}
+
+cmd_automations() {
+  local sub="${1:-}"
+  if [ "$#" -gt 0 ]; then
+    shift
+  fi
+
+  case "$sub" in
+    list) cmd_automations_list "$@" ;;
+    create) cmd_automations_create "$@" ;;
+    *) unimplemented "automations ${sub}" ;;
+  esac
+}
+
+cmd_gateway() {
+  case "${1:-}" in
+    # The registrar's readiness probe. Ready on the first ask, so the run is
+    # bounded by the entrypoint's own retry budget rather than by wall clock.
+    health)
+      printf 'stub-openclaw: gateway healthy\n'
+      ;;
+    # The `exec` at the end of the entrypoint. Returning immediately is what
+    # makes the whole startup path finite: the process the container would keep
+    # forever is the one thing a check cannot wait for.
+    ''|-*)
+      printf 'stub-openclaw: gateway started and exiting (stub)\n'
+      ;;
+    *)
+      unimplemented "gateway ${1}"
+      ;;
+  esac
+}
+
+log_invocation "$@"
+
+command="${1:-}"
+if [ "$#" -gt 0 ]; then
+  shift
+fi
+
+case "$command" in
+  onboard) cmd_onboard "$@" ;;
+  config)
+    case "${1:-}" in
+      validate) printf 'stub-openclaw: config validate is not judged here\n' ;;
+      *) unimplemented "config ${1:-}" ;;
+    esac
+    ;;
+  gateway) cmd_gateway "$@" ;;
+  automations|cron) cmd_automations "$@" ;;
+  *) unimplemented "$command" ;;
+esac

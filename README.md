@@ -651,3 +651,87 @@ fixture responses served by a stub `gog`:
 ```bash
 bin/hermes-check-test
 ```
+
+## Contributing
+
+Run the gate before you push:
+
+```bash
+./bin/test
+```
+
+That form runs the checks with the tooling on your own `PATH`. To run them out of the
+*same image CI uses* — which is what makes "works on my machine" unreachable —
+`infrastructure/packer/builder.pkr.hcl` declares `ENTRYPOINT ["./bin/test"]` with
+`WORKDIR /working-dir`, and `build.sh` already mounts the repository there, so the container
+form needs no entrypoint override:
+
+```bash
+docker run --rm -v "$(pwd)":/working-dir svanosselaer/hermes-builder
+```
+
+That is the command the `lint` job runs, and it is also what proves the image does what its
+own definition says.
+
+Seven checks, in order. Each prints one line; a failing check prints its full output, and the
+summary at the end names every failure rather than only the first — one run should reveal
+every problem, because a fail-fast gate turns a three-problem branch into three round trips.
+
+| Check | What it does |
+|---|---|
+| `bash-n` | parses every shell script |
+| `shellcheck` | `shellcheck -x -P SCRIPTDIR -s bash` over every shell script, at default severity |
+| `ansible-lint` | the whole Ansible tree |
+| `hermes-check` | `bin/hermes-check-test` — the monitoring suites |
+| `config-schema` | runs the entrypoint against a stub and validates the config it writes |
+| `gate-tests` | the checks that test the gate itself |
+| `entrypoint-contract` | runs the builder image with no override and confirms `bin/test` starts |
+
+Scripts are found by shebang, not by file extension. `hermes-check`, `bin/create-image` and
+`bin/test` itself have no `.sh` suffix, and a glob would have skipped the file that carried
+all five of the findings this gate was written to catch.
+
+For fast local iteration, skip the container smoke test — the only check that needs a docker
+daemon and a network:
+
+```bash
+SKIP_SLOW=1 ./bin/test
+```
+
+### When a check is skipped
+
+A skip is not a pass, and the gate never prints one as the other. `SKIP <name> (<reason>)`
+says which check did not run and why, and every skip is repeated in the closing summary so it
+cannot scroll away. A skipped check does not fail the build; a real failure alongside it still
+does.
+
+Five checks can skip on a developer machine:
+
+| Skip | Why, and what you lose |
+|---|---|
+| `shellcheck` | not installed — the whole check does not run. Install it, or use the container form. |
+| `ansible-lint` | not installed — likewise. Neither linter is bundled; both are in the builder image. |
+| `entrypoint-contract` | no docker daemon, or the daemon cannot see your checkout. It skips in CI too — see below. |
+| `config-schema` validator | no `openclaw` on `PATH`. The generated config is still checked for shape; it is just not checked against the live schema. `npm install -g openclaw` closes it. |
+| `hermes-check` | `bin/hermes-check-test` is missing, which should not happen on a full checkout. |
+
+The `config-schema` one matters most. `openclaw` is installed with `state: latest`, so the
+schema can change under a build that changed nothing — which is how `tools.loopDetection` came
+to carry three keys the gateway would refuse to load. The validator is what catches that, and
+`infrastructure/ansible/roles/openclaw-cli` puts it in the builder image so CI runs it.
+
+That last part is true of the *next* builder image, not the one on Docker Hub today: the role
+arrives with this change, and `builder.yml` cannot publish it until this gate passes. Until a
+builder built from this commit is pushed, CI prints the validator skip rather than running it.
+The comment above the `Docker:Pull` step in `.github/workflows/lint.yml` documents how to
+break that bootstrap by hand; the same procedure applies to a stale image as to a missing one.
+
+The `entrypoint-contract` check skips in CI as well, and that is by design rather than a gap.
+CI runs `bin/test` *inside* the builder container, and `lint.yml` deliberately does not mount
+the Docker socket — mounting it would hand pull-request-authored code root on the runner. So
+the check cannot reach a daemon and says so.
+
+What covers the entrypoint contract in CI is the `lint` job itself: its one step is
+`docker run --rm -v "$PWD":/working-dir svanosselaer/hermes-builder` with no `--entrypoint`.
+If the image ever lost its `ENTRYPOINT ["./bin/test"]`, that step would not run the gate at
+all, and the job would fail. The proof is one level up, where it needs no socket.

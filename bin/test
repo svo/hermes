@@ -1,0 +1,419 @@
+#!/usr/bin/env bash
+#
+# The repository's quality gate — and the entrypoint the builder image has
+# declared since the day it was written.
+#
+#   ./bin/test
+#
+# `infrastructure/packer/builder.pkr.hcl` sets WORKDIR /working-dir and
+# ENTRYPOINT ["./bin/test"], and `build.sh` mounts the checkout there, so
+# `docker run svanosselaer/hermes-builder` runs this file with no override.
+# The contract has always existed; only the file was missing. That single gap
+# is why five shellcheck findings, four ansible-lint violations and an
+# unvalidated config schema were found by a review rather than by CI — the
+# tooling was installed and provisioned the whole time, and nothing called it.
+#
+# Every check runs, failures accumulate, and the summary names all of them. A
+# fail-fast gate turns a three-problem branch into three round trips.
+#
+#   SKIP_SLOW=1              skip the container smoke test, for fast local
+#                            iteration
+#   HERMES_GATE_TEST=1       skip the `gate-tests` check. 006's own suite sets
+#                            this when it drives bin/test, so the suite that
+#                            tests the gate is not re-entered by the gate.
+#   HERMES_TEST_SELFCHECK=1  print one marker line and exit zero, without
+#                            running anything
+#
+# Exits zero only when no check failed.
+
+set -euo pipefail
+
+# Positional arguments are ignored, deliberately. builder.pkr.hcl declares
+# CMD ["/usr/sbin/sshd", "-D"] alongside the entrypoint, so the plain
+# `docker run svanosselaer/hermes-builder` that the image documents arrives
+# here as `./bin/test /usr/sbin/sshd -D`. An argument parser that rejected
+# those two unrecognised words would break the very contract this file exists
+# to honour, and it would break it only in the container — never locally,
+# where nobody would think to pass them.
+
+# The line the container smoke test greps for, and the only thing a selfcheck
+# run emits. Naming it once means the assertion below and the process that
+# satisfies it can never drift apart.
+readonly selfcheck_marker='HERMES_TEST_SELFCHECK_OK bin/test'
+
+# Answering the selfcheck before anything else is what makes the smoke test
+# cheap and, more importantly, non-recursive: the inner container proves the
+# image really runs ./bin/test and stops there, instead of starting a second
+# full gate run that would try to start a third.
+if [ -n "${HERMES_TEST_SELFCHECK:-}" ]; then
+  printf '%s\n' "$selfcheck_marker"
+  exit 0
+fi
+
+# Resolved from BASH_SOURCE rather than $PWD, because the two callers differ:
+# the image runs `./bin/test` from /working-dir, while a contributor runs it
+# from wherever they happen to be. Moving to the root then makes every path
+# below repo-relative, so a local run and a CI run print the same lines — which
+# is the acceptance criterion about local/CI parity, not a cosmetic choice.
+#
+# The symlink walk is not defensive padding. `./bin/test` is a command the
+# README tells contributors to run before every push, so somebody will put a
+# link to it on their PATH — and `dirname` of the *link* resolves to the link's
+# grandparent, not the repository. Every path below is repo-relative, so the
+# gate would then lint whatever happened to live there, skip the four checks
+# whose files it could not find, and print "all checks passed" over a tree it
+# never opened. A green run against the wrong tree is the worst output this
+# script has. `readlink -f` would be shorter, but it is GNU-only and the local
+# story here is not.
+self="${BASH_SOURCE[0]}"
+while [ -L "$self" ]; do
+  target="$(readlink -- "$self")"
+  case "$target" in
+    /*) self="$target" ;;
+    *) self="$(dirname -- "$self")/${target}" ;;
+  esac
+done
+repo_root="$(cd -- "$(dirname -- "$self")/.." && pwd)"
+cd -- "$repo_root"
+
+# And having resolved it, prove it. Discovery already refuses to report a clean
+# run over an empty file list; this is the same rule one level up, because a
+# root that merely *looks* plausible produces the same confident green.
+# Two anchors, both structural: the file being run and the packer definition
+# that declares it as an entrypoint. Deliberately not the Ansible tree — that
+# one missing is a finding, not a wrong-root signal, and it belongs in the
+# summary alongside everything else rather than aborting the run before the
+# other checks have had their say.
+for anchor in bin/test infrastructure/packer/builder.pkr.hcl; do
+  if [ ! -e "$anchor" ]; then
+    printf 'bin/test: %s is not the repository root — %s is missing.\n' \
+      "$repo_root" "$anchor" >&2
+    printf 'Refusing to report on a tree this is not.\n' >&2
+    exit 1
+  fi
+done
+
+readonly builder_image='svanosselaer/hermes-builder:latest'
+
+log_dir="$(mktemp -d)"
+trap 'rm -rf "$log_dir"' EXIT
+
+passed=0
+failed=()
+skipped=()
+
+# ---------------------------------------------------------------------------
+# Reporting
+#
+# Every line goes to stdout, failures included. Splitting PASS onto stdout and
+# FAIL onto stderr is the obvious arrangement and the wrong one: CI captures
+# stdout through a pipe, where it is block buffered, while stderr is not, so
+# the two interleave in an order that is not the order the checks ran in. The
+# transcript would scramble itself precisely when someone is reading it to
+# find out what broke. The exit status is the machine-readable signal; this
+# stream is for the human.
+# ---------------------------------------------------------------------------
+
+# check <name> <command...>
+check() {
+  local name="$1"
+  shift
+  local log="${log_dir}/${name}.log"
+  # The condition context is load-bearing. Under `set -e` a bare call to a
+  # failing check would end the run at the first problem and hide every later
+  # one, which is the behaviour this gate is specified not to have.
+  #
+  # </dev/null because no check should read stdin — and because ansible-lint
+  # refuses to start at all when it inherits a non-blocking one.
+  if ! "$@" >"$log" 2>&1 </dev/null; then
+    # `$?` is 0 here — it holds the status of the *negated* command, not of
+    # the check — and PIPESTATUS still holds the real one. The distinction is
+    # not pedantry: a linter killed by a memory limit exits 137 and writes
+    # nothing at all, and `FAIL shellcheck` over an empty block gives the
+    # operator no way to tell that from a linter that found something it could
+    # not describe. The status is the only evidence there is.
+    local status="${PIPESTATUS[0]}"
+    failed+=("$name")
+    printf 'FAIL %s\n' "$name"
+    printf '\n--- %s output (exit %d) ---\n' "$name" "$status"
+    cat -- "$log"
+    printf '\n'
+    return 0
+  fi
+  passed=$((passed + 1))
+  printf 'PASS %s\n' "$name"
+  # A check can pass and still have skipped part of itself. `config-schema`
+  # is the standing example: outside the container there is no `openclaw`, so
+  # the validator layer cannot run, and a silent PASS there would report a
+  # verdict on a schema nothing consulted — finding D2 with extra steps.
+  #
+  # So a passing check's own SKIP notices are relayed, and only those: the
+  # rest of its output stays in the log, because a clean run that printed
+  # every tool's chatter would teach the reader to skim the one run that
+  # mattered. They are indented, which is not decoration — it keeps them from
+  # matching the `^(PASS|FAIL|SKIP) <name>` shape that makes each check
+  # countable, so a relayed notice can never be read as a second result.
+  #
+  # Recorded as well as printed. A relayed notice that only appears inline is
+  # one the closing summary under-counts and never repeats — and the notice it
+  # drops is the config-schema validator, which is the whole of finding D2.
+  # The summary is the thing a reader is told to trust, so a skip it does not
+  # know about is worse than one printed nowhere at all.
+  while IFS= read -r notice; do
+    [ -n "$notice" ] || continue
+    notice="${notice#"${notice%%[![:space:]]*}"}"
+    skipped+=("${name}: ${notice#SKIP }")
+    printf '  %s\n' "$notice"
+  done < <(grep -E '^[[:space:]]*SKIP ' -- "$log" || true)
+}
+
+# skip <name> <reason>. A reason is mandatory: a skip with no stated cause is
+# indistinguishable from a check that quietly stopped working.
+skip() {
+  skipped+=("$1 ($2)")
+  printf 'SKIP %s (%s)\n' "$1" "$2"
+}
+
+# ---------------------------------------------------------------------------
+# Discovery
+# ---------------------------------------------------------------------------
+
+# By shebang, not by extension. `hermes-check`, `create-image`,
+# `hermes-check-test`, `setup-image-requirements`, this file and every script
+# under .specs/*/tests/ carry no `.sh` suffix, so a glob over `*.sh` would
+# have skipped the one file that held all five of the warnings in review
+# finding E4 — a gate that misses the code it was written for.
+#
+# Only `sh` and `bash` are matched. The tree is bash throughout, which is also
+# why shellcheck below is told `-s bash`; a `#!/usr/bin/env python3` file must
+# not arrive at a shell linter.
+discover_scripts() {
+  local file
+  while IFS= read -r -d '' file; do
+    file="${file#./}"
+    # Two bytes first. Without this, `head -n 1` would drag every binary in
+    # the tree — icon.png among them — through grep.
+    [ "$(head -c 2 -- "$file")" = '#!' ] || continue
+    if head -n 1 -- "$file" | grep -Eq '^#!.*[ /](ba)?sh([[:space:]]|$)'; then
+      printf '%s\0' "$file"
+    fi
+  done < <(
+    find . \( -name .git -o -name .vagrant -o -name node_modules \) -prune \
+      -o -type f -print0 |
+      # LC_ALL=C, because the default locale collates punctuation away and so
+      # orders `bin/` before `.specs/`. The same tree would then lint in a
+      # different order on a differently configured machine, and diffing two
+      # runs to see what changed would stop working.
+      LC_ALL=C sort -z
+  )
+}
+
+mapfile -d '' -t scripts < <(discover_scripts)
+
+# An empty result means discovery broke, not that the repository is clean.
+# Reporting a pass here would recreate, exactly, the failure this spec exists
+# to fix: a gate that runs, says nothing is wrong, and checks nothing.
+if [ "${#scripts[@]}" -eq 0 ]; then
+  printf 'bin/test: no shell scripts discovered under %s\n' "$repo_root"
+  printf 'Discovery is broken; refusing to report a clean run.\n'
+  exit 1
+fi
+
+printf 'bin/test: %d shell scripts discovered\n\n' "${#scripts[@]}"
+
+# ---------------------------------------------------------------------------
+# The checks
+# ---------------------------------------------------------------------------
+
+# A check body only needs to be a function when it is more than one command;
+# the rest are handed to `check` as commands. Both bodies below reach `check`
+# through its `"$@"`, which shellcheck's reachability analysis cannot follow —
+# without the directive it reports every line of them as dead code. This file
+# lints itself, so the alternative to the directive is a gate that fails on
+# its own shape.
+# shellcheck disable=SC2317  # invoked indirectly, through check()
+bash_syntax() {
+  local file status=0
+  for file in "${scripts[@]}"; do
+    # Accumulating here too: `bash -n` over the whole tree should name every
+    # unparseable file, not the first one.
+    bash -n -- "$file" || status=1
+  done
+  return "$status"
+}
+
+# The container smoke test cannot run everywhere. Returns the reason it must
+# be skipped, or nothing at all when it can run. Each branch is a real
+# environment, and none of them may become a pass: an unreachable daemon says
+# nothing about whether the image honours its entrypoint.
+entrypoint_contract_blocker() {
+  if [ -n "${SKIP_SLOW:-}" ]; then
+    printf 'SKIP_SLOW is set'
+  elif ! command -v docker >/dev/null 2>&1; then
+    printf 'docker is not installed'
+  elif ! docker info >/dev/null 2>&1 </dev/null; then
+    printf 'the docker daemon is not reachable'
+  elif ! docker image inspect "$builder_image" >/dev/null 2>&1 </dev/null &&
+    ! docker pull "$builder_image" >>"${log_dir}/entrypoint-contract.log" 2>&1 </dev/null; then
+    printf '%s is absent locally and could not be pulled' "$builder_image"
+  elif ! docker run --rm -v "${repo_root}:/working-dir" \
+    --entrypoint /bin/ls "$builder_image" /working-dir/bin/test \
+    >/dev/null 2>&1 </dev/null; then
+    # The daemon is not always on this filesystem: a colima or Docker Desktop
+    # VM, or a DOCKER_HOST pointing elsewhere, silently turns the bind mount
+    # into an empty directory. The container then dies with
+    # `stat ./bin/test: no such file or directory` — byte for byte the error
+    # review finding E1 recorded when the file really was missing.
+    #
+    # Those two must not be confused, and here they cannot be: this script is
+    # running, so bin/test exists in the checkout. A copy the container cannot
+    # see is therefore a mount that did not arrive, never the finding. Calling
+    # it a failure would teach contributors to ignore a red gate, which is
+    # worse than not running the check.
+    #
+    # The probe overrides the entrypoint on purpose; the check below must not,
+    # because not overriding it is the whole assertion.
+    printf 'the docker daemon cannot see %s (the bind mount arrives empty)' "$repo_root"
+  fi
+  return 0
+}
+
+# shellcheck disable=SC2317  # invoked indirectly, through check()
+entrypoint_contract() {
+  local out status=0
+  # No --entrypoint, and that omission *is* the assertion. builder.pkr.hcl:6
+  # names ./bin/test as the image's entrypoint; review finding E1 recorded
+  # that the named file did not exist, and this same command reproduced it as
+  # `stat ./bin/test: no such file or directory`. Passing --entrypoint would
+  # test the bind mount and prove nothing about the image.
+  out="$(docker run --rm \
+    -v "${repo_root}:/working-dir" \
+    -e HERMES_TEST_SELFCHECK=1 \
+    "$builder_image" 2>&1)" || status=$?
+  printf '%s\n' "$out"
+
+  if [ "$status" -ne 0 ]; then
+    printf '\ndocker run exited %d\n' "$status"
+    return 1
+  fi
+  case "$out" in
+    *"$selfcheck_marker"*) return 0 ;;
+  esac
+  # The image started something, but not this file. Worth distinguishing from
+  # the exit-non-zero case above: a stale image with a different entrypoint
+  # fails here, and the operator needs to know to rebuild rather than to debug
+  # the mount.
+  printf '\nthe container ran but never printed %s\n' "$selfcheck_marker"
+  printf 'the image entrypoint is not bin/test\n'
+  return 1
+}
+
+check bash-n bash_syntax
+
+# A missing linter is a skip, never a pass and never a hard failure. The
+# builder image installs both, so CI never takes these paths; a contributor
+# without them still gets the rest of the gate, and every skip is repeated in
+# the summary so that a half-run cannot be mistaken for a green one.
+if command -v shellcheck >/dev/null 2>&1; then
+  # -x follows the `. harness.sh` every test suite carries, and -P SCRIPTDIR
+  # is what makes that resolution work from any working directory: without it
+  # the linter looks for `harness.sh` relative to $PWD and reports SC1091 on
+  # the two suites that carry no `source-path` directive of their own. That is
+  # a property of where the linter was started from, not of the code, and a
+  # gate whose verdict depends on the caller's $PWD is not a gate.
+  #
+  # Default severity — no --severity floor. 001 and 005 left the tree clean at
+  # the strictest level, so SPEC Open Question 2 ("fail on info, or only on
+  # warning?") is answered with evidence rather than a guess: there is nothing
+  # to loosen for, and a floor added now would only be somewhere for the next
+  # finding to hide.
+  check shellcheck shellcheck -x -P SCRIPTDIR -s bash -- "${scripts[@]}"
+else
+  skip shellcheck 'shellcheck is not installed'
+fi
+
+# The `-d` guard matters more than it looks. ansible-lint exits 0 on a path
+# that is not there, printing "Passed with production profile ... on 1 files",
+# so a renamed or moved tree turns this leg of the gate permanently green
+# without a word. Discovery refuses an empty file list for exactly this reason;
+# the Ansible half needs the same refusal rather than inheriting the linter's
+# opinion that nothing to check is the same as nothing wrong.
+ansible_tree='infrastructure/ansible'
+if [ ! -d "$ansible_tree" ]; then
+  printf 'FAIL ansible-lint\n'
+  printf '\n--- ansible-lint output ---\n'
+  printf '%s is not a directory. The Ansible tree moved; refusing to\n' "$ansible_tree"
+  printf 'report a clean run over a tree that was never read.\n\n'
+  failed+=(ansible-lint)
+elif command -v ansible-lint >/dev/null 2>&1; then
+  check ansible-lint ansible-lint "$ansible_tree"
+else
+  skip ansible-lint 'ansible-lint is not installed'
+fi
+
+# Each suite below is run as `bash <path>` rather than executed directly, so a
+# checkout that lost the executable bit — a zip export, a Windows clone, a
+# `docker cp` — still runs the tests instead of reporting them as failures
+# that have nothing to do with the code.
+
+# 005's harness. Skipped with a notice, not silently, if 005 has not landed.
+if [ -f bin/hermes-check-test ]; then
+  check hermes-check bash bin/hermes-check-test
+else
+  skip hermes-check 'bin/hermes-check-test is not present'
+fi
+
+# The OpenClaw config schema gate (SPEC finding D2). The check script decides
+# for itself what it can assert without `openclaw` on PATH and reports its own
+# skip notice for the validator layer, so bin/test does not second-guess it
+# here; outside the container, openclaw is normally absent.
+config_schema_check='.specs/006-lint-and-test-gate/tests/config-schema-check'
+if [ -f "$config_schema_check" ]; then
+  check config-schema bash "$config_schema_check"
+else
+  skip config-schema "${config_schema_check} is not present"
+fi
+
+# 006's own suite: the tests for this file. It drives bin/test, so it must not
+# be reached from inside a bin/test run — hence HERMES_GATE_TEST, which the
+# suite sets on the runs it starts.
+gate_tests='.specs/006-lint-and-test-gate/tests/run'
+if [ -n "${HERMES_GATE_TEST:-}" ]; then
+  skip gate-tests 'HERMES_GATE_TEST is set; this run is under test'
+elif [ -f "$gate_tests" ]; then
+  check gate-tests bash "$gate_tests"
+else
+  skip gate-tests "${gate_tests} is not present"
+fi
+
+entrypoint_blocker="$(entrypoint_contract_blocker)"
+if [ -n "$entrypoint_blocker" ]; then
+  skip entrypoint-contract "$entrypoint_blocker"
+else
+  check entrypoint-contract entrypoint_contract
+fi
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+
+printf '\n========================================\n'
+printf '%d passed, %d failed, %d skipped\n' \
+  "$passed" "${#failed[@]}" "${#skipped[@]}"
+
+# Skips are repeated at the end on purpose. One scrolled past the top of a
+# long run is a check that did not happen, and the operator has no other way
+# to notice.
+if [ "${#skipped[@]}" -gt 0 ]; then
+  printf '\nSkipped checks:\n'
+  printf '  %s\n' "${skipped[@]}"
+fi
+
+if [ "${#failed[@]}" -eq 0 ]; then
+  printf '\nbin/test: all checks passed.\n'
+  exit 0
+fi
+
+printf '\nFailing checks:\n'
+printf '  %s\n' "${failed[@]}"
+exit 1

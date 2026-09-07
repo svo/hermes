@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+#
+# PLAN.md task 9 / SPEC AC 4 / review finding E1:
+#
+#   "Given `docker run svanosselaer/hermes-builder`, when no entrypoint
+#    override is given, then bin/test runs — matching builder.pkr.hcl:6."
+#
+# E1 is the finding the whole spec grew out of: the image had declared
+# ENTRYPOINT ["./bin/test"] since it was written, and the file did not exist.
+# Nothing noticed, because every caller in the repository — build.sh among
+# them — passes `--entrypoint` and overrides it.
+#
+# The cases here hold the four halves of that contract together: the image
+# names bin/test, the repository has a bin/test, build.sh mounts the checkout
+# where the image expects to find it, and bin/test behaves the same way when
+# docker invokes it as when a developer does.
+#
+# That last one is the trap. builder.pkr.hcl declares
+# CMD ["/usr/sbin/sshd", "-D"] alongside the entrypoint, and docker appends CMD
+# to ENTRYPOINT — so the documented `docker run svanosselaer/hermes-builder`
+# arrives as `./bin/test /usr/sbin/sshd -D`. A gate with an ordinary argument
+# parser would reject those two words and fail *only in the container*, which
+# is the one place nobody runs it by hand.
+#
+# The live end-to-end version of this — a real `docker run` with no
+# --entrypoint — is bin/test's own `entrypoint-contract` check, which needs a
+# daemon and a built image. These cases are the part that can run anywhere, so
+# a contributor without docker still finds out when the contract is broken.
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+require_bin_test
+
+BUILDER_HCL="$(cat "${REPO_ROOT}/infrastructure/packer/builder.pkr.hcl")"
+BUILD_SH="$(cat "${REPO_ROOT}/build.sh")"
+
+# The builder image is built twice, once per architecture, from two `source`
+# blocks that each carry their own `changes`. A contract asserted on one of
+# them is a contract that holds on amd64 and not on arm64, so every count here
+# is 2 rather than "at least one".
+readonly BUILDER_SOURCES=2
+
+# One sandbox, three runs of the same gate over it: as docker invokes it, as
+# docker invokes it with the CMD appended, and as a developer invokes it from
+# somewhere else entirely. All three have to agree.
+SANDBOX="$(make_sandbox)"
+
+run_gate --dir "$SANDBOX"
+PLAIN_LINES="$(gate_check_lines)"
+PLAIN_STATUS="$GATE_STATUS"
+
+run_gate --dir "$SANDBOX" -- /usr/sbin/sshd -D
+ARGS_LINES="$(gate_check_lines)"
+ARGS_STATUS="$GATE_STATUS"
+ARGS_OUT="$GATE_OUT"
+
+run_gate --dir "$SANDBOX" --cwd "$TMP_ROOT"
+ELSEWHERE_LINES="$(gate_check_lines)"
+ELSEWHERE_STATUS="$GATE_STATUS"
+
+should_declare_bin_test_as_the_entrypoint_when_the_builder_image_is_defined() {
+  case_start "${FUNCNAME[0]}"
+  assert_contains "the entrypoint is ./bin/test" "$BUILDER_HCL" \
+    'ENTRYPOINT [\"./bin/test\"]'
+  assert_equals "one entrypoint per source block" "$BUILDER_SOURCES" \
+    "$(count_matching_lines "$BUILDER_HCL" 'ENTRYPOINT')"
+  case_end
+}
+
+should_declare_the_working_directory_when_the_builder_image_is_defined() {
+  case_start "${FUNCNAME[0]}"
+  # `./bin/test` is relative, so WORKDIR is half of the entrypoint. Without it
+  # the image would look for bin/test relative to / and E1 would come back in
+  # a form that reads like a missing file rather than a missing setting.
+  assert_contains "the working directory is /working-dir" "$BUILDER_HCL" \
+    'WORKDIR /working-dir'
+  assert_equals "one working directory per source block" "$BUILDER_SOURCES" \
+    "$(count_matching_lines "$BUILDER_HCL" 'WORKDIR')"
+  case_end
+}
+
+should_append_the_sshd_command_when_the_builder_image_is_defined() {
+  case_start "${FUNCNAME[0]}"
+  # This case exists to justify the two below it. If the CMD were ever
+  # removed, the trailing-argument cases would still pass and would look like
+  # defensive noise; while it is here, they are testing a real invocation.
+  assert_contains "the image carries a CMD" "$BUILDER_HCL" \
+    'CMD [\"/usr/sbin/sshd\", \"-D\"]'
+  assert_equals "one command per source block" "$BUILDER_SOURCES" \
+    "$(count_matching_lines "$BUILDER_HCL" 'CMD ')"
+  case_end
+}
+
+should_exist_and_be_executable_when_the_image_names_bin_test() {
+  case_start "${FUNCNAME[0]}"
+  # Finding E1, reduced to an assertion. `require_bin_test` has already ended
+  # the run if either half is false; this states it as a case so that the
+  # finding appears by name in the suite's output rather than only as a
+  # precondition nobody reads.
+  if [ ! -f "$BIN_TEST" ]; then
+    fail "bin/test does not exist, and builder.pkr.hcl declares it the entrypoint"
+  elif [ ! -x "$BIN_TEST" ]; then
+    fail "bin/test is not executable; docker cannot run it as an entrypoint"
+  fi
+  case_end
+}
+
+should_mount_the_repository_at_working_dir_when_build_sh_runs_the_builder() {
+  case_start "${FUNCNAME[0]}"
+  # The third leg. The image supplies the tools and the entrypoint; the
+  # checkout arrives as a bind mount, and it has to arrive at the path WORKDIR
+  # names or `./bin/test` resolves to nothing.
+  assert_contains "build.sh mounts the checkout at /working-dir" "$BUILD_SH" \
+    ':/working-dir'
+  assert_equals "both architecture branches mount it" "2" \
+    "$(count_matching_lines "$BUILD_SH" ':/working-dir')"
+  case_end
+}
+
+should_ignore_trailing_arguments_when_docker_appends_the_command() {
+  case_start "${FUNCNAME[0]}"
+  # The whole reason this file is not just five greps. `./bin/test` and
+  # `./bin/test /usr/sbin/sshd -D` are the same run, and the only way to say
+  # so is to compare two real runs: same checks, same results, same exit
+  # status.
+  assert_equals "exit status with the CMD appended" "$PLAIN_STATUS" "$ARGS_STATUS"
+  assert_equals "checks run with the CMD appended" "$PLAIN_LINES" "$ARGS_LINES"
+  case_end
+}
+
+should_not_treat_trailing_arguments_as_a_file_to_check() {
+  case_start "${FUNCNAME[0]}"
+  # The failure this would have produced, named explicitly: an argument taken
+  # as a path to lint. /usr/sbin/sshd is a binary that may not even exist in
+  # the container, and the resulting message would send the reader looking at
+  # sshd rather than at the gate.
+  assert_not_contains "the gate never mentions the appended command" \
+    "$ARGS_OUT" "/usr/sbin/sshd"
+  case_end
+}
+
+should_produce_the_same_result_when_invoked_from_another_directory() {
+  case_start "${FUNCNAME[0]}"
+  # SPEC AC 8 — a contributor's local run and CI's run of the same commit
+  # produce the same result. CI runs `./bin/test` from the mount point; a
+  # contributor runs it from wherever they are, and the gate resolves its root
+  # from BASH_SOURCE so both see the same tree.
+  assert_equals "exit status from another directory" "$PLAIN_STATUS" \
+    "$ELSEWHERE_STATUS"
+  assert_equals "checks run from another directory" "$PLAIN_LINES" \
+    "$ELSEWHERE_LINES"
+  case_end
+}
+
+should_print_one_marker_line_when_the_selfcheck_runs() {
+  case_start "${FUNCNAME[0]}"
+  # HERMES_TEST_SELFCHECK is what lets the container smoke test prove the
+  # image runs ./bin/test without starting a second full gate inside the
+  # first. It has to be a short-circuit rather than a flag consulted later,
+  # so the case insists on one line and nothing else.
+  local out status
+  out="$(HERMES_TEST_SELFCHECK=1 "$BIN_TEST" 2>&1)"
+  status=$?
+  assert_equals "exit status" "0" "$status"
+  # Emptiness is asserted separately: a command substitution that captured
+  # nothing still counts as one line once it is printed back, so the line
+  # count alone would accept silence as a marker.
+  if [ -z "$out" ]; then
+    fail "the selfcheck printed nothing; there is no marker to grep for"
+  fi
+  assert_equals "lines printed" "1" "$(count_matching_lines "$out" '^')"
+  assert_equals "no check ran" "0" \
+    "$(count_matching_lines "$out" '^\(PASS\|FAIL\|SKIP\) ')"
+  case_end
+}
+
+should_ignore_trailing_arguments_when_the_selfcheck_runs() {
+  case_start "${FUNCNAME[0]}"
+  # The selfcheck is what the container actually executes, so it meets the
+  # appended CMD before anything else does. If argument handling were ever
+  # added above the short-circuit, this is the case that would catch it.
+  local plain args plain_status args_status
+  plain="$(HERMES_TEST_SELFCHECK=1 "$BIN_TEST" 2>&1)"
+  plain_status=$?
+  args="$(HERMES_TEST_SELFCHECK=1 "$BIN_TEST" /usr/sbin/sshd -D 2>&1)"
+  args_status=$?
+  assert_equals "exit status with the CMD appended" "$plain_status" "$args_status"
+  assert_equals "output with the CMD appended" "$plain" "$args"
+  case_end
+}
+
+should_declare_bin_test_as_the_entrypoint_when_the_builder_image_is_defined
+should_declare_the_working_directory_when_the_builder_image_is_defined
+should_append_the_sshd_command_when_the_builder_image_is_defined
+should_exist_and_be_executable_when_the_image_names_bin_test
+should_mount_the_repository_at_working_dir_when_build_sh_runs_the_builder
+should_ignore_trailing_arguments_when_docker_appends_the_command
+should_not_treat_trailing_arguments_as_a_file_to_check
+should_produce_the_same_result_when_invoked_from_another_directory
+should_print_one_marker_line_when_the_selfcheck_runs
+should_ignore_trailing_arguments_when_the_selfcheck_runs
+
+report_totals "entrypoint-contract-test"

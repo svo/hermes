@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+#
+# PLAN.md § Testing Strategy — Discovery check:
+#
+#   "assert bin/test finds hermes-check and bin/create-image (extensionless).
+#    A glob-based discovery would silently skip the file with all five
+#    findings."
+#
+# That sentence is the whole reason this file exists. `hermes-check`,
+# `bin/test`, `bin/create-image`, `bin/setup-image-requirements` and every
+# script under `.specs/*/tests/` carry no `.sh` suffix. A gate written as
+# `shellcheck **/*.sh` would have passed on the tree that had five live
+# findings in it, and would have kept passing for as long as nobody looked.
+#
+# bin/test exposes no "print what you discovered" mode, and it should not: a
+# list nobody reads is not evidence. So discovery is asserted through the only
+# thing an operator sees — a planted violation in each file that should be
+# discovered, and the gate going red naming it.
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+require_bin_test
+
+# Every path here is relative to the tree root, and each is unambiguous in the
+# gate's output. `bin/test` is deliberately absent from this list even though
+# it is probed: the string "bin/test" can appear in the gate's own chatter, so
+# asserting on it would prove nothing. It is covered by the finding count
+# instead — see should_lint_itself_when_discovering.
+PROBED_PATHS=(
+  ".specs/005-hermes-check-correctness/tests/stub-gog"
+  "bin/create-image"
+  "bin/hermes-check-test"
+  "bin/setup-image-requirements"
+  "build.sh"
+  "infrastructure/ansible/roles/openclaw/files/entrypoint.sh"
+  "infrastructure/ansible/roles/openclaw/files/hermes-check"
+)
+
+# One SC2086 for each of the seven paths above plus bin/test itself.
+EXPECTED_FINDINGS=8
+
+# Build the sandbox once. Every case below reads the same run, because they are
+# seven questions about one act of discovery rather than seven acts.
+SANDBOX="$(make_sandbox)"
+
+# make_sandbox removes the real bin/hermes-check-test, which costs half a
+# minute to run and reports on 005 rather than on discovery. A stand-in goes
+# back at the same path carrying the probe: what the harness *does* is 005's
+# business, and what this case asks is only whether a file at an extensionless
+# path gets linted at all. The stand-in defines a function and ends, so the
+# gate's hermes-check check runs it, sees a zero exit, and moves on.
+write_probe_script "${SANDBOX}/bin/hermes-check-test"
+
+for probed in "${PROBED_PATHS[@]}"; do
+  if [ "$probed" != "bin/hermes-check-test" ]; then
+    plant_shellcheck_violation "${SANDBOX}/${probed}"
+  fi
+done
+plant_shellcheck_violation "${SANDBOX}/bin/test"
+
+# Three directories a repository-wide walk will meet and must not enter. .git
+# holds sample hooks with shebangs in every clone; node_modules is not checked
+# in here but arrives the moment anything installs a JavaScript dependency, and
+# a gate that lints a dependency tree is a gate nobody can keep green.
+EXCLUDED_PATHS=(
+  ".git/hooks/pre-commit"
+  ".vagrant/provisioners/probe-script"
+  "node_modules/.bin/probe-script"
+)
+for excluded in "${EXCLUDED_PATHS[@]}"; do
+  write_probe_script "${SANDBOX}/${excluded}"
+done
+
+run_gate --dir "$SANDBOX"
+
+should_fail_the_shellcheck_check_when_a_discovered_script_has_a_finding() {
+  case_start "${FUNCNAME[0]}"
+  assert_equals "shellcheck check result" "FAIL" "$(gate_result shellcheck)"
+  if [ "$GATE_STATUS" -eq 0 ]; then
+    fail "the gate exited zero with a planted violation in eight scripts"
+  fi
+  case_end
+}
+
+should_lint_an_extensionless_script_when_it_has_a_bash_shebang() {
+  case_start "${FUNCNAME[0]}"
+  local path
+  for path in \
+    "infrastructure/ansible/roles/openclaw/files/hermes-check" \
+    "bin/create-image" \
+    "bin/setup-image-requirements" \
+    "bin/hermes-check-test" \
+    ".specs/005-hermes-check-correctness/tests/stub-gog"
+  do
+    assert_contains "the gate names ${path}" "$GATE_OUT" "$path"
+  done
+  case_end
+}
+
+should_lint_a_suffixed_script_when_it_has_a_bash_shebang() {
+  case_start "${FUNCNAME[0]}"
+  # The control. If these two were the only ones reported, discovery would be
+  # a glob and the case above would be the one that caught it.
+  assert_contains "the gate names entrypoint.sh" "$GATE_OUT" \
+    "infrastructure/ansible/roles/openclaw/files/entrypoint.sh"
+  assert_contains "the gate names build.sh" "$GATE_OUT" "build.sh"
+  case_end
+}
+
+should_lint_itself_when_discovering() {
+  case_start "${FUNCNAME[0]}"
+  # bin/test is a bash script in the tree it lints, so it has to hold itself to
+  # the same standard — a gate exempt from its own rules is where the next
+  # unreviewed script goes.
+  #
+  # Its path cannot be asserted directly: "bin/test" is a string the gate
+  # prints about itself — the discovered-script count, for one — so a match
+  # would prove nothing. The finding count settles it instead. Every finding is
+  # one planted SC2086 and the tree is otherwise clean, so eight findings for
+  # eight probes means the eighth file, bin/test, was read.
+  #
+  # Counting the rule code rather than parsing shellcheck's layout keeps this
+  # true whether the gate asks for the default format or `-f gcc`; both name
+  # the code once per finding. The default format then adds a "For more
+  # information" footer carrying the same code, which would count as a ninth
+  # finding, so the wiki links come out first. Without that line the case
+  # reports 9 for 8 probes and sends its reader looking for a file that was
+  # never planted.
+  local findings
+  findings="$(printf '%s\n' "$GATE_OUT" | grep 'SC2086' | grep -vc 'shellcheck.net' || true)"
+  assert_equals "one SC2086 per probed script" "$EXPECTED_FINDINGS" "$findings"
+  case_end
+}
+
+should_not_descend_into_vcs_and_dependency_directories_when_discovering() {
+  case_start "${FUNCNAME[0]}"
+  local path
+  for path in "${EXCLUDED_PATHS[@]}"; do
+    assert_not_contains "the gate skips ${path}" "$GATE_OUT" "$path"
+  done
+  case_end
+}
+
+should_visit_scripts_in_a_deterministic_order_when_discovering() {
+  case_start "${FUNCNAME[0]}"
+  # A gate whose output reorders itself between runs cannot be diffed, and a
+  # discovery that reorders itself is usually one that will eventually drop a
+  # file. Sorted order is the cheapest way to have both.
+  #
+  # Which sorted order, though, depends on the locale the gate happens to run
+  # under: LC_ALL=C compares bytes, so `.specs/` sorts first, while a UTF-8
+  # collation ignores the leading dot and sorts it under `s`. Both are sorted;
+  # neither is wrong. Pinning one here would make this case a statement about
+  # the developer's environment rather than about the gate, so either is
+  # accepted and the trap is written down instead.
+  local path line pairs="" actual expected_c expected_locale
+  for path in "${PROBED_PATHS[@]}"; do
+    line="$(first_output_line "$path")"
+    if [ -z "$line" ]; then
+      fail "no output line mentions ${path}; ordering cannot be read"
+      case_end
+      return
+    fi
+    pairs="${pairs}${line} ${path}"$'\n'
+  done
+
+  actual="$(printf '%s' "$pairs" | sort -n | awk '{print $2}')"
+  expected_c="$(printf '%s\n' "${PROBED_PATHS[@]}" | LC_ALL=C sort)"
+  expected_locale="$(printf '%s\n' "${PROBED_PATHS[@]}" | sort)"
+
+  if [ "$actual" != "$expected_c" ] && [ "$actual" != "$expected_locale" ]; then
+    fail "discovery order is not sorted under either collation"
+    printf '       actual:\n%s\n' "$actual" >&2
+    printf '       expected (LC_ALL=C):\n%s\n' "$expected_c" >&2
+    printf '       expected (ambient locale):\n%s\n' "$expected_locale" >&2
+  fi
+  case_end
+}
+
+# `bash -n` and `shellcheck` are two checks over one discovery. Proving the
+# linter reads a file says nothing about whether the parser does, and the two
+# are easy to wire to different file lists by accident, so this asks the same
+# question of `bash -n` using the one defect only a parser can see.
+#
+# The syntax error goes into bin/setup-image-requirements: extensionless, and
+# nothing in the gate executes it, so a case that plants an unparseable file
+# there cannot take the run down with it.
+should_parse_every_discovered_script_when_bash_n_runs() {
+  case_start "${FUNCNAME[0]}"
+  local sandbox
+  sandbox="$(make_sandbox)"
+  # An `if` with no `fi`. Nothing subtler is needed: the file has to stop
+  # parsing, and a defect a reader can see in one line keeps the case about
+  # discovery rather than about bash grammar.
+  printf '\nif true; then\n' >> "${sandbox}/bin/setup-image-requirements"
+
+  run_gate --dir "$sandbox"
+  assert_equals "bash-n check result" "FAIL" "$(gate_result bash-n)"
+  assert_contains "the gate names the unparseable script" "$GATE_OUT" \
+    "bin/setup-image-requirements"
+  if [ "$GATE_STATUS" -eq 0 ]; then
+    fail "the gate exited zero with an unparseable script in the tree"
+  fi
+  case_end
+}
+
+should_fail_the_shellcheck_check_when_a_discovered_script_has_a_finding
+should_lint_an_extensionless_script_when_it_has_a_bash_shebang
+should_lint_a_suffixed_script_when_it_has_a_bash_shebang
+should_lint_itself_when_discovering
+should_not_descend_into_vcs_and_dependency_directories_when_discovering
+should_visit_scripts_in_a_deterministic_order_when_discovering
+should_parse_every_discovered_script_when_bash_n_runs
+
+report_totals "discovery-test"

@@ -1,0 +1,715 @@
+#!/usr/bin/env bash
+#
+# Does the configuration this container writes survive contact with the schema
+# the gateway reads it back through?
+#
+# Finding D2: every OpenClaw key in `entrypoint.sh` is hand-written into a
+# strict schema and nothing ever checked one. An upstream rename therefore
+# turned a working image into one that bricked on restart. 004 added the phase 3
+# `openclaw config validate` gate so the container catches that at startup; this
+# check moves the same question one step earlier, to build time, where it costs
+# a red pipeline instead of a dead assistant.
+#
+#   .specs/006-lint-and-test-gate/tests/config-schema-check
+#
+# SPEC Open Question 3 asked whether to check in a representative fixture or to
+# generate one. This is the generated answer: the real `entrypoint.sh` is run,
+# unmodified, against stub `openclaw` and `gog` binaries and a wholly synthetic
+# environment, and the file it produces is what gets judged. A checked-in
+# fixture would be simpler and would start drifting from the entrypoint the day
+# after it was written — and a fixture that drifts is a gate that passes while
+# the container fails, which is the exact shape of the problem being fixed.
+#
+# What it asserts, in order:
+#   1. the entrypoint completed and wrote ~/.openclaw/openclaw.json
+#   2. the file is valid JSON
+#   3. every key the entrypoint sets is present and carries the value it was
+#      given — the B4c class, where `JSON.stringify` drops an `undefined` and
+#      the key silently vanishes, as ANTHROPIC_API_KEY once did
+#   4. nothing else changed: a key the entrypoint grew but this check does not
+#      name is a failure here, so the table below cannot quietly fall behind
+#   5. with a real `openclaw` present, the validator accepts it
+#   6. with a real `openclaw` present, a copy with one unrecognised key injected
+#      is REJECTED, and the validator names the key. A validator that only ever
+#      passed would prove nothing, which is how this repository ended up with a
+#      lint gate that was never wired to anything.
+#
+# 5 and 6 need a real `openclaw`. The builder image gets one from
+# `roles/openclaw-cli`, added alongside this check for exactly that reason —
+# without it CI would have printed a green `config-schema` for a schema nothing
+# consulted, which is how the `tools.loopDetection` break reached an image in
+# the first place. A developer machine usually has no `openclaw`, and neither
+# does a builder image published before that role existed, so the skip path is
+# real and says so on stderr in the `SKIP <name> (<reason>)` shape
+# `bin/hermes-check-test` already uses. Silence would be indistinguishable from
+# a pass.
+#
+# Nothing here reaches the network or touches a credential: the two binaries
+# the entrypoint calls are stubs, every value in the synthetic environment is
+# invented below, and `openclaw config validate` reads one file against a schema
+# it carries. Nothing is written outside a private temporary directory either —
+# and the real $HOME is fingerprinted before and after to prove that last part
+# rather than assert it.
+#
+#   ENTRYPOINT  point the check at another copy of the entrypoint, which is how
+#               a case is shown to fail before the behaviour it guards exists.
+#
+# 005's `tests/harness.sh` is not sourced. It builds a hermes-check-specific
+# sandbox as a side effect of being loaded — its own temp root, its own stubs,
+# its own EXIT trap — and exports HERMES_CHECK. Sourcing it here would stand up
+# a second unused sandbox on every run and tie this gate to that suite's fixture
+# protocol; the few helpers borrowed from it are restated instead.
+
+set -uo pipefail
+
+tests_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${tests_dir}/../../.." && pwd)"
+ENTRYPOINT="${ENTRYPOINT:-${repo_root}/infrastructure/ansible/roles/openclaw/files/entrypoint.sh}"
+
+# The whole startup path against instantaneous stubs is a fraction of a second.
+# These are generous enough that a loaded CI runner does not go red, and small
+# enough that a hang is reported as a failure instead of stalling the pipeline.
+ENTRYPOINT_TIMEOUT="${ENTRYPOINT_TIMEOUT:-60}"
+REGISTRAR_TICKS=100
+REGISTRAR_TICK_SECONDS=0.1
+
+# The environment the container would be given, with every value invented here.
+# It is passed to the entrypoint and to the assertions below from this one
+# definition, so that "the config says what the environment said" is a
+# comparison against the same string rather than against a second copy of it.
+#
+# Both channels are configured on purpose. `channels.telegram` and
+# `channels.slack` are the largest blocks of hand-written keys in the file and
+# the ones an upstream rename is most likely to touch, so a run that left them
+# unset would validate the least interesting half of the config.
+#
+# HERMES_OWNER is deliberately absent: leaving it out exercises the derivation
+# from the channel allowlists, which is the path a real deployment takes.
+sandbox_env=(
+  ANTHROPIC_API_KEY='sk-ant-stub-not-a-real-key'
+  HERMES_VIBE='stub vibe'
+  HERMES_TONE='stub tone'
+  HERMES_USER_NAME='Stub User'
+  HERMES_TIMEZONE='Europe/Amsterdam'
+  HERMES_LOCALE='en-GB'
+  HERMES_CRON_SCHEDULE='30 6 * * *'
+  HERMES_QUIET_HOURS_START='22:00'
+  HERMES_QUIET_HOURS_END='07:00'
+  TELEGRAM_BOT_TOKEN='0000000:stub-telegram-token'
+  TELEGRAM_ALLOW_FROM='100000001, 100000002'
+  SLACK_BOT_TOKEN='xoxb-stub-slack-bot-token'
+  SLACK_APP_TOKEN='xapp-stub-slack-app-token'
+  SLACK_ALLOW_FROM='U0STUBUSER1'
+  SLACK_ALLOW_CHANNELS='C0STUBCHAN1,C0STUBCHAN2'
+  GOG_GOOGLE_ACCOUNT='stub@example.com'
+  GOG_SERVICE_ACCOUNT_KEY='{"type":"service_account","private_key":"stub"}'
+  HERMES_BRIEFING_CHANNEL='slack'
+  HERMES_BRIEFING_TO='channel:C0STUBCHAN1'
+  # The briefing registrar is forked as a subshell before `exec`, and these are
+  # what stop it retrying for minutes against stubs that answer instantly.
+  # entrypoint.sh validates all three, so they have to be positive integers.
+  HERMES_CRON_READY_ATTEMPTS='1'
+  HERMES_CRON_REGISTER_ATTEMPTS='1'
+  HERMES_CRON_CALL_TIMEOUT='1'
+)
+
+TESTS_PASSED=0
+TESTS_FAILED=0
+TESTS_SKIPPED=0
+CURRENT_CASE=""
+CASE_FAILURES=0
+
+case_start() {
+  CURRENT_CASE="$1"
+  CASE_FAILURES=0
+}
+
+case_end() {
+  if [ "$CASE_FAILURES" -eq 0 ]; then
+    printf 'PASS %s\n' "$CURRENT_CASE"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+}
+
+fail() {
+  if [ "$CASE_FAILURES" -eq 0 ]; then
+    printf 'FAIL %s\n' "$CURRENT_CASE" >&2
+  fi
+  CASE_FAILURES=$((CASE_FAILURES + 1))
+  printf '     %s\n' "$1" >&2
+}
+
+# Every line of a multi-line detail, indented under the failure it belongs to.
+# A validator message or a list of offending keys is the whole value of a
+# failure here, so it is passed through rather than summarised.
+fail_detail() {
+  printf '%s\n' "$1" | sed 's/^/       /' >&2
+}
+
+assert_equals() {
+  # assert_equals <what> <expected> <actual>
+  if [ "$2" != "$3" ]; then
+    fail "$1"
+    printf '       expected: %s\n' "$2" >&2
+    printf '       actual:   %s\n' "$3" >&2
+  fi
+}
+
+assert_contains() {
+  # assert_contains <what> <haystack> <needle>
+  case "$2" in
+    *"$3"*) ;;
+    *)
+      fail "$1"
+      printf '       expected to contain: %s\n' "$3" >&2
+      ;;
+  esac
+}
+
+skip() {
+  # skip <name> <reason>. stderr, in the shape bin/hermes-check-test uses, so
+  # that a harness which shows only failing output still has one greppable line
+  # saying what was not checked.
+  TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
+  printf 'SKIP %s (%s)\n' "$1" "$2" >&2
+}
+
+# A missing tool is a skip, not a failure — the rule bin/test states for both
+# of its linters, and this check is subject to it too. Exiting 1 here made the
+# whole gate red on a machine that was missing `node`, which no change to the
+# repository could turn green; and `timeout` is coreutils on
+# Linux but not on a stock macOS, which the README's local-run story allows.
+# The builder image has both, so CI never takes this path.
+for tool in node timeout; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    skip "config-schema-check" "${tool} is not installed; the entrypoint was not run"
+    printf '\nconfig-schema-check: 0 passed, 0 failed, %d skipped\n' "$TESTS_SKIPPED"
+    exit 0
+  fi
+done
+
+if [ ! -f "$ENTRYPOINT" ]; then
+  printf 'entrypoint not found at %s\n' "$ENTRYPOINT" >&2
+  exit 1
+fi
+
+# Resolved before PATH is rewritten, because the sandbox deliberately hides it.
+# Empty means the validator layer is skipped rather than faked.
+#
+#   OPENCLAW_BIN  name or path of the validator, the way ENTRYPOINT above names
+#                 the file under test. Point it at another build to check a
+#                 config against a different schema version — which is the
+#                 question this check exists to ask — or at a path that does
+#                 not exist to exercise the skip.
+#
+# skip-path-test needs that last one. Forcing the skip by deleting openclaw's
+# directory from PATH was the first attempt and was wrong: npm's global prefix
+# here is /usr, so removing it took node, timeout and git with it, and the
+# check skipped for a missing `node` instead. A test that has to lobotomise
+# PATH to reach a branch is testing the wrong seam.
+OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
+real_openclaw="$(command -v "$OPENCLAW_BIN" 2>/dev/null || true)"
+
+sandbox="$(mktemp -d)"
+cleanup() { rm -rf "$sandbox"; }
+trap cleanup EXIT
+
+bin_dir="${sandbox}/bin"
+home_dir="${sandbox}/home"
+mkdir -p "$bin_dir" "$home_dir"
+cp "${tests_dir}/stub-openclaw" "${bin_dir}/openclaw"
+cp "${tests_dir}/stub-gog" "${bin_dir}/gog"
+chmod +x "${bin_dir}/openclaw" "${bin_dir}/gog"
+
+run_output="${sandbox}/entrypoint.out"
+openclaw_log="${sandbox}/openclaw-argv.log"
+gog_log="${sandbox}/gog-argv.log"
+config_path="${home_dir}/.openclaw/openclaw.json"
+seed_path="${home_dir}/.stub-openclaw/seed.json"
+
+# Existence, mtime and size of the two paths a mis-scoped run would touch. The
+# entrypoint resolves everything through $HOME, so a run that leaked would leak
+# here; comparing the fingerprint afterwards turns "it does not touch the real
+# home" from a claim into a result.
+real_home_fingerprint() {
+  local target
+  for target in "${HOME}/.openclaw" "${HOME}/.openclaw/openclaw.json"; do
+    if [ -e "$target" ]; then
+      printf '%s %s\n' "$target" "$(stat -c '%Y %s' "$target")"
+    else
+      printf '%s absent\n' "$target"
+    fi
+  done
+}
+
+home_before="$(real_home_fingerprint)"
+
+# `env -i` rather than a few `unset`s: the entrypoint reads a dozen optional
+# variables, and one of them already set in a developer's shell would quietly
+# change what is being tested. PATH is rebuilt with the stubs first and the
+# standard directories after, so `node`, `sed` and `timeout` resolve and any
+# real `openclaw` or `gog` cannot.
+#
+# `timeout` is inside `env` so it inherits the scrubbed environment, and it
+# bounds only the foreground process: `exec openclaw gateway` is what the
+# entrypoint ends on, and the stub returns from it immediately.
+run_entrypoint() {
+  env -i \
+    HOME="$home_dir" \
+    PATH="${bin_dir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    TERM=dumb \
+    OPENCLAW_ARGV_LOG="$openclaw_log" \
+    GOG_ARGV_LOG="$gog_log" \
+    "${sandbox_env[@]}" \
+    timeout "$ENTRYPOINT_TIMEOUT" bash "$ENTRYPOINT" >"$run_output" 2>&1
+}
+
+# The briefing registrar is a background subshell, so the foreground can finish
+# while it is still writing. Polling for its terminal line — rather than
+# sleeping a fixed interval and hoping — keeps the run deterministic and keeps a
+# stray process from outliving the temporary directory it is writing into.
+wait_for_registrar() {
+  local tick=0
+  while [ "$tick" -lt "$REGISTRAR_TICKS" ]; do
+    if grep -qE '^cron: (registered |giving up|.* already registered)' "$run_output"; then
+      return 0
+    fi
+    sleep "$REGISTRAR_TICK_SECONDS"
+    tick=$((tick + 1))
+  done
+  return 1
+}
+
+run_entrypoint
+run_status=$?
+registrar_status=0
+wait_for_registrar || registrar_status=$?
+
+home_after="$(real_home_fingerprint)"
+
+# --------------------------------------------------------------------------
+# The keys entrypoint.sh writes, restated once, in a form the assertions below
+# can read. Kept in one heredoc rather than three so that the value table, the
+# emptiness sweep and the coverage diff cannot disagree about what a key path
+# means.
+#
+#   ASSERT_SECTION  values | emptiness | coverage
+#   CONFIG_PATH     the configuration the entrypoint produced
+#   SEED_PATH       the configuration onboarding handed it, before any mutation
+#
+# Prints one line per problem and exits non-zero when there is one.
+# --------------------------------------------------------------------------
+assert_program() {
+  cat <<'ASSERTJS'
+'use strict';
+
+const fs = require('fs');
+const env = process.env;
+const section = env.ASSERT_SECTION;
+const problems = [];
+
+const readJson = (path) => JSON.parse(fs.readFileSync(path, 'utf8'));
+
+let config;
+try {
+  config = readJson(env.CONFIG_PATH);
+} catch (error) {
+  console.log('the generated config is not valid JSON: ' + error.message);
+  process.exit(1);
+}
+
+const entries = (value) => (value || '').split(',').map((s) => s.trim()).filter(Boolean);
+
+// Every key the entrypoint sets, with the value it must carry. Values taken
+// from process.env are the ones that go missing when a variable is unset:
+// JSON.stringify drops an undefined property entirely, so the failure is a
+// key that is not there rather than a key that is wrong.
+//
+// No key path here contains a '.', so splitting on it is safe.
+const slackChannels = {};
+for (const id of entries(env.SLACK_ALLOW_CHANNELS)) {
+  slackChannels[id] = { enabled: true, requireMention: true };
+}
+
+const expected = new Map([
+  ['agents.defaults.skipBootstrap', true],
+  ['agents.defaults.model', 'anthropic/claude-haiku-4-5'],
+  ['agents.defaults.heartbeat.every', '59m'],
+  ['agents.defaults.heartbeat.target', 'owner'],
+  ['agents.defaults.heartbeat.model', 'anthropic/claude-haiku-4-5'],
+  ['agents.defaults.heartbeat.lightContext', true],
+  ['agents.defaults.heartbeat.isolatedSession', true],
+  // Swapped on purpose: the heartbeat is active between the end of quiet hours
+  // and their start. A run that read these straight through would pass a config
+  // that only ever spoke while the user was asleep.
+  ['agents.defaults.heartbeat.activeHours.start', env.HERMES_QUIET_HOURS_END],
+  ['agents.defaults.heartbeat.activeHours.end', env.HERMES_QUIET_HOURS_START],
+  ['agents.defaults.heartbeat.activeHours.timezone', env.HERMES_TIMEZONE],
+  ['agents.defaults.compaction.model', 'anthropic/claude-haiku-4-5'],
+  // The whole map, so that the model onboarding seeded is shown to be gone
+  // rather than left beside the one the container actually uses.
+  ['agents.defaults.models', {
+    'anthropic/claude-haiku-4-5': { params: { cacheRetention: 'long' } }
+  }],
+  // Only enabled. warningThreshold, criticalThreshold and
+  // globalCircuitBreakerThreshold were removed from the entrypoint because the
+  // schema rejects them; this list is what made that removal a deliberate,
+  // stated change rather than a silent one, and it is what will notice if they
+  // ever come back.
+  ['tools.loopDetection.enabled', true],
+  ['tools.profile', 'full'],
+  ['tools.deny', ['gateway']],
+  ['tools.exec.security', 'full'],
+  ['cron.enabled', true],
+  // The key that vanished. It is a copy of the variable, so an entrypoint that
+  // stopped exporting it would write nothing here and the container would come
+  // back up with no credential and exit zero.
+  ['env.vars.ANTHROPIC_API_KEY', env.ANTHROPIC_API_KEY],
+  // Derived from the channel allowlists in phase 1, Telegram first, because
+  // HERMES_OWNER is unset. Without it the heartbeat has no route.
+  ['commands.ownerAllowFrom', [
+    ...entries(env.TELEGRAM_ALLOW_FROM).map((id) => 'telegram:' + id),
+    ...entries(env.SLACK_ALLOW_FROM).map((id) => 'slack:' + id)
+  ]],
+  ['channels.telegram.enabled', true],
+  ['channels.telegram.botToken', env.TELEGRAM_BOT_TOKEN],
+  ['channels.telegram.dmPolicy', 'allowlist'],
+  ['channels.telegram.allowFrom', entries(env.TELEGRAM_ALLOW_FROM)],
+  ['channels.telegram.groups', { '*': { requireMention: true } }],
+  ['channels.slack.enabled', true],
+  ['channels.slack.mode', 'socket'],
+  ['channels.slack.botToken', env.SLACK_BOT_TOKEN],
+  ['channels.slack.appToken', env.SLACK_APP_TOKEN],
+  ['channels.slack.dmPolicy', 'allowlist'],
+  ['channels.slack.allowFrom', entries(env.SLACK_ALLOW_FROM)],
+  ['channels.slack.groupPolicy', 'allowlist'],
+  ['channels.slack.channels', slackChannels]
+]);
+
+// Checked for shape rather than for content: the heartbeat prompt is prose that
+// 003 and 001 both own, and pinning it here would make an edit to the wording a
+// failure of the schema gate.
+const nonEmptyStrings = ['agents.defaults.heartbeat.prompt'];
+
+// Deleted by the entrypoint. `env.ANTHROPIC_API_KEY` is the misspelling that
+// preceded `env.vars.ANTHROPIC_API_KEY`, and a container upgrading from an
+// older image carries one.
+const absent = ['tools.allow', 'env.ANTHROPIC_API_KEY', 'agent', 'heartbeat'];
+
+const lookup = (root, path) => {
+  let node = root;
+  for (const key of path.split('.')) {
+    if (node === null || typeof node !== 'object' ||
+        !Object.prototype.hasOwnProperty.call(node, key)) {
+      return { found: false };
+    }
+    node = node[key];
+  }
+  return { found: true, value: node };
+};
+
+const show = (value) => JSON.stringify(value);
+
+if (section === 'values') {
+  for (const [path, value] of expected) {
+    const hit = lookup(config, path);
+    if (!hit.found) {
+      problems.push('missing key ' + path + ' (expected ' + show(value) + ')');
+    } else if (show(hit.value) !== show(value)) {
+      problems.push('wrong value at ' + path +
+        ': expected ' + show(value) + ', got ' + show(hit.value));
+    }
+  }
+  for (const path of nonEmptyStrings) {
+    const hit = lookup(config, path);
+    if (!hit.found || typeof hit.value !== 'string' || hit.value.length === 0) {
+      problems.push('expected a non-empty string at ' + path);
+    }
+  }
+  for (const path of absent) {
+    if (lookup(config, path).found) {
+      problems.push('key that should have been deleted is still present: ' + path);
+    }
+  }
+}
+
+// Every leaf, with an empty object or array counted as a leaf so that a key
+// emptied rather than removed is still visible.
+const leaves = (node, prefix, out) => {
+  const isContainer = node !== null && typeof node === 'object';
+  if (isContainer && Object.keys(node).length > 0 && !Array.isArray(node)) {
+    for (const [key, value] of Object.entries(node)) {
+      leaves(value, prefix === '' ? key : prefix + '.' + key, out);
+    }
+    return out;
+  }
+  out.set(prefix, show(node));
+  return out;
+};
+
+if (section === 'emptiness') {
+  // The B4c signature at its most general. `undefined` cannot survive
+  // JSON.stringify, so it shows up as a key that is gone — caught by the value
+  // table above — but a variable that was set to nothing reaches the file as
+  // null or as an empty string, and either one is a key that is present,
+  // schema-valid, and useless.
+  //
+  // An empty container is the same failure one level up: `env.vars = {}` is
+  // what is left behind when the only key that was going to be put in it was
+  // undefined, and it is the shape the vanished ANTHROPIC_API_KEY actually
+  // took. Nothing this entrypoint writes is legitimately empty, so an empty
+  // object or list is always the residue of something that went missing.
+  for (const [path, encoded] of leaves(config, '', new Map())) {
+    if (encoded === 'null') {
+      problems.push('null value at ' + path);
+    } else if (encoded === '""') {
+      problems.push('empty string at ' + path);
+    } else if (encoded === '[]' || encoded === '{}') {
+      problems.push('empty container at ' + path);
+    }
+  }
+  // Not a config key at any spelling: the entrypoint hands the service-account
+  // key to `gog` and must never persist it here.
+  if (env.GOG_SERVICE_ACCOUNT_KEY &&
+      show(config).includes(env.GOG_SERVICE_ACCOUNT_KEY)) {
+    problems.push('the gog service-account key was written into the config');
+  }
+}
+
+if (section === 'coverage') {
+  // What the entrypoint changed about the configuration it was given, against
+  // what this check claims it changes. A key added, removed or altered that no
+  // entry above names is reported here — so the table cannot fall behind the
+  // entrypoint without saying so. Extending the entrypoint means extending the
+  // table, which is the point: an unvalidated key is finding D2.
+  const seed = leaves(readJson(env.SEED_PATH), '', new Map());
+  const produced = leaves(config, '', new Map());
+  const covered = [...expected.keys(), ...nonEmptyStrings, ...absent];
+  const accountedFor = (path) =>
+    covered.some((entry) => path === entry || path.startsWith(entry + '.'));
+
+  const changed = [];
+  for (const [path, encoded] of produced) {
+    if (!seed.has(path)) {
+      changed.push(['added', path]);
+    } else if (seed.get(path) !== encoded) {
+      changed.push(['changed', path]);
+    }
+  }
+  for (const path of seed.keys()) {
+    if (!produced.has(path)) {
+      changed.push(['removed', path]);
+    }
+  }
+
+  for (const [how, path] of changed) {
+    if (!accountedFor(path)) {
+      problems.push(how + ' key that no assertion accounts for: ' + path +
+        ' — add it to the expected table in config-schema-check');
+    }
+  }
+}
+
+for (const problem of problems) {
+  console.log(problem);
+}
+process.exit(problems.length === 0 ? 0 : 1);
+ASSERTJS
+}
+
+# Runs one section of the program above and fails the current case with its
+# output, which is the list of problems it found.
+assert_section() {
+  local section="$1" what="$2" output
+  output="$(env "${sandbox_env[@]}" \
+    ASSERT_SECTION="$section" \
+    CONFIG_PATH="$config_path" \
+    SEED_PATH="$seed_path" \
+    node -e "$(assert_program)" 2>&1)"
+  if [ -n "$output" ]; then
+    fail "$what"
+    fail_detail "$output"
+  fi
+}
+
+# --------------------------------------------------------------------------
+# Cases
+# --------------------------------------------------------------------------
+
+should_write_a_config_when_the_entrypoint_runs_against_stubs() {
+  case_start "${FUNCNAME[0]}"
+  local log=''
+  if [ -f "$openclaw_log" ]; then
+    log="$(cat "$openclaw_log")"
+  fi
+  assert_equals "entrypoint exit status" "0" "$run_status"
+  if [ ! -f "$config_path" ]; then
+    fail "no configuration at ${config_path}"
+  fi
+  assert_contains "phase 3 was reached" "$(cat "$run_output")" 'config: validated'
+  # The last thing the entrypoint does. Reaching it means every write above it
+  # happened, which is a stronger statement than the config file existing.
+  assert_contains "the gateway was exec'd" "$log" 'INVOCATION [gateway]'
+  if [ "$CASE_FAILURES" -ne 0 ]; then
+    fail_detail "$(cat "$run_output")"
+  fi
+  case_end
+}
+
+should_write_parseable_json_when_the_entrypoint_completes() {
+  case_start "${FUNCNAME[0]}"
+  local output
+  if ! output="$(CONFIG_PATH="$config_path" node -e \
+      'JSON.parse(require("fs").readFileSync(process.env.CONFIG_PATH, "utf8"))' 2>&1)"; then
+    fail "the generated configuration is not valid JSON"
+    fail_detail "$output"
+  fi
+  case_end
+}
+
+should_set_every_key_it_writes_when_the_environment_is_complete() {
+  case_start "${FUNCNAME[0]}"
+  assert_section values "a key the entrypoint sets is missing or wrong"
+  case_end
+}
+
+should_drop_no_value_when_the_environment_supplies_one() {
+  case_start "${FUNCNAME[0]}"
+  assert_section emptiness "a key came out empty"
+  case_end
+}
+
+should_change_nothing_unaccounted_for_when_it_rewrites_the_seed() {
+  case_start "${FUNCNAME[0]}"
+  assert_section coverage "the configuration changed in a way no assertion names"
+  case_end
+}
+
+# The gog branch runs only when both variables are set, and this check sets
+# both, so a run in which it never fired is a run that tested less than it
+# reported. The key is asserted to arrive as one argument: it is a JSON blob
+# containing spaces, and an unquoted expansion would deliver it as several.
+should_hand_the_service_account_key_to_gog_when_it_is_configured() {
+  case_start "${FUNCNAME[0]}"
+  local log=''
+  if [ -f "$gog_log" ]; then
+    log="$(cat "$gog_log")"
+  fi
+  assert_contains "gog auth service-account set was called" "$log" \
+    'INVOCATION [auth service-account]'
+  assert_contains "the account arrived intact" "$log" 'ARG [stub@example.com]'
+  assert_contains "the key arrived as one argument" "$log" \
+    "ARG [{\"type\":\"service_account\",\"private_key\":\"stub\"}]"
+  case_end
+}
+
+should_register_the_briefing_when_the_gateway_answers() {
+  case_start "${FUNCNAME[0]}"
+  assert_equals "the registrar reached a verdict" "0" "$registrar_status"
+  assert_contains "the briefing was registered" "$(cat "$run_output")" \
+    'cron: registered morning-briefing'
+  if [ "$CASE_FAILURES" -ne 0 ]; then
+    fail_detail "$(cat "$run_output")"
+  fi
+  case_end
+}
+
+should_leave_the_real_home_untouched_when_it_runs() {
+  case_start "${FUNCNAME[0]}"
+  assert_equals "\$HOME fingerprint unchanged" "$home_before" "$home_after"
+  case_end
+}
+
+# The green half. `config validate` reads $HOME/.openclaw/openclaw.json, so the
+# generated file is copied into a home of its own rather than validated in
+# place: the validator may rewrite or migrate what it reads, and the cases above
+# have already made claims about the original.
+#
+# OPENCLAW_* are cleared because they redirect the config path and the state
+# directory. A developer with one of them exported would otherwise have the
+# validator pass judgement on a different file entirely.
+validate_in_home() {
+  local candidate="$1"
+  env -u OPENCLAW_CONFIG_PATH -u OPENCLAW_STATE_DIR -u OPENCLAW_PROFILE \
+    -u OPENCLAW_CONTAINER \
+    HOME="$candidate" "$real_openclaw" config validate 2>&1
+}
+
+should_accept_the_generated_config_when_the_validator_is_available() {
+  case_start "${FUNCNAME[0]}"
+  local candidate="${sandbox}/validate-home" output status=0
+  mkdir -p "${candidate}/.openclaw"
+  cp "$config_path" "${candidate}/.openclaw/openclaw.json"
+
+  output="$(validate_in_home "$candidate")" || status=$?
+  if [ "$status" -ne 0 ]; then
+    # The spec says the validator's message is the whole value of this gate, so
+    # it is printed verbatim. Every secret in the sandbox config is synthetic,
+    # which is what makes that safe here and is not true in the container — the
+    # entrypoint redacts before printing the same message.
+    fail "openclaw config validate rejected the generated configuration"
+    fail_detail "$output"
+  fi
+  case_end
+}
+
+# The red half. A validator that only ever returns 0 is indistinguishable from
+# one that is not running, and this repository already shipped a lint gate with
+# that property. So the same validator is shown rejecting a config that differs
+# from the accepted one by exactly one unrecognised key.
+should_reject_an_unrecognised_key_when_the_validator_is_available() {
+  case_start "${FUNCNAME[0]}"
+  local candidate="${sandbox}/validate-bad-home" output status=0
+  local probe_key='hermesGateProbeKey'
+  mkdir -p "${candidate}/.openclaw"
+  CONFIG_PATH="$config_path" \
+  CORRUPT_PATH="${candidate}/.openclaw/openclaw.json" \
+  PROBE_KEY="$probe_key" node -e '
+    const fs = require("fs");
+    const config = JSON.parse(fs.readFileSync(process.env.CONFIG_PATH, "utf8"));
+    config[process.env.PROBE_KEY] = "injected by config-schema-check";
+    fs.writeFileSync(process.env.CORRUPT_PATH, JSON.stringify(config, null, 2) + "\n");
+  '
+
+  output="$(validate_in_home "$candidate")" || status=$?
+  if [ "$status" -eq 0 ]; then
+    fail "openclaw config validate accepted a config carrying an unrecognised key"
+    fail_detail "$output"
+  else
+    assert_contains "the validator names the offending key" "$output" "$probe_key"
+  fi
+  case_end
+}
+
+should_write_a_config_when_the_entrypoint_runs_against_stubs
+should_write_parseable_json_when_the_entrypoint_completes
+should_set_every_key_it_writes_when_the_environment_is_complete
+should_drop_no_value_when_the_environment_supplies_one
+should_change_nothing_unaccounted_for_when_it_rewrites_the_seed
+should_hand_the_service_account_key_to_gog_when_it_is_configured
+should_register_the_briefing_when_the_gateway_answers
+should_leave_the_real_home_untouched_when_it_runs
+
+if [ -n "$real_openclaw" ]; then
+  should_accept_the_generated_config_when_the_validator_is_available
+  should_reject_an_unrecognised_key_when_the_validator_is_available
+else
+  # The local-developer path. The builder image installs the CLI through
+  # roles/openclaw-cli, so CI reaches the branch above — but only once a
+  # builder image built from that role is published, and until then CI lands
+  # here too. README.md § Contributing states that bootstrap plainly rather
+  # than letting a green run imply a validation that did not happen.
+  #
+  # Both halves are named, because "the config was accepted" and "an invalid
+  # config is refused" are separate promises and neither was kept here.
+  skip "should_accept_the_generated_config_when_the_validator_is_available" \
+    "openclaw is not on PATH; the generated config was not validated"
+  skip "should_reject_an_unrecognised_key_when_the_validator_is_available" \
+    "openclaw is not on PATH; the validator was not shown rejecting anything"
+fi
+
+printf '\nconfig-schema-check: %d passed, %d failed, %d skipped\n' \
+  "$TESTS_PASSED" "$TESTS_FAILED" "$TESTS_SKIPPED"
+[ "$TESTS_FAILED" -eq 0 ]

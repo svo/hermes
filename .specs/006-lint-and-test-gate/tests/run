@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+#
+# Runs every check for 006. Accumulates failures rather than stopping at the
+# first, so one run reveals every problem — the same property the gate these
+# suites test is specified to have, for the same reason.
+#
+#   .specs/006-lint-and-test-gate/tests/run
+#
+# `bin/test` runs this file as its `gate-tests` check. That is a loop by
+# construction — the gate runs the suite that runs the gate — and
+# HERMES_GATE_TEST is what opens it: harness.sh exports it, every bin/test the
+# suites start therefore sees it, and a bin/test that sees it skips
+# `gate-tests`. Recursion here would not present as a failure but as a CI job
+# that never finishes, so the guard is asserted by skip-path-test rather than
+# left to inspection.
+
+set -uo pipefail
+
+tests_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+failed=()
+
+check() {
+  local name="$1"
+  shift
+  printf '\n== %s ==\n' "$name"
+  if "$@"; then
+    printf 'PASS %s\n' "$name"
+  else
+    printf 'FAIL %s\n' "$name" >&2
+    failed+=("$name")
+  fi
+}
+
+# `bash <path>` rather than executing directly, so a checkout that lost the
+# executable bit still runs the cases instead of reporting failures about
+# file modes.
+check "discovery-test" bash "${tests_dir}/discovery-test"
+check "accumulation-test" bash "${tests_dir}/accumulation-test"
+check "red-baseline-test" bash "${tests_dir}/red-baseline-test"
+check "skip-path-test" bash "${tests_dir}/skip-path-test"
+check "entrypoint-contract-test" bash "${tests_dir}/entrypoint-contract-test"
+check "workflow-wiring-test" bash "${tests_dir}/workflow-wiring-test"
+
+printf '\n'
+if [ ${#failed[@]} -eq 0 ]; then
+  printf 'All 006 checks passed.\n'
+  exit 0
+fi
+
+printf 'Failing checks:\n' >&2
+printf '  %s\n' "${failed[@]}" >&2
+exit 1

@@ -4,7 +4,13 @@ set -euo pipefail
 STATE_DIR="${HOME}/.openclaw/hermes-check"
 SEEN_FILE="${STATE_DIR}/seen-messages.txt"
 VIP_FILE="${STATE_DIR}/vip-senders.txt"
-MODEL_FILE="/opt/hermes/urgency.bin"
+# Overridable so the checks can point at a stub. The urgency classifier is
+# gated on this file *existing*, so stubbing `fasttext` on PATH is not enough:
+# on an image without the 800 MB model — the builder image, where the gate runs
+# — the branch below is skipped entirely and every message lands in the wrong
+# bucket. Three of 005's classification cases failed that way in CI while
+# passing on any developer machine, because the model is present there.
+MODEL_FILE="${HERMES_MODEL_FILE:-/opt/hermes/urgency.bin}"
 GOG_ACCOUNT="${GOG_GOOGLE_ACCOUNT:-}"
 HERMES_FIELD_MAX_LEN="${HERMES_FIELD_MAX_LEN:-200}"
 
