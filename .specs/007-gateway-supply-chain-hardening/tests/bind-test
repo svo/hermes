@@ -1,0 +1,536 @@
+#!/usr/bin/env bash
+#
+# Where the gateway listens, and what has to be true before it listens
+# anywhere but loopback.
+#
+#   .specs/007-gateway-supply-chain-hardening/tests/bind-test
+#
+# Findings A3a–A3d: the container bound `lan` at onboarding and again at exec,
+# never configured `gateway.auth`, and published only `127.0.0.1:3000:3000` —
+# so the LAN bind bought nothing and cost reachability from every other
+# container on the Docker network.
+
+set -uo pipefail
+
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+readonly GATEWAY_TOKEN='stub-gateway-token-0123456789abcdef'
+
+# --- the default -----------------------------------------------------------
+
+should_bind_loopback_when_no_bind_is_requested() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "gateway.bind in the config" "loopback" "$(config_get gateway.bind)"
+  # The acceptance criterion names this command, not this file, so it is asked
+  # the way the criterion asks it.
+  assert_equals "openclaw config get gateway.bind" "loopback" \
+    "$(openclaw_config_get gateway.bind)"
+  case_end
+}
+
+should_tell_onboarding_and_the_gateway_the_same_bind_when_it_starts() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  # Two flags, two commands, one variable. They were separate literals before,
+  # which is how the config and the running process came to disagree.
+  assert_equals "onboarding's --gateway-bind" "loopback" \
+    "$(argv_flag_value onboard --gateway-bind)"
+  assert_equals "the gateway's --bind" "loopback" \
+    "$(argv_flag_value gateway --bind)"
+  case_end
+}
+
+should_tell_onboarding_the_requested_bind_when_it_is_not_the_default() {
+  case_start "${FUNCNAME[0]}"
+  # The case above runs the default path, where "the entrypoint forwarded the
+  # variable" and "the entrypoint hardcodes loopback" produce the same argv. A
+  # first start on a non-loopback bind is what separates them.
+  run_entrypoint HERMES_GATEWAY_BIND=lan "HERMES_GATEWAY_TOKEN=${GATEWAY_TOKEN}"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  if ! onboarding_ran; then
+    fail "onboarding did not run, so its flags prove nothing"
+  fi
+  assert_equals "onboarding's --gateway-bind" "lan" \
+    "$(argv_flag_value onboard --gateway-bind)"
+  assert_equals "and the gateway's --bind agrees" "lan" \
+    "$(argv_flag_value gateway --bind)"
+  case_end
+}
+
+should_not_bind_lan_when_no_bind_is_requested() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  assert_not_contains "the gateway was not told lan" "$RUN_ARGV" 'ARG [lan]'
+  assert_equals "gateway.bind is not lan" "loopback" "$(config_get gateway.bind)"
+  case_end
+}
+
+# --- the upgrade path ------------------------------------------------------
+
+# The case that the `--gateway-bind` flag alone cannot satisfy. Onboarding runs
+# only when there is no config, so a container configured by an older image
+# keeps `bind: lan` in its volume for ever while the exec flag says something
+# else — and `openclaw config get gateway.bind`, which is what the acceptance
+# criterion and the README both use, would keep answering `lan`.
+should_correct_a_persisted_lan_bind_when_onboarding_is_skipped() {
+  case_start "${FUNCNAME[0]}"
+  local home
+  home="$(new_home)"
+  cat > "${home}/.openclaw/openclaw.json" <<'OLD'
+{
+  "gateway": {
+    "mode": "local",
+    "port": 3000,
+    "bind": "lan",
+    "auth": {
+      "mode": "token",
+      "token": "written-by-an-older-image"
+    }
+  },
+  "agents": { "defaults": {} },
+  "channels": {},
+  "env": {}
+}
+OLD
+  run_entrypoint --home "$home"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  if onboarding_ran; then
+    fail "onboarding ran against a config that already existed"
+  fi
+  assert_equals "the persisted bind was corrected" "loopback" "$(config_get gateway.bind)"
+  case_end
+}
+
+# --- the override, and the rule that guards it -----------------------------
+
+should_refuse_to_start_when_a_non_loopback_bind_has_no_token() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint HERMES_GATEWAY_BIND=lan
+  assert_equals "the run was rejected" "1" "$RUN_STATUS"
+  assert_contains "the error names the variable" "$RUN_ERR" 'HERMES_GATEWAY_TOKEN'
+  # Phase 1's promise, and the reason this rule lives there rather than beside
+  # the gateway block: a bind that cannot work costs nothing.
+  assert_contains "nothing was written" "$RUN_ERR" \
+    'Nothing has been written. The persisted configuration is untouched.'
+  if onboarding_ran; then
+    fail "onboarding ran despite the rejected bind"
+  fi
+  if gateway_started; then
+    fail "the gateway was started with a non-loopback bind and no token"
+  fi
+  assert_equals "no config was written" "absent" "$(config_get gateway.bind)"
+  case_end
+}
+
+should_explain_the_token_when_a_non_loopback_bind_has_none() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint HERMES_GATEWAY_BIND=lan
+  # A name alone tells an operator what to type, not what they lost. The
+  # guidance has to say when the variable is required, and why upstream will
+  # not serve the bind they asked for without it.
+  assert_contains "the guidance says when it is required" "$RUN_ERR" \
+    'HERMES_GATEWAY_TOKEN is required when HERMES_GATEWAY_BIND is not loopback.'
+  assert_contains "the guidance names the upstream failure" "$RUN_ERR" \
+    'refusing to bind gateway ... without auth'
+  assert_contains "the guidance says how to make one" "$RUN_ERR" 'openssl rand -hex 32'
+  assert_contains "the guidance names the free alternative" "$RUN_ERR" \
+    'HERMES_GATEWAY_BIND unset'
+  case_end
+}
+
+# 004's promise, which this rule had to be placed carefully not to break: one
+# error block lists *every* violation, so a three-variable misconfiguration
+# costs one restart rather than three.
+#
+# The owner check only demands HERMES_OWNER while `missing` is still empty --
+# it exists so that an allowlist holding nothing does not also produce a
+# redundant complaint about the owner it feeds. A gateway token counted before
+# that check would satisfy the same guard and silence a real owner problem,
+# which is why the bind rule sits below the derivation rather than beside the
+# Telegram and Slack ones.
+should_report_the_owner_and_the_token_together_when_both_are_wrong() {
+  case_start "${FUNCNAME[0]}"
+  # A wildcard allowlist is a real configuration that leaves no usable owner,
+  # and a non-loopback bind with no token is the new rule. Two unrelated
+  # problems, one restart.
+  run_entrypoint TELEGRAM_BOT_TOKEN=0000000:stub 'TELEGRAM_ALLOW_FROM=*' \
+    HERMES_GATEWAY_BIND=lan
+  assert_equals "the run was rejected" "1" "$RUN_STATUS"
+  assert_contains "the token is reported" "$RUN_ERR" 'HERMES_GATEWAY_TOKEN'
+  assert_contains "and so is the owner, in the same block" "$RUN_ERR" 'HERMES_OWNER'
+  case_end
+}
+
+should_require_a_token_when_the_bind_is_auto() {
+  case_start "${FUNCNAME[0]}"
+  # `auto` is not documented to resolve to loopback, so the fail-safe reading
+  # of "might be lan" is "needs a token".
+  run_entrypoint HERMES_GATEWAY_BIND=auto
+  assert_equals "the run was rejected" "1" "$RUN_STATUS"
+  assert_contains "the error names the variable" "$RUN_ERR" 'HERMES_GATEWAY_TOKEN'
+  case_end
+}
+
+should_require_a_token_when_the_bind_is_tailnet() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint HERMES_GATEWAY_BIND=tailnet
+  assert_equals "the run was rejected" "1" "$RUN_STATUS"
+  assert_contains "the error names the variable" "$RUN_ERR" 'HERMES_GATEWAY_TOKEN'
+  case_end
+}
+
+should_configure_token_auth_when_a_non_loopback_bind_has_a_token() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint HERMES_GATEWAY_BIND=lan "HERMES_GATEWAY_TOKEN=${GATEWAY_TOKEN}"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "gateway.bind" "lan" "$(config_get gateway.bind)"
+  assert_equals "gateway.auth.mode" "token" "$(config_get gateway.auth.mode)"
+  assert_equals "gateway.auth.token" "$GATEWAY_TOKEN" "$(config_get gateway.auth.token)"
+  assert_equals "the gateway's --bind" "lan" "$(argv_flag_value gateway --bind)"
+  case_end
+}
+
+# The case above cannot see the `mode` write on its own: onboarding already
+# wrote `mode: token`, so the assertion would hold against an entrypoint that
+# writes only the token. Starting from a config that carries a credential with
+# no mode is what makes the write observable — and it is a real shape, the one
+# upstream documents as still meaning token auth.
+should_write_the_auth_mode_when_a_non_loopback_bind_inherits_none() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint OPENCLAW_STUB_ONBOARD_AUTH=bare \
+    HERMES_GATEWAY_BIND=lan "HERMES_GATEWAY_TOKEN=${GATEWAY_TOKEN}"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "gateway.auth.mode was written, not inherited" "token" \
+    "$(config_get gateway.auth.mode)"
+  assert_equals "and the token is the operator's" "$GATEWAY_TOKEN" \
+    "$(config_get gateway.auth.token)"
+  case_end
+}
+
+# Likewise for a config that had no auth at all: the object has to be created,
+# not merely updated.
+should_create_the_auth_object_when_a_non_loopback_bind_has_none() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint OPENCLAW_STUB_ONBOARD_AUTH=none \
+    HERMES_GATEWAY_BIND=lan "HERMES_GATEWAY_TOKEN=${GATEWAY_TOKEN}"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "gateway.auth.mode" "token" "$(config_get gateway.auth.mode)"
+  assert_equals "gateway.auth.token" "$GATEWAY_TOKEN" "$(config_get gateway.auth.token)"
+  assert_contains "and the line reports it" "$RUN_OUT" 'gateway: bind=lan auth=token'
+  case_end
+}
+
+should_rotate_the_token_when_a_new_one_is_supplied() {
+  case_start "${FUNCNAME[0]}"
+  local home
+  home="$(new_home)"
+  run_entrypoint --home "$home" HERMES_GATEWAY_BIND=lan "HERMES_GATEWAY_TOKEN=${GATEWAY_TOKEN}"
+  assert_equals "the first run succeeded" "0" "$RUN_STATUS"
+  run_entrypoint --home "$home" HERMES_GATEWAY_BIND=lan 'HERMES_GATEWAY_TOKEN=a-second-token'
+  assert_equals "the second run succeeded" "0" "$RUN_STATUS"
+  # The variable is the source of truth while it is managing the key. An
+  # operator who rotates the credential must not have to delete the volume.
+  assert_equals "gateway.auth.token followed the variable" "a-second-token" \
+    "$(config_get gateway.auth.token)"
+  case_end
+}
+
+# --- the modes upstream does not have, and the one it cannot use here ------
+
+should_reject_a_bind_that_is_not_a_mode_when_it_is_requested() {
+  case_start "${FUNCNAME[0]}"
+  # The mistake worth catching: `0.0.0.0` is a host, and upstream is explicit
+  # that `gateway.bind` takes bind *modes*, not host aliases.
+  run_entrypoint HERMES_GATEWAY_BIND=0.0.0.0 "HERMES_GATEWAY_TOKEN=${GATEWAY_TOKEN}"
+  assert_equals "the run was rejected" "1" "$RUN_STATUS"
+  assert_contains "the error lists the modes" "$RUN_ERR" \
+    'expected loopback, lan, tailnet or auto'
+  # Deliberately NOT asserted against `0.0.0.0`: the static half of the message
+  # already ends "not a host such as 0.0.0.0", so that assertion would pass on
+  # boilerplate whether or not the value was echoed back at all. A value the
+  # template cannot contain is what proves the interpolation happens.
+  run_entrypoint HERMES_GATEWAY_BIND=lookback "HERMES_GATEWAY_TOKEN=${GATEWAY_TOKEN}"
+  assert_equals "the typo was rejected too" "1" "$RUN_STATUS"
+  assert_contains "the error quotes what the operator actually typed" "$RUN_ERR" \
+    "HERMES_GATEWAY_BIND 'lookback'"
+  if gateway_started; then
+    fail "the gateway was started with an unusable bind mode"
+  fi
+  case_end
+}
+
+should_reject_a_custom_bind_when_it_is_requested() {
+  case_start "${FUNCNAME[0]}"
+  # `custom` is a real upstream mode, and it needs gateway.customBindHost —
+  # which this image never writes. Accepting it would produce a gateway that
+  # refuses to start, which is the late failure phase 1 exists to prevent.
+  run_entrypoint HERMES_GATEWAY_BIND=custom "HERMES_GATEWAY_TOKEN=${GATEWAY_TOKEN}"
+  assert_equals "the run was rejected" "1" "$RUN_STATUS"
+  assert_contains "the error says what is missing" "$RUN_ERR" 'gateway.customBindHost'
+  case_end
+}
+
+# --- the credential this container did not create --------------------------
+
+should_leave_an_onboarding_token_alone_when_the_bind_is_loopback() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  # Upstream documents onboarding as generating one. Deleting it, or writing
+  # `mode: none` over it, would take authentication away from a gateway that
+  # has it — so on loopback the credential is simply not this container's
+  # business.
+  assert_equals "the onboarding token survived" \
+    "onboarding-generated-token-not-a-secret" "$(config_get gateway.auth.token)"
+  assert_equals "the onboarding auth mode survived" "token" \
+    "$(config_get gateway.auth.mode)"
+  case_end
+}
+
+should_not_write_gateway_auth_when_loopback_onboarding_configured_none() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint OPENCLAW_STUB_ONBOARD_AUTH=none
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  # No auth in, no auth out. Writing an empty token here would be worse than
+  # writing nothing: it is a credential that authenticates nobody, and 006's
+  # emptiness sweep would rightly call it a key that came out empty.
+  assert_equals "gateway.auth was not invented" "absent" "$(config_get gateway.auth)"
+  case_end
+}
+
+# --- what it says while doing it -------------------------------------------
+
+should_say_the_token_was_not_used_when_the_bind_is_loopback() {
+  case_start "${FUNCNAME[0]}"
+  # Set, and doing nothing. The startup line says `auth=token` either way,
+  # because onboarding generates one — so without this notice an operator who
+  # supplied a token has configured nothing and has no way to tell.
+  run_entrypoint "HERMES_GATEWAY_TOKEN=${GATEWAY_TOKEN}"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_contains "the container says it was ignored" "$RUN_ALL" \
+    'HERMES_GATEWAY_TOKEN is set but the bind is loopback'
+  assert_equals "and the config kept onboarding's credential" \
+    "onboarding-generated-token-not-a-secret" "$(config_get gateway.auth.token)"
+  assert_not_contains "the supplied token is nowhere in the output" "$RUN_ALL" \
+    "$GATEWAY_TOKEN"
+  case_end
+}
+
+should_not_say_the_token_was_unused_when_the_bind_is_lan() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint HERMES_GATEWAY_BIND=lan "HERMES_GATEWAY_TOKEN=${GATEWAY_TOKEN}"
+  assert_not_contains "no notice about a token that was used" "$RUN_ALL" \
+    'HERMES_GATEWAY_TOKEN is set but the bind is loopback'
+  case_end
+}
+
+should_report_the_bind_and_the_auth_mode_when_it_starts() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  assert_contains "one line, both facts" "$RUN_OUT" 'gateway: bind=loopback auth=token'
+  case_end
+}
+
+should_report_auth_none_when_nothing_authenticates_the_gateway() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint OPENCLAW_STUB_ONBOARD_AUTH=none
+  assert_contains "the line says so" "$RUN_OUT" 'gateway: bind=loopback auth=none'
+  case_end
+}
+
+should_report_token_auth_when_the_mode_key_is_absent_beside_a_token() {
+  case_start "${FUNCNAME[0]}"
+  # An absent `mode` beside a present token is documented to mean token auth.
+  # Reporting `none` there would tell an operator their gateway was open when
+  # it was not — the most expensive possible way for this line to be wrong.
+  run_entrypoint OPENCLAW_STUB_ONBOARD_AUTH=bare
+  assert_contains "the line reports the credential" "$RUN_OUT" \
+    'gateway: bind=loopback auth=token'
+  case_end
+}
+
+should_report_password_auth_when_that_is_what_is_configured() {
+  case_start "${FUNCNAME[0]}"
+  # The third branch of the startup line. Upstream allows password auth beside
+  # token auth, and a line that reported `none` for a gateway holding a
+  # password would be wrong in the expensive direction.
+  run_entrypoint OPENCLAW_STUB_ONBOARD_AUTH=password
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_contains "the line names the mode in force" "$RUN_OUT" \
+    'gateway: bind=loopback auth=password'
+  assert_not_contains "and never the password" "$RUN_ALL" \
+    'onboarding-generated-password-not-a-secret'
+  case_end
+}
+
+should_never_log_the_gateway_token_when_it_starts() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint HERMES_GATEWAY_BIND=lan "HERMES_GATEWAY_TOKEN=${GATEWAY_TOKEN}"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  # 002 established that tokens never reach `docker logs`. A line added here
+  # must not be the exception, and the gateway token is the whole secret.
+  assert_not_contains "the token is not in the output" "$RUN_ALL" "$GATEWAY_TOKEN"
+  assert_contains "but the mode is" "$RUN_OUT" 'gateway: bind=lan auth=token'
+  case_end
+}
+
+should_not_log_the_gateway_token_when_the_validate_gate_fails() {
+  case_start "${FUNCNAME[0]}"
+  # 004's phase 3 gate passes the validator's message through to `docker logs`,
+  # filtered. 007 puts a fifth credential into the file that validator reads,
+  # so the filter had to learn about it: a validator that quotes the offending
+  # value would otherwise print the gateway token verbatim.
+  run_entrypoint HERMES_GATEWAY_BIND=lan "HERMES_GATEWAY_TOKEN=${GATEWAY_TOKEN}" \
+    "OPENCLAW_STUB_VALIDATE_ERROR=gateway.auth.token: rejected value '${GATEWAY_TOKEN}'"
+  assert_equals "the gate stopped the start" "1" "$RUN_STATUS"
+  assert_not_contains "the token did not reach the log" "$RUN_ALL" "$GATEWAY_TOKEN"
+  assert_contains "but the key path did" "$RUN_ERR" 'gateway.auth.token'
+  assert_contains "and it was redacted rather than dropped" "$RUN_ERR" '[redacted]'
+  if gateway_started; then
+    fail "the gateway started despite a failed validate gate"
+  fi
+  case_end
+}
+
+should_say_the_published_port_is_unreachable_when_the_bind_is_loopback() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  # The one thing this default takes away. A loopback bind listens on
+  # 127.0.0.1 inside the container and Docker's published port delivers to
+  # eth0, so `-p 127.0.0.1:3000:3000` stops reaching the gateway. Said in
+  # `docker logs`, where somebody debugging a dead port will actually look.
+  assert_contains "the consequence is stated" "$RUN_OUT" \
+    'not reachable through a published port'
+  assert_contains "and the way out is named" "$RUN_OUT" 'HERMES_GATEWAY_BIND=lan'
+  case_end
+}
+
+should_not_warn_about_the_published_port_when_the_bind_is_lan() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint HERMES_GATEWAY_BIND=lan "HERMES_GATEWAY_TOKEN=${GATEWAY_TOKEN}"
+  assert_not_contains "no warning about a port that works" "$RUN_OUT" \
+    'not reachable through a published port'
+  case_end
+}
+
+# --- the rest of the start still happens -----------------------------------
+
+should_still_reach_the_validate_gate_and_the_gateway_when_the_bind_changes() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  # 004's phase 3 gate and 003's registrar both sit between this change and
+  # `exec`. A bind written after the gate would be a bind the gate never saw.
+  assert_contains "phase 3 ran" "$RUN_OUT" 'config: validated'
+  if ! gateway_started; then
+    fail "the gateway was never started"
+  fi
+  # Asserted through the wait's own verdict first. The registrar is a
+  # background subshell, so "its line is not in the output" has two causes —
+  # a broken start, and a loaded machine — and only one of them is a defect.
+  assert_equals "the registrar reached a verdict" "0" "$RUN_REGISTRAR_STATUS"
+  assert_contains "the briefing registrar still reported" "$RUN_OUT" 'morning-briefing'
+  case_end
+}
+
+should_write_the_bind_before_the_configuration_is_validated() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  # Ordering, asserted rather than assumed: the `gateway:` line has to precede
+  # `config: validated`, because a key written after the gate is a key the gate
+  # was not asked about.
+  local gateway_at validated_at
+  gateway_at="$(printf '%s\n' "$RUN_OUT" | grep -n '^gateway: bind=' | head -1 | cut -d: -f1)"
+  validated_at="$(printf '%s\n' "$RUN_OUT" | grep -n '^config: validated$' | head -1 | cut -d: -f1)"
+  if [ -z "$gateway_at" ] || [ -z "$validated_at" ]; then
+    fail "expected both a gateway line and a config: validated line"
+  elif [ "$gateway_at" -ge "$validated_at" ]; then
+    fail "the gateway configuration was written after the validate gate"
+  fi
+  case_end
+}
+
+should_leave_the_telegram_channel_configured_when_the_bind_is_loopback() {
+  case_start "${FUNCNAME[0]}"
+  # The channel regression the plan calls the most likely way this breaks
+  # something. Telegram dials out, so a loopback bind must not touch it — and
+  # the block that writes it runs before the gateway block, which is exactly
+  # the kind of ordering an added write can disturb.
+  run_entrypoint TELEGRAM_BOT_TOKEN=0000000:stub TELEGRAM_ALLOW_FROM=123456789
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "the channel is enabled" "true" "$(config_get channels.telegram.enabled)"
+  assert_equals "the DM policy survived" "allowlist" \
+    "$(config_get channels.telegram.dmPolicy)"
+  assert_equals "and so did the bind" "loopback" "$(config_get gateway.bind)"
+  case_end
+}
+
+should_leave_the_slack_channel_configured_when_the_bind_is_loopback() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint \
+    SLACK_BOT_TOKEN=xoxb-stub SLACK_APP_TOKEN=xapp-stub SLACK_ALLOW_FROM=U0STUBUSER1
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "the channel is enabled" "true" "$(config_get channels.slack.enabled)"
+  assert_equals "socket mode survived" "socket" "$(config_get channels.slack.mode)"
+  assert_equals "and so did the bind" "loopback" "$(config_get gateway.bind)"
+  case_end
+}
+
+should_leave_the_gateway_port_alone_when_the_bind_changes() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  # 003's registrar reads the port out of this key rather than repeating the
+  # literal, precisely so that 007 owning the flags could not strand a second
+  # copy. Changing the bind must not disturb it.
+  assert_equals "gateway.port" "3000" "$(config_get gateway.port)"
+  assert_equals "the gateway's --port" "3000" "$(argv_flag_value gateway --port)"
+  case_end
+}
+
+should_bind_loopback_when_the_variable_is_set_but_empty() {
+  case_start "${FUNCNAME[0]}"
+  # `docker run -e HERMES_GATEWAY_BIND=` is a real thing an operator does, and
+  # an empty value must not become an empty bind mode.
+  run_entrypoint HERMES_GATEWAY_BIND=
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "gateway.bind" "loopback" "$(config_get gateway.bind)"
+  case_end
+}
+
+should_bind_loopback_when_no_bind_is_requested
+should_tell_onboarding_and_the_gateway_the_same_bind_when_it_starts
+should_tell_onboarding_the_requested_bind_when_it_is_not_the_default
+should_not_bind_lan_when_no_bind_is_requested
+should_correct_a_persisted_lan_bind_when_onboarding_is_skipped
+should_refuse_to_start_when_a_non_loopback_bind_has_no_token
+should_explain_the_token_when_a_non_loopback_bind_has_none
+should_report_the_owner_and_the_token_together_when_both_are_wrong
+should_require_a_token_when_the_bind_is_auto
+should_require_a_token_when_the_bind_is_tailnet
+should_configure_token_auth_when_a_non_loopback_bind_has_a_token
+should_write_the_auth_mode_when_a_non_loopback_bind_inherits_none
+should_create_the_auth_object_when_a_non_loopback_bind_has_none
+should_rotate_the_token_when_a_new_one_is_supplied
+should_reject_a_bind_that_is_not_a_mode_when_it_is_requested
+should_reject_a_custom_bind_when_it_is_requested
+should_leave_an_onboarding_token_alone_when_the_bind_is_loopback
+should_not_write_gateway_auth_when_loopback_onboarding_configured_none
+should_say_the_token_was_not_used_when_the_bind_is_loopback
+should_not_say_the_token_was_unused_when_the_bind_is_lan
+should_report_the_bind_and_the_auth_mode_when_it_starts
+should_report_auth_none_when_nothing_authenticates_the_gateway
+should_report_token_auth_when_the_mode_key_is_absent_beside_a_token
+should_report_password_auth_when_that_is_what_is_configured
+should_never_log_the_gateway_token_when_it_starts
+should_not_log_the_gateway_token_when_the_validate_gate_fails
+should_say_the_published_port_is_unreachable_when_the_bind_is_loopback
+should_not_warn_about_the_published_port_when_the_bind_is_lan
+should_still_reach_the_validate_gate_and_the_gateway_when_the_bind_changes
+should_write_the_bind_before_the_configuration_is_validated
+should_leave_the_telegram_channel_configured_when_the_bind_is_loopback
+should_leave_the_slack_channel_configured_when_the_bind_is_loopback
+should_leave_the_gateway_port_alone_when_the_bind_changes
+should_bind_loopback_when_the_variable_is_set_but_empty
+
+report_totals bind-test

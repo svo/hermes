@@ -95,6 +95,23 @@ explain_variable() {
         '    SLACK_ALLOW_FROM=U0123ABCDE,U0456FGHIJ' \
         '  Find a user ID in Slack: click the person, then More, then Copy member ID.'
       ;;
+    HERMES_GATEWAY_TOKEN)
+      printf '%s\n' \
+        'HERMES_GATEWAY_TOKEN is required when HERMES_GATEWAY_BIND is not loopback.' \
+        '  A non-loopback bind puts the agent API on an interface every other' \
+        '  container on the Docker network can reach, and every request to it' \
+        '  reaches an agent holding an unrestricted shell. Upstream refuses to' \
+        '  serve that unauthenticated: the gateway logs' \
+        '    refusing to bind gateway ... without auth' \
+        '  and exits, so the container would be down with nothing in its' \
+        '  configuration able to fix it.' \
+        '  Generate one and pass it in as HERMES_GATEWAY_TOKEN -- the output of:' \
+        '    openssl rand -hex 32' \
+        '  It becomes gateway.auth.token, and is never written to the log.' \
+        '  Leave HERMES_GATEWAY_BIND unset for a loopback bind, which needs no' \
+        '  token -- and note that a loopback bind is not reachable through a' \
+        '  published port under Docker bridge networking.'
+      ;;
     HERMES_OWNER)
       # Printed for a HERMES_OWNER that is absent and for one that was supplied
       # and could not be used, so it says what the variable is for rather than
@@ -198,6 +215,56 @@ if [ ${#missing[@]} -eq 0 ] && [ ${#rejected[@]} -eq 0 ] &&
   missing+=(HERMES_OWNER)
 fi
 
+# Where the gateway listens, and what has to be true before it may listen
+# anywhere but loopback.
+#
+# Registered here rather than at a second validation site: this is the phase
+# that refuses a start before anything is written, and a bind that cannot work
+# should cost the same nothing as a missing timezone. The rule is upstream's,
+# stated in its own terms -- a non-loopback bind requires a gateway auth path,
+# and the gateway refuses to bind without one -- so the alternative to catching
+# it here is a container that onboards, writes a full configuration, and then
+# dies on the last line.
+#
+# Placed *below* the owner derivation on purpose. Everything above adds to the
+# same `missing` array, and 004's owner check only asks for HERMES_OWNER when
+# that array is still empty — so a gateway token counted before it would
+# silence a real owner problem and cost the operator a second restart, which is
+# the one thing this phase exists not to do.
+#
+# The modes are upstream's five. `custom` is refused because it also needs
+# gateway.customBindHost, which nothing in this image writes; accepting it
+# would produce exactly the late death this block exists to prevent. `auto`
+# needs a token because upstream documents it as resolving to `0.0.0.0` inside
+# a detected container environment — which is every environment this script
+# runs in.
+#
+# That container default is also why `gateway.bind` is written explicitly
+# further down rather than left unset: upstream's effective default *in a
+# container* is `auto`, not `loopback`, so "write nothing and inherit the
+# default" would bind every interface.
+#
+# Only `loopback` is free. Everything else is a deliberate act with a
+# credential attached, which is the difference between this and what the
+# container did before: it bound `lan` on every start, with whatever token
+# onboarding happened to generate and nothing here managing it.
+gateway_bind="${HERMES_GATEWAY_BIND:-loopback}"
+
+case "$gateway_bind" in
+  loopback) ;;
+  auto | lan | tailnet)
+    if [ -z "${HERMES_GATEWAY_TOKEN:-}" ]; then
+      missing+=(HERMES_GATEWAY_TOKEN)
+    fi
+    ;;
+  custom)
+    rejected+=("HERMES_GATEWAY_BIND 'custom': it needs gateway.customBindHost, which this image does not write; use lan for every interface")
+    ;;
+  *)
+    rejected+=("HERMES_GATEWAY_BIND '${gateway_bind}': expected loopback, lan, tailnet or auto -- a bind mode, not a host such as 0.0.0.0")
+    ;;
+esac
+
 # Whose guidance to print: everything missing, plus HERMES_OWNER when it was
 # the thing rejected.
 explain_vars=("${missing[@]}")
@@ -248,7 +315,7 @@ if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
     --auth-choice apiKey \
     --anthropic-api-key "$ANTHROPIC_API_KEY" \
     --gateway-port 3000 \
-    --gateway-bind lan \
+    --gateway-bind "$gateway_bind" \
     --skip-skills \
     --skip-health
 fi
@@ -611,6 +678,97 @@ if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# The bind interface, and the credential that guards it.
+#
+# `--gateway-bind` on the onboarding call above only ever reaches a container
+# that has no configuration yet. Every start after the first skips onboarding,
+# so a config written when the default was `lan` keeps saying `lan` for ever
+# while the flag on the `exec` at the bottom says something else. The config is
+# what `openclaw config get gateway.bind` reports and what an operator reads,
+# so it is written here, on every start, rather than left to the one start that
+# happened to onboard.
+#
+# Auth is written only for a non-loopback bind. Phase 1 has already refused
+# that combination without a token, so reaching the branch below means the
+# token is present.
+#
+# On loopback the existing value is left exactly as it is. Onboarding
+# configures token auth by default and generates a token when nothing else
+# applies, so there is usually one there already -- an unmanaged credential
+# rather than an unauthenticated gateway, which is a weaker finding than it
+# looked. Overwriting it would break clients that hold it, and writing
+# `mode: none` would take authentication away from a gateway that has it. Both
+# are worse than leaving a credential this container did not create alone.
+# ---------------------------------------------------------------------------
+
+gateway_auth_mode="$(
+  GATEWAY_BIND="$gateway_bind" \
+  GATEWAY_TOKEN="${HERMES_GATEWAY_TOKEN:-}" node -e "
+    const fs = require('fs');
+    const configPath = process.env.HOME + '/.openclaw/openclaw.json';
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const bind = process.env.GATEWAY_BIND;
+
+    config.gateway = config.gateway || {};
+    config.gateway.bind = bind;
+    if (bind !== 'loopback') {
+      config.gateway.auth = config.gateway.auth || {};
+      config.gateway.auth.mode = 'token';
+      config.gateway.auth.token = process.env.GATEWAY_TOKEN;
+    }
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+
+    // What the log line reports is the mode actually in force, not the one
+    // this block would have written. An absent mode beside a present
+    // credential is documented to mean that credential rather than 'none', so
+    // reporting 'none' there would tell an operator their gateway was open
+    // when it was not.
+    const auth = config.gateway.auth || {};
+    let mode = auth.mode;
+    if (!mode) {
+      if (auth.token) {
+        mode = 'token';
+      } else if (auth.password) {
+        mode = 'password';
+      } else {
+        mode = 'none';
+      }
+    }
+    process.stdout.write(mode);
+  "
+)"
+
+# The interface and whether anything guards it -- never the token itself. 002
+# established that rule for the Slack line, and the credential this one is
+# about is the whole secret.
+echo "gateway: bind=${gateway_bind} auth=${gateway_auth_mode}"
+
+if [ -n "${HERMES_GATEWAY_TOKEN:-}" ] && [ "$gateway_bind" = 'loopback' ]; then
+  # Set, and not used. On loopback this container writes no auth at all, so an
+  # operator who supplied a token has configured nothing and would have no way
+  # to tell: the line above says `auth=token` either way, because onboarding
+  # generates one. Saying so is the difference between an ignored variable and
+  # a silently ignored variable.
+  printf '%s\n' \
+    'gateway: HERMES_GATEWAY_TOKEN is set but the bind is loopback, so it was not used.' \
+    '  A loopback gateway keeps whatever credential onboarding gave it. Set' \
+    '  HERMES_GATEWAY_BIND=lan to have this token configured and the port published.' >&2
+fi
+
+if [ "$gateway_bind" = 'loopback' ]; then
+  # The one thing this default takes away, said where somebody debugging it
+  # will actually look. A loopback bind listens on 127.0.0.1 *inside* the
+  # container; Docker's published port delivers to eth0, so
+  # `-p 127.0.0.1:3000:3000` stops reaching the gateway. Telegram and Slack are
+  # unaffected -- both dial out -- and `docker exec` still reaches everything,
+  # including the readiness probe the briefing registrar makes below.
+  printf '%s\n' \
+    'gateway: a loopback bind is not reachable through a published port under Docker' \
+    '  bridge networking. docker exec still works. To publish the port, set' \
+    '  HERMES_GATEWAY_BIND=lan with HERMES_GATEWAY_TOKEN.'
+fi
+
+# ---------------------------------------------------------------------------
 # Phase 3 — verify. The configuration is written; prove the gateway can read it.
 #
 # `openclaw config validate` checks the file against the active schema without
@@ -626,14 +784,24 @@ fi
 # The validator's message is the whole value of this gate, so it is passed
 # through rather than summarised — and it is passed through a filter first.
 # What it prints on failure is not documented, the config it is reading holds
-# four tokens, and a validator that quoted an offending value would put one in
-# `docker logs`. 002 established that tokens never reach the log; a gate added
-# above it must not be the exception. Substitution is bash's own, so a token
-# containing regex or sed metacharacters is still matched literally.
+# five credentials, and a validator that quoted an offending value would put
+# one in `docker logs`. 002 established that tokens never reach the log; a gate
+# added above it must not be the exception. Substitution is bash's own, so a
+# token containing regex or sed metacharacters is still matched literally.
+#
+# The count is five, not four, because 007 added gateway.auth.token to the file
+# this reads. Whoever adds the sixth: the list below is the only thing between
+# a credential and `docker logs`, and a validator failure is exactly when it
+# matters.
 redact_secrets() {
   local text="$1" secret
+  # HERMES_GATEWAY_TOKEN is 007's, and it is here rather than in 007's own
+  # region because this is the only filter between the validator's output and
+  # `docker logs`. 007 puts a fifth credential into the file this validator
+  # reads; a list of four would have been a list that leaked the new one.
   for secret in "${ANTHROPIC_API_KEY:-}" "${TELEGRAM_BOT_TOKEN:-}" \
-                "${SLACK_BOT_TOKEN:-}" "${SLACK_APP_TOKEN:-}"; do
+                "${SLACK_BOT_TOKEN:-}" "${SLACK_APP_TOKEN:-}" \
+                "${HERMES_GATEWAY_TOKEN:-}"; do
     if [ -n "$secret" ]; then
       text="${text//"$secret"/[redacted]}"
     fi
@@ -941,4 +1109,4 @@ register_briefing() {
 
 ( wait_for_gateway && register_briefing ) &
 
-exec openclaw gateway --port 3000 --bind lan
+exec openclaw gateway --port 3000 --bind "$gateway_bind"

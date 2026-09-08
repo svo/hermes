@@ -58,6 +58,7 @@ check "bash -n entrypoint.sh" bash -n "$entrypoint"
 check "shellcheck entrypoint.sh" shellcheck -s bash "$entrypoint"
 check "shellcheck stub-openclaw" shellcheck -s bash "${tests_dir}/stub-openclaw"
 check "shellcheck stub-gog" shellcheck -s bash "${tests_dir}/stub-gog"
+check "bind-test" bash "${tests_dir}/bind-test"
 check "provisioning-test" bash "${tests_dir}/provisioning-test"
 
 printf '\n========================================\n'

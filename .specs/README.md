@@ -80,23 +80,43 @@ fails until 001 and 005 land — see `006/PLAN.md` § Preconditions.
 
 ## Shared-file ownership
 
-Four specs edit `entrypoint.sh` and two edit `hermes-check`. To keep the changes
+Five specs edit `entrypoint.sh` and two edit `hermes-check`. To keep the changes
 non-colliding, each plan declares an owned region. No two specs modify the same lines.
 
 Regions are named by content, not by line number. Each spec that lands moves every line below
 it, so the numbers written into `SPEC.md` and `PLAN.md` are the ones that were true when they
-were written — anchor on the content instead. 001 through 005 have landed; 003 replaced a
-22-line block with a 230-line one, and 005 rewrote the calendar loops around a single parse.
+were written — anchor on the content instead. 001 through 007 have landed; 003 replaced a
+22-line block with a 230-line one, 005 rewrote the calendar loops around a single parse, and 007
+added the gateway bind/auth block between the channel blocks and the phase 3 gate.
+
+007 is the deliberate exception to "no two specs modify the same lines", and it crosses into
+004 twice.
+
+The first is sanctioned by its own plan: the bind/token rule lives inside 004's phase 1
+validation block, because `007/PLAN.md` task 3 says to register it there rather than add a second
+validation site — one error block should still list every violation. It is an added `case` in
+`explain_variable` and an added conditional; it alters no existing line. The conditional is
+placed *below* the owner derivation on purpose, because 004's owner check only demands
+HERMES_OWNER while `missing` is still empty, and a gateway token counted above it would silence a
+real owner problem and cost a second restart.
+
+The second was not planned and is not optional. 007 writes a fifth credential into
+`openclaw.json`; 004's phase 3 gate passes `openclaw config validate`'s output to `docker logs`
+through `redact_secrets`, which listed four. One entry was added to that list. A spec that adds a
+secret to a file owns the redaction of that secret wherever the file is read aloud — leaving it
+to 004 would have meant shipping the leak and filing it.
+
+004's mutation anchors are unaffected by both, and its suite is unchanged either side.
 
 | File | Region | Owner |
 |---|---|---|
 | `entrypoint.sh` | The shebang, the `TZ` export, the phase 1 validation block, ordering within the first `node -e` block, the `exec-approvals.json` guard, and the phase 3 `config validate` gate | **004** |
 | `entrypoint.sh` | The `SLACK_BOT_TOKEN` block | **002** |
 | `entrypoint.sh` | ~~The `jobs.json` `node -e` block~~ (deleted) and the briefing registrar between the Slack block and `exec` | **003** |
-| `entrypoint.sh` | The bind flags on `openclaw onboard` and on the final `exec openclaw gateway`, plus an appended permissions step | **007** |
+| `entrypoint.sh` | The bind flags on `openclaw onboard` and on the final `exec openclaw gateway`; the gateway bind/auth block between the channel blocks and the phase 3 gate; and, inside 004's regions, the `HERMES_GATEWAY_BIND`/`HERMES_GATEWAY_TOKEN` rule in phase 1 and the `HERMES_GATEWAY_TOKEN` entry in `redact_secrets` | **007** |
 | `hermes-check` | `sanitize_field()` helper and the emit sites | **001** |
 | `hermes-check` | VIP matching, counters, jq guards, date parsing | **005** |
-| `entrypoint.sh` | A channel-teardown block, after both channel blocks and before the phase 3 gate | **009** |
+| `entrypoint.sh` | A channel-teardown block, after both channel blocks and before the phase 3 gate — the same stretch 007's gateway and permissions blocks now occupy, so land it above them: teardown has to run before the permissions step, not after it | **009** |
 
 ## Evidence and confidence
 

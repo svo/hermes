@@ -148,6 +148,14 @@ docker run -d \
 
 On first run, the entrypoint automatically configures OpenClaw via non-interactive onboarding and sets up Telegram and Google Suite access. Configuration is persisted to the volume at `/root/.openclaw` so subsequent starts skip onboarding.
 
+> **About `-p 127.0.0.1:3000:3000`.** The gateway binds loopback by default, so under Docker's
+> bridge networking that published port reaches nothing — it is inert, not broken, and Telegram,
+> Slack, the heartbeat and `docker exec` all work without it. It is kept in these examples
+> because it is exactly the line you need the moment you set `HERMES_GATEWAY_BIND=lan`, which is
+> how you make the port live. The same `-p` appears in the Telegram, Slack and Google examples
+> below and means the same thing in each. See
+> [Gateway binding and authentication](#gateway-binding-and-authentication).
+
 ## Environment Variables
 
 | Variable | Required | Description |
@@ -176,6 +184,123 @@ On first run, the entrypoint automatically configures OpenClaw via non-interacti
 | `HERMES_CRON_READY_ATTEMPTS` | No | How many times to poll for gateway readiness before giving up on registering the briefing (default `60`, two seconds apart) |
 | `HERMES_CRON_REGISTER_ATTEMPTS` | No | How many registration attempts before giving up (default `5`, three seconds apart) |
 | `HERMES_CRON_CALL_TIMEOUT` | No | Seconds any single `openclaw` call the registrar makes may take before it is abandoned (default `30`; a create gets twice that) |
+| `HERMES_GATEWAY_BIND` | No (default `loopback`) | Which interface the gateway listens on: `loopback`, `lan`, `tailnet` or `auto`. Anything but `loopback` requires `HERMES_GATEWAY_TOKEN` — see [Gateway binding and authentication](#gateway-binding-and-authentication) |
+| `HERMES_GATEWAY_TOKEN` | With a non-loopback `HERMES_GATEWAY_BIND` | Shared token written to `gateway.auth.token`. The container refuses to start without it on a non-loopback bind |
+
+## Gateway binding and authentication
+
+The gateway binds **loopback** by default, and that is a change: it used to bind `lan` on every
+start, with no `gateway.auth` configured by this image at all.
+
+```bash
+docker exec hermes openclaw config get gateway.bind        # loopback
+```
+
+`gateway.bind` is written on every start, so that answer is guaranteed. `gateway.auth.mode` is
+not: on a loopback bind this image writes no `gateway.auth` at all, so what you read there is
+whatever onboarding left — usually `token`, but on a config that never had one the key is simply
+absent. See [What the container does not touch](#what-the-container-does-not-touch).
+
+One line on startup reports both, and never the token:
+
+```
+gateway: bind=loopback auth=token
+```
+
+`auth=` is the mode actually in force, derived from the config after it is written — so `token`
+there may mean onboarding's credential rather than one you supplied. `auth=none` means nothing
+authenticates the gateway at all.
+
+### The published port stops working, and that is the trade
+
+**Read this before upgrading if you use `-p 127.0.0.1:3000:3000`.**
+
+A `loopback` bind listens on `127.0.0.1` *inside the container*. Docker's published port
+delivers traffic to the container's `eth0`, so under the default bridge networking a published
+port no longer reaches the gateway. Nothing else is affected:
+
+| Still works | Why |
+|---|---|
+| Telegram | the channel dials out; nothing connects to the container |
+| Slack | Socket Mode, likewise outbound |
+| `docker exec hermes …` | runs inside the container, where loopback is loopback |
+| the morning briefing | its registrar probes `127.0.0.1` from inside the container |
+| heartbeats and `hermes-check` | same |
+
+So for the documented deployment — Telegram and/or Slack, and `docker exec` for
+administration — loopback costs nothing and closes the gateway to every other container on the
+Docker network. Only a deployment that actually connects to port 3000 needs the override.
+
+### Publishing the port
+
+Set both variables. The token is not optional, and the container refuses to start without it:
+
+```bash
+  -e HERMES_GATEWAY_BIND="lan" \
+  -e HERMES_GATEWAY_TOKEN="$(openssl rand -hex 32)" \
+  -p 127.0.0.1:3000:3000 \
+```
+
+Keeping `127.0.0.1:` on the `-p` is still worth doing — it limits the published port to the
+host — but it is no longer the only thing standing between the LAN and an agent holding an
+unrestricted shell. `HERMES_GATEWAY_TOKEN` becomes `gateway.auth.token` and
+`gateway.auth.mode` is set to `token`; the value is rewritten from the variable on every start,
+so rotating the credential means changing the variable and restarting, not editing the volume.
+
+Upstream refuses a non-loopback bind with no auth path at all, logging
+`refusing to bind gateway ... without auth` — so the alternative to this rule is not an
+unauthenticated LAN gateway, it is a container that writes its whole configuration and then
+dies on the last line. The check happens in phase 1 instead, before anything is written:
+
+```
+Error: missing required environment variables:
+  HERMES_GATEWAY_TOKEN
+
+HERMES_GATEWAY_TOKEN is required when HERMES_GATEWAY_BIND is not loopback.
+  ...
+
+Nothing has been written. The persisted configuration is untouched.
+```
+
+### Bind modes
+
+`gateway.bind` takes a bind *mode*, not a host: `0.0.0.0` is rejected at startup, and so is
+`127.0.0.1`. Use `lan` for every interface.
+
+| `HERMES_GATEWAY_BIND` | Meaning | Token |
+|---|---|---|
+| `loopback` (default) | `127.0.0.1` inside the container | not needed |
+| `lan` | every interface (`0.0.0.0`) | **required** |
+| `tailnet` | the Tailscale address when available | **required** |
+| `auto` | upstream's own choice | **required** — inside a container it resolves to `0.0.0.0`, so it is a LAN bind by another name |
+| `custom` | rejected: it needs `gateway.customBindHost`, which this image does not write |  |
+
+### Why the bind is written rather than left alone
+
+Upstream's default is `loopback` — but **not inside a container**. Its gateway runbook says the
+effective default in a detected container environment is `auto`, which resolves to `0.0.0.0`
+precisely so that port-forwarding works. That is a reasonable default for the general case and
+the wrong one here, where the thing behind the port is an agent holding an unrestricted shell.
+
+So `gateway.bind` is written explicitly on every start rather than left unset. "Write nothing and
+inherit the default" would bind every interface, which is what the container did before — and
+writing it only at onboarding would leave an upgraded container's persisted `lan` in place for
+ever, while the flag on the running process said something else.
+
+### What the container does not touch
+
+Onboarding configures token auth by default and generates a token when nothing else applies, so
+a container that has ever onboarded normally already has a `gateway.auth.token` — one this image
+did not create and does not manage. On a **loopback** bind that value is left exactly as it is:
+overwriting it would break a client holding it, and writing `mode: none` would take
+authentication away from a gateway that has it. The startup line reports the mode actually in
+force, so `auth=token` there may mean onboarding's credential rather than yours.
+
+To read or rotate that one, use upstream's own commands:
+
+```bash
+docker exec -it hermes openclaw gateway auth-token --show
+```
 
 ## Telegram Integration
 
