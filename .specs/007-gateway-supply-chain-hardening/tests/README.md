@@ -12,12 +12,15 @@ Verification for [SPEC.md](../SPEC.md). No image, no credentials, no Anthropic k
 | `run` | Entry point. Runs every check, accumulating failures rather than stopping at the first. |
 | `harness.sh` | Shared assertions and the hermetic runner. Sourced, not run. |
 | `bind-test` | Track 1 — where the gateway listens, the token that guards a non-loopback bind, and what the startup line says. |
+| `permissions-test` | Track 3 — the mode of the files holding credentials, on a first start and on every start after it. |
 | `provisioning-test` | Track 2 — the pins, the digests, and the build-time lookup that is gone. |
+| `mutation-check` | Sensitivity check. Not part of `run`; see below. |
 | `stub-openclaw` | Fake `openclaw`: `onboard`, `gateway`, `gateway health`, `config get`, `config validate`, `automations list`. |
 | `stub-gog` | Fake `gog`. Records and succeeds. |
 
-Forty-nine cases: 34 in `bind-test`, 15 in `provisioning-test`; one skips unless
-`HERMES_CHECK_UPSTREAM=1`. Track 3 adds `permissions-test` and `mutation-check` on top.
+Sixty-one cases: 34 in `bind-test`, 12 in `permissions-test`, 15 in `provisioning-test`. Two skip
+rather than run: the upstream digest comparison unless `HERMES_CHECK_UPSTREAM=1`, and the
+read-only-credential case where no path refuses `chmod`.
 
 ## Why this suite is not a `bin/test` check
 
@@ -123,6 +126,48 @@ The apt signing keys fetched by `roles/node` and `roles/claude-code` carry no ch
 deliberate scope, not an oversight: they are verified by apt against the repository signature,
 and SPEC § Structural Impact names only gog and fastText. Worth a follow-up spec, not a silent
 widening of this one.
+
+## Mutations
+
+```bash
+.specs/007-gateway-supply-chain-hardening/tests/mutation-check
+```
+
+Forty-two mutations, one behaviour each — twenty-eight against a copy of `entrypoint.sh`,
+fourteen against a copy of the Ansible tree. Every one is caught. It is not part of `run` because
+it re-runs the suites up to forty-two times.
+
+Each mutation asserts its anchor occurs exactly once in the file, and that the mutant still
+parses as bash or as YAML, before it is applied; a bad anchor is reported as a bad anchor rather
+than as a caught or uncaught mutation.
+
+One mutation is worth knowing about. `the token variable gets no guidance` shortens the first
+line of the `HERMES_GATEWAY_TOKEN` explanation to a bare "is required" — and it survived the
+first run, because the case only asserted the parts about `openssl` and the upstream error
+string. The sentence that says *when* the variable is needed was uncovered. That is what a
+mutation check is for; the case now pins that line too.
+
+## What review changed, and what it says about this suite
+
+An adversarial review of the first draft of this change found defects the suite as written could
+not have caught, and the suite grew to catch them. Worth recording, because two of them are the
+kind that pass a green run for years:
+
+- **The phase 3 gate did not redact the gateway token.** 004's filter listed four credentials;
+  007 put a fifth into the file the validator reads. The only case about token logging asserted
+  on a *successful* start, so it could never reach the failure path where the leak lives.
+  `should_not_log_the_gateway_token_when_the_validate_gate_fails` covers it now, which is why the
+  stub's `config validate` learned to fail.
+- **The argv log raced.** See above. Reproduced at roughly one run in twenty, and invisible in a
+  single green run — the reason `mutation-check` and a repeated-run stress pass are both worth
+  more than one clean execution.
+- **Two assertions passed on boilerplate.** The rejected-bind case matched `0.0.0.0` against a
+  message whose static half already ends "not a host such as 0.0.0.0", and the auth-mode case
+  matched `token` against a value onboarding had already written. Both now assert something only
+  the entrypoint can produce.
+- **One case reported on the developer's shell.** The workspace-mode case pinned `644` on a file
+  written by a plain heredoc, whose mode is the umask — so it failed under `umask 077` for a
+  reason that had nothing to do with the change.
 
 ## What still needs a container
 

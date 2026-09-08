@@ -606,6 +606,32 @@ adopt one, delete the file and restart:
 docker exec hermes rm /root/.openclaw/exec-approvals.json && docker restart hermes
 ```
 
+### Credentials on disk are mode 0600
+
+`openclaw.json` holds the Anthropic key, the Telegram bot token, both Slack tokens and — with a
+non-loopback bind — the gateway token. It used to be written at the default `0644` on a host
+bind mount, so every one of them was readable by any user on the host and by any other container
+sharing that volume. The entrypoint now tightens three paths on every start, not only the first,
+so an existing volume is corrected on upgrade:
+
+```bash
+docker exec hermes stat -c '%a' /root/.openclaw/openclaw.json       # 600
+docker exec hermes stat -c '%a' /root/.openclaw/exec-approvals.json # 600
+```
+
+The third is `GOG_SERVICE_ACCOUNT_KEY`, tightened when the variable names a file — which is the
+documented usage, and which for a Workspace deployment is a domain-wide delegated credential.
+
+**This is a floor, not a fix, and it should not be read as one.** The files are owned by `root`,
+and `0600` only says *root can read them*. So it stops an unprivileged user on the host, and it
+stops an unprivileged process in another container sharing the volume — but the agent runs as
+root inside this container and can open every one of them, and so can any other container that
+mounts the same volume and runs as root, which is the default. Anything that can start an agent
+turn can still read every secret listed above. Real answers — Docker secrets, a SecretRef
+indirection, running the agent as a non-root user — are tracked as
+[`.specs/007-gateway-supply-chain-hardening/SPEC.md`](.specs/007-gateway-supply-chain-hardening/SPEC.md)
+Open Question 5 and are not solved here.
+
 ## Heartbeat delivery
 
 The heartbeat summarises the user's inbox and calendar, so where it delivers matters.

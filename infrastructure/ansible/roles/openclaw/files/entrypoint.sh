@@ -318,6 +318,14 @@ if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
     --gateway-bind "$gateway_bind" \
     --skip-skills \
     --skip-health
+
+  # Tightened the moment it exists, not only by the step further down.
+  # Onboarding creates this file at the process umask, so it is 0644 with the
+  # Anthropic key already in it from this line onward -- and everything between
+  # here and the permissions step runs under `set -e`. A start that fails in
+  # the middle would otherwise leave a world-readable credential on the volume
+  # for as long as it takes somebody to notice the container is down.
+  chmod 0600 "$HOME/.openclaw/openclaw.json"
 fi
 
 if [ -n "${GOG_GOOGLE_ACCOUNT:-}" ] && [ -n "${GOG_SERVICE_ACCOUNT_KEY:-}" ]; then
@@ -766,6 +774,53 @@ if [ "$gateway_bind" = 'loopback' ]; then
     'gateway: a loopback bind is not reachable through a published port under Docker' \
     '  bridge networking. docker exec still works. To publish the port, set' \
     '  HERMES_GATEWAY_BIND=lan with HERMES_GATEWAY_TOKEN.'
+fi
+
+# ---------------------------------------------------------------------------
+# Credentials on disk.
+#
+# openclaw.json holds the Anthropic key, the Telegram bot token, both Slack
+# tokens and -- with a non-loopback bind -- the gateway token. It is created at
+# the process umask, which leaves it 0644 on a volume the host and any
+# container sharing that volume can read.
+#
+# This is a floor, not a fix, and it should not be read as one. The agent runs
+# as root in this container and can open every file in it, so 0600 closes the
+# host side and nothing else. SPEC Open Question 5 tracks the real answer.
+#
+# One step here rather than a chmod after each write: every write is upstream
+# of this line, they belong to three other specs, and nothing reads the file
+# between them and here except this container.
+# ---------------------------------------------------------------------------
+
+for gateway_secret_path in \
+  "$HOME/.openclaw/openclaw.json" \
+  "$HOME/.openclaw/exec-approvals.json"; do
+  if [ -f "$gateway_secret_path" ]; then
+    chmod 0600 "$gateway_secret_path"
+  fi
+done
+
+# GOG_SERVICE_ACCOUNT_KEY is documented as a path inside the container, and
+# `gog auth service-account set --key` is handed it verbatim. It is only a file
+# to tighten when it names one: the same variable carrying the key material
+# itself is a value, not a path, and `-f` is what tells the two apart.
+#
+# Warned about rather than fatal, unlike the two files above. Those are this
+# container's own, on a volume it has already written to, so a chmod that fails
+# there means something is wrong that a start should not survive. This one is
+# the operator's file and may legitimately be read-only -- a Docker secret
+# under /run/secrets, or `-v key.json:/key.json:ro`, both ordinary ways to
+# deliver a delegated Google credential. Killing a container that was working
+# yesterday, to enforce a permission on a file mounted read-only precisely so
+# nothing can change it, would be a worse outcome than the one being prevented.
+if [ -n "${GOG_SERVICE_ACCOUNT_KEY:-}" ] && [ -f "${GOG_SERVICE_ACCOUNT_KEY}" ]; then
+  if ! chmod 0600 "$GOG_SERVICE_ACCOUNT_KEY" 2>/dev/null; then
+    printf '%s\n' \
+      "gateway: could not tighten ${GOG_SERVICE_ACCOUNT_KEY} to 0600; leaving it as it is." \
+      '  A read-only mount is the usual reason, and is fine. Otherwise check the' \
+      '  mode on the host: it holds a Google credential.' >&2
+  fi
 fi
 
 # ---------------------------------------------------------------------------

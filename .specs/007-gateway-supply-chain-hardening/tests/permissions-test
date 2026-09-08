@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+#
+# What mode the files holding credentials land in.
+#
+#   .specs/007-gateway-supply-chain-hardening/tests/permissions-test
+#
+# Finding D5: the Anthropic key, both Slack tokens and the Telegram bot token
+# were written to `openclaw.json` at the default 0644, on a host bind mount.
+#
+# This is a floor and the cases say so by what they do not assert: nothing here
+# claims the secrets are safe. The agent runs as root in the container and can
+# read every file in it, so 0600 closes the host side and nothing else. What
+# these cases pin is that the host side really is closed, on a first start and
+# on every start after it.
+
+set -uo pipefail
+
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+readonly GATEWAY_TOKEN='stub-gateway-token-0123456789abcdef'
+
+# Whether this shell's umask would leave a heredoc-written file group-readable
+# at all. Under `umask 077` a plain `cat >` already produces 0600, so "the
+# workspace was not tightened" is unobservable and the case that checks it says
+# so instead of failing for a reason that is not about the entrypoint.
+if [ "$(( 0$(umask) & 0060 ))" -eq 0 ]; then
+  umask_permits_group_read='yes'
+else
+  umask_permits_group_read='no'
+fi
+
+# The three paths the spec names, as a case sees them after a run.
+config_mode() { file_mode "${RUN_HOME}/.openclaw/openclaw.json"; }
+approvals_mode() { file_mode "${RUN_HOME}/.openclaw/exec-approvals.json"; }
+
+should_write_the_config_mode_0600_when_it_starts() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "openclaw.json" "600" "$(config_mode)"
+  case_end
+}
+
+should_write_the_approvals_mode_0600_when_it_starts() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  assert_equals "exec-approvals.json" "600" "$(approvals_mode)"
+  case_end
+}
+
+should_tighten_the_config_holding_every_channel_token_when_it_starts() {
+  case_start "${FUNCNAME[0]}"
+  # The run that actually has something to protect: four credentials in one
+  # file on a bind mount the host can read.
+  run_entrypoint \
+    TELEGRAM_BOT_TOKEN=0000000:stub-telegram TELEGRAM_ALLOW_FROM=123456789 \
+    SLACK_BOT_TOKEN=xoxb-stub SLACK_APP_TOKEN=xapp-stub SLACK_ALLOW_FROM=U0STUBUSER1
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "openclaw.json" "600" "$(config_mode)"
+  # The premise of the case, checked rather than assumed: a config with no
+  # tokens in it would make the mode assertion above meaningless.
+  assert_equals "the telegram token really is in there" "0000000:stub-telegram" \
+    "$(config_get channels.telegram.botToken)"
+  case_end
+}
+
+should_tighten_the_config_holding_the_gateway_token_when_the_bind_is_lan() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint HERMES_GATEWAY_BIND=lan "HERMES_GATEWAY_TOKEN=${GATEWAY_TOKEN}"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  # 007 adds a fifth credential to this file. It has to be covered by the same
+  # step, not by a second one somebody has to remember.
+  assert_equals "gateway.auth.token was written" "$GATEWAY_TOKEN" \
+    "$(config_get gateway.auth.token)"
+  assert_equals "openclaw.json" "600" "$(config_mode)"
+  case_end
+}
+
+should_tighten_a_config_an_older_image_left_world_readable() {
+  case_start "${FUNCNAME[0]}"
+  # The upgrade path, and the only reason this runs on every start rather than
+  # only on the start that creates the file. An existing volume carries a 0644
+  # config full of credentials; a step that ran only at creation would never
+  # reach it.
+  local home
+  home="$(new_home)"
+  cat > "${home}/.openclaw/openclaw.json" <<'OLD'
+{
+  "gateway": { "mode": "local", "port": 3000, "bind": "lan" },
+  "agents": { "defaults": {} },
+  "channels": {},
+  "env": { "vars": { "ANTHROPIC_API_KEY": "written-by-an-older-image" } }
+}
+OLD
+  cat > "${home}/.openclaw/exec-approvals.json" <<'OLDAPPROVALS'
+{ "version": 1, "defaults": { "security": "full" } }
+OLDAPPROVALS
+  chmod 0644 "${home}/.openclaw/openclaw.json" "${home}/.openclaw/exec-approvals.json"
+  run_entrypoint --home "$home"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "openclaw.json" "600" "$(config_mode)"
+  assert_equals "exec-approvals.json" "600" "$(approvals_mode)"
+  case_end
+}
+
+should_keep_the_mode_0600_across_a_restart() {
+  case_start "${FUNCNAME[0]}"
+  local home
+  home="$(new_home)"
+  run_entrypoint --home "$home"
+  assert_equals "the first run succeeded" "0" "$RUN_STATUS"
+  assert_equals "after the first start" "600" "$(config_mode)"
+  run_entrypoint --home "$home"
+  assert_equals "the second run succeeded" "0" "$RUN_STATUS"
+  # The write path runs every start, so a rewrite that reset the mode would be
+  # a regression only a second run could see.
+  assert_equals "after the restart" "600" "$(config_mode)"
+  case_end
+}
+
+should_tighten_the_service_account_key_when_the_variable_names_a_file() {
+  case_start "${FUNCNAME[0]}"
+  local home key
+  home="$(new_home)"
+  key="${home}/.openclaw/service-account.json"
+  printf '%s\n' '{"type":"service_account","private_key":"stub"}' > "$key"
+  chmod 0644 "$key"
+  run_entrypoint --home "$home" \
+    GOG_GOOGLE_ACCOUNT=stub@example.com "GOG_SERVICE_ACCOUNT_KEY=${key}"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  # A domain-wide delegated Google Workspace credential, at 0644, on the same
+  # bind mount. README documents exactly this path.
+  assert_equals "the service account key" "600" "$(file_mode "$key")"
+  case_end
+}
+
+should_start_cleanly_when_the_service_account_key_is_not_a_path() {
+  case_start "${FUNCNAME[0]}"
+  # The same variable also carries the key material itself — 006's
+  # config-schema-check drives that shape deliberately, asserting it reaches
+  # `gog` as one argument. A permissions step that assumed a path would treat
+  # a JSON blob as a filename and take the whole start down with it.
+  run_entrypoint \
+    GOG_GOOGLE_ACCOUNT=stub@example.com \
+    'GOG_SERVICE_ACCOUNT_KEY={"type":"service_account","private_key":"stub"}'
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "openclaw.json" "600" "$(config_mode)"
+  case_end
+}
+
+should_not_fail_when_the_service_account_key_path_does_not_exist() {
+  case_start "${FUNCNAME[0]}"
+  # An operator who mistypes the path, or forgets to mount the volume. The
+  # credential step is not the place to decide that is fatal; `gog` already
+  # reports it, and taking the start down here would replace a clear error
+  # with a chmod failure.
+  run_entrypoint \
+    GOG_GOOGLE_ACCOUNT=stub@example.com \
+    GOG_SERVICE_ACCOUNT_KEY=/root/.openclaw/not-mounted.json
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  case_end
+}
+
+# The early chmod, and the only way to see it.
+#
+# The step at the end of phase 2 leaves the file at 0600 whether or not
+# onboarding tightened it, so no ordinary run can tell the two apart. What
+# distinguishes them is a start that *dies in between*: the config exists, full
+# of credentials, and the permissions step was never reached. 002's Slack block
+# is the reachable failure in that window — it validates its own input and
+# exits 1, after onboarding has written the file and before anything tightens
+# it.
+should_tighten_the_config_when_a_later_block_aborts_the_start() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint \
+    SLACK_BOT_TOKEN=xoxb-stub SLACK_APP_TOKEN=xapp-stub SLACK_ALLOW_FROM=U0STUBUSER1 \
+    SLACK_ALLOW_CHANNELS='#general'
+  assert_equals "the run was rejected by the Slack block" "1" "$RUN_STATUS"
+  # The premise: it got far enough to write the file. A run rejected in phase 1
+  # would satisfy the mode assertion by writing nothing, and prove nothing.
+  if ! onboarding_ran; then
+    fail "onboarding never ran, so there is no config whose mode means anything"
+  fi
+  if [ ! -f "$RUN_CONFIG" ]; then
+    fail "no configuration was written; this case cannot see what it is for"
+  fi
+  assert_equals "the abandoned config is not world readable" "600" "$(config_mode)"
+  case_end
+}
+
+# A credential this container cannot chmod must not take the container down.
+# /proc/self/cmdline is a regular file by `-f` that even its owner cannot
+# chmod, which is the same refusal a read-only bind mount produces without
+# needing one.
+should_start_anyway_when_the_service_account_key_cannot_be_tightened() {
+  case_start "${FUNCNAME[0]}"
+  local immutable='/proc/self/cmdline'
+  if [ ! -f "$immutable" ] || chmod 0600 "$immutable" 2>/dev/null; then
+    skip_case "${FUNCNAME[0]}" \
+      'no path here refuses chmod; the read-only-credential path was not exercised'
+    CURRENT_CASE=""
+    return 0
+  fi
+  run_entrypoint \
+    GOG_GOOGLE_ACCOUNT=stub@example.com "GOG_SERVICE_ACCOUNT_KEY=${immutable}"
+  # A Docker secret under /run/secrets, or `-v key.json:/key.json:ro`, are both
+  # ordinary ways to deliver a delegated Google credential. Killing a container
+  # that worked yesterday, to enforce a mode on a file mounted read-only
+  # precisely so nothing can change it, is worse than the exposure it prevents.
+  assert_equals "the start survived" "0" "$RUN_STATUS"
+  assert_contains "and said what it could not do" "$RUN_ALL" \
+    'could not tighten'
+  assert_equals "the files it does own are still 600" "600" "$(config_mode)"
+  case_end
+}
+
+should_leave_the_workspace_files_alone_when_it_tightens_the_secrets() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  # Scope, stated as a case. Nothing in the workspace is a credential, and
+  # tightening files the spec does not name would be a change nobody asked for
+  # with its own way to break something.
+  #
+  # Asserted as "not 0600", not as "exactly 0644". AGENTS.md is written by a
+  # plain `cat >` heredoc, so its mode is 0666 masked by the umask the
+  # container inherits — `env -i` clears the environment but cannot clear a
+  # umask, so a developer running with `umask 002` sees 664 and one with
+  # `umask 077` sees 600. Pinning 644 would make this case a report on the
+  # invoking shell rather than on the entrypoint, and under a strict umask it
+  # would fail for a reason that has nothing to do with the change.
+  local workspace_mode
+  workspace_mode="$(file_mode "${RUN_HOME}/.openclaw/workspace/AGENTS.md")"
+  if [ "$workspace_mode" = 'absent' ]; then
+    fail "the workspace file was never written"
+  elif [ "$umask_permits_group_read" = 'yes' ] && [ "$workspace_mode" = '600' ]; then
+    fail "AGENTS.md was tightened to 600; the permissions step reached beyond the three paths the spec names"
+  fi
+  # The three that are in scope are, in the same run.
+  assert_equals "openclaw.json is still 600" "600" "$(config_mode)"
+  case_end
+}
+
+should_write_the_config_mode_0600_when_it_starts
+should_write_the_approvals_mode_0600_when_it_starts
+should_tighten_the_config_holding_every_channel_token_when_it_starts
+should_tighten_the_config_holding_the_gateway_token_when_the_bind_is_lan
+should_tighten_a_config_an_older_image_left_world_readable
+should_keep_the_mode_0600_across_a_restart
+should_tighten_the_config_when_a_later_block_aborts_the_start
+should_tighten_the_service_account_key_when_the_variable_names_a_file
+should_start_anyway_when_the_service_account_key_cannot_be_tightened
+should_start_cleanly_when_the_service_account_key_is_not_a_path
+should_not_fail_when_the_service_account_key_path_does_not_exist
+should_leave_the_workspace_files_alone_when_it_tightens_the_secrets
+
+report_totals permissions-test

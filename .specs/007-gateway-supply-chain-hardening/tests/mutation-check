@@ -1,0 +1,400 @@
+#!/usr/bin/env bash
+#
+# Sensitivity check. Not part of `run`: it is slow, and it is a check on the
+# cases rather than on the code.
+#
+# Each mutation changes exactly one behaviour in a copy of the file it names
+# and asserts that at least one case notices. A mutation nothing catches is a
+# hole in the suite.
+#
+#   .specs/007-gateway-supply-chain-hardening/tests/mutation-check [name-substring]
+#
+# With an argument, only mutations whose name contains it are run — the whole
+# set takes a while, and this is how you re-check one after editing its anchor.
+#
+# Every anchor is asserted to occur exactly once in the whole file before it is
+# applied, and a bad anchor is reported as a bad anchor rather than as a caught
+# or uncaught mutation. 002 learned that the hard way: two of its mutations
+# anchored on a string that also occurred in a neighbouring block, so they
+# mutated code nothing there tested and read as clean.
+
+# The anchors below are literal fragments of the files under test, so every $
+# in them is meant to stay a $. Single quotes are the point.
+# shellcheck disable=SC2016
+
+set -uo pipefail
+
+tests_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${tests_dir}/../../.." && pwd)"
+entrypoint="${repo_root}/infrastructure/ansible/roles/openclaw/files/entrypoint.sh"
+ansible_tree="${repo_root}/infrastructure/ansible"
+
+only="${1:-}"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+missed=()
+skipped=0
+
+selected() {
+  if [ -z "$only" ]; then
+    return 0
+  fi
+  case "$1" in
+    *"$only"*) return 0 ;;
+    *) skipped=$((skipped + 1)); return 1 ;;
+  esac
+}
+
+# apply <source> <destination> <anchor> <replacement>
+#
+# The anchor is a fixed string, matched against the whole file so that it may
+# span lines; the replacement takes its place. Both are passed through the
+# environment, never interpolated into a pattern.
+apply() {
+  MUT_ANCHOR="$3" MUT_REPLACEMENT="$4" python3 -c '
+import os, sys
+src, dst = sys.argv[1], sys.argv[2]
+anchor = os.environ["MUT_ANCHOR"]
+replacement = os.environ["MUT_REPLACEMENT"]
+s = open(src).read()
+hits = s.count(anchor)
+if hits != 1:
+    sys.stderr.write("hits=%d\n" % hits)
+    sys.exit(3)
+open(dst, "w").write(s.replace(anchor, replacement, 1))
+' "$1" "$2"
+}
+
+# Report a mutation as caught or not, given the FAIL lines the suites printed.
+verdict() {
+  local name="$1" caught="$2"
+  if [ -n "$caught" ]; then
+    printf '%-52s caught by %s\n' "$name" "$caught"
+  else
+    printf '%-52s *** NOT CAUGHT ***\n' "$name" >&2
+    missed+=("$name")
+  fi
+}
+
+failing_cases() {
+  printf '%s\n' "$1" | grep '^FAIL ' | sed 's/^FAIL //' | paste -sd, -
+}
+
+# mutate <name> <anchor> <replacement> — entrypoint.sh, checked by the two
+# suites that run it.
+mutate() {
+  local name="$1" mutant="${work}/entrypoint.sh" out caught
+
+  selected "$name" || return 0
+
+  if ! apply "$entrypoint" "$mutant" "$2" "$3"; then
+    printf 'ANCHOR %-45s did not match exactly once — not applied\n' "$name" >&2
+    missed+=("$name (bad anchor)")
+    return
+  fi
+
+  # A mutant that no longer parses proves nothing about the cases.
+  if ! bash -n "$mutant" 2>/dev/null; then
+    printf 'SYNTAX %-45s the mutant does not parse — not applied\n' "$name" >&2
+    missed+=("$name (bad mutant)")
+    return
+  fi
+
+  # bind-test first: it is the larger of the two and catches most of these.
+  # permissions-test only runs while nothing has caught the mutation yet.
+  out="$(ENTRYPOINT="$mutant" bash "${tests_dir}/bind-test" 2>&1)"
+  caught="$(failing_cases "$out")"
+  if [ -z "$caught" ]; then
+    out="$(ENTRYPOINT="$mutant" bash "${tests_dir}/permissions-test" 2>&1)"
+    caught="$(failing_cases "$out")"
+  fi
+
+  verdict "$name" "$caught"
+}
+
+# mutate_role <name> <role-relative path> <anchor> <replacement> — the Ansible
+# tree, checked by provisioning-test against a whole mutated copy.
+mutate_role() {
+  local name="$1" relative="$2" tree="${work}/ansible" out caught
+
+  selected "$name" || return 0
+
+  rm -rf "$tree"
+  cp -R "$ansible_tree" "$tree"
+
+  if ! apply "${ansible_tree}/${relative}" "${tree}/${relative}" "$3" "$4"; then
+    printf 'ANCHOR %-45s did not match exactly once — not applied\n' "$name" >&2
+    missed+=("$name (bad anchor)")
+    return
+  fi
+
+  # A mutant that is no longer YAML proves nothing either.
+  if ! python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' \
+      "${tree}/${relative}" 2>/dev/null; then
+    printf 'SYNTAX %-45s the mutant is not valid YAML — not applied\n' "$name" >&2
+    missed+=("$name (bad mutant)")
+    return
+  fi
+
+  out="$(HERMES_ANSIBLE_TREE="$tree" bash "${tests_dir}/provisioning-test" 2>&1)"
+  caught="$(failing_cases "$out")"
+  verdict "$name" "$caught"
+}
+
+# --- the bind default ------------------------------------------------------
+
+mutate 'the bind defaults to lan' \
+  'gateway_bind="${HERMES_GATEWAY_BIND:-loopback}"' \
+  'gateway_bind="${HERMES_GATEWAY_BIND:-lan}"'
+
+# The anchor runs on to the next flag so that it does not end on a backslash;
+# a single-quoted string ending in one reads as an escaped quote to a linter,
+# and this file has to pass the same shellcheck as everything else here.
+mutate 'onboarding is told a different bind' \
+  '    --gateway-bind "$gateway_bind" \
+    --skip-skills' \
+  '    --gateway-bind lan \
+    --skip-skills'
+
+mutate 'the gateway is told a different bind' \
+  'exec openclaw gateway --port 3000 --bind "$gateway_bind"' \
+  'exec openclaw gateway --port 3000 --bind lan'
+
+mutate 'the bind is never written to the config' \
+  '    config.gateway.bind = bind;' \
+  '    ;'
+
+mutate 'the port is changed along with the bind' \
+  'exec openclaw gateway --port 3000 --bind "$gateway_bind"' \
+  'exec openclaw gateway --port 3001 --bind "$gateway_bind"'
+
+# --- the rule that guards a non-loopback bind ------------------------------
+
+mutate 'a non-loopback bind needs no token' \
+  '      missing+=(HERMES_GATEWAY_TOKEN)' \
+  '      :'
+
+mutate 'auto is treated as a loopback bind' \
+  '  auto | lan | tailnet)' \
+  '  auto | loopback) ;;
+  lan | tailnet)'
+
+mutate 'a bind that is not a mode is accepted' \
+  '    rejected+=("HERMES_GATEWAY_BIND '"'"'${gateway_bind}'"'"': expected loopback, lan, tailnet or auto -- a bind mode, not a host such as 0.0.0.0")' \
+  '    :'
+
+mutate 'a custom bind is accepted' \
+  '    rejected+=("HERMES_GATEWAY_BIND '"'"'custom'"'"': it needs gateway.customBindHost, which this image does not write; use lan for every interface")' \
+  '    :'
+
+mutate 'the token variable gets no guidance' \
+  "        'HERMES_GATEWAY_TOKEN is required when HERMES_GATEWAY_BIND is not loopback.' \\" \
+  "        'HERMES_GATEWAY_TOKEN is required.' \\"
+
+mutate 'the bind rule runs after the writes' \
+  'gateway_bind="${HERMES_GATEWAY_BIND:-loopback}"
+
+case "$gateway_bind" in' \
+  'gateway_bind="${HERMES_GATEWAY_BIND:-loopback}"
+
+case "${HERMES_NEVER_SET:-loopback}" in'
+
+# --- the credential --------------------------------------------------------
+
+mutate 'auth is rewritten on a loopback bind too' \
+  "    if (bind !== 'loopback') {" \
+  '    if (true) {'
+
+mutate 'the token is written to the log' \
+  'echo "gateway: bind=${gateway_bind} auth=${gateway_auth_mode}"' \
+  'echo "gateway: bind=${gateway_bind} auth=${gateway_auth_mode} token=${HERMES_GATEWAY_TOKEN:-}"'
+
+mutate 'a bare token is reported as no auth at all' \
+  '      if (auth.token) {
+        mode = '"'"'token'"'"';' \
+  '      if (false) {
+        mode = '"'"'token'"'"';'
+
+mutate 'the bind and auth line is dropped' \
+  'echo "gateway: bind=${gateway_bind} auth=${gateway_auth_mode}"' \
+  ':'
+
+mutate 'the published-port consequence is not stated' \
+  "    'gateway: a loopback bind is not reachable through a published port under Docker' \\" \
+  "    'gateway: bound loopback' \\"
+
+# --- the permissions step --------------------------------------------------
+
+mutate 'nothing is tightened' \
+  'for gateway_secret_path in \
+  "$HOME/.openclaw/openclaw.json" \
+  "$HOME/.openclaw/exec-approvals.json"; do' \
+  'for gateway_secret_path in; do'
+
+mutate 'the approvals file is left world readable' \
+  '  "$HOME/.openclaw/openclaw.json" \
+  "$HOME/.openclaw/exec-approvals.json"; do' \
+  '  "$HOME/.openclaw/openclaw.json"; do'
+
+mutate 'the config is left world readable' \
+  '  "$HOME/.openclaw/openclaw.json" \
+  "$HOME/.openclaw/exec-approvals.json"; do' \
+  '  "$HOME/.openclaw/exec-approvals.json"; do'
+
+mutate 'the service account key is left world readable' \
+  '  if ! chmod 0600 "$GOG_SERVICE_ACCOUNT_KEY" 2>/dev/null; then' \
+  '  if false; then'
+
+mutate 'the config is tightened to group readable' \
+  '    chmod 0600 "$gateway_secret_path"' \
+  '    chmod 0640 "$gateway_secret_path"'
+
+mutate 'the permissions step runs only when the file is new' \
+  '  if [ -f "$gateway_secret_path" ]; then' \
+  '  if [ ! -f "$gateway_secret_path" ]; then'
+
+# --- what review found the first draft could not catch ---------------------
+
+mutate 'the validate gate does not redact the gateway token' \
+  '                "${SLACK_BOT_TOKEN:-}" "${SLACK_APP_TOKEN:-}" \
+                "${HERMES_GATEWAY_TOKEN:-}"; do' \
+  '                "${SLACK_BOT_TOKEN:-}" "${SLACK_APP_TOKEN:-}"; do'
+
+mutate 'the config is left world readable until the final step' \
+  '  chmod 0600 "$HOME/.openclaw/openclaw.json"
+fi' \
+  '  :
+fi'
+
+mutate 'an ignored token is ignored silently' \
+  'if [ -n "${HERMES_GATEWAY_TOKEN:-}" ] && [ "$gateway_bind" = '"'"'loopback'"'"' ]; then' \
+  'if false; then'
+
+mutate 'a read-only credential kills the start' \
+  '  if ! chmod 0600 "$GOG_SERVICE_ACCOUNT_KEY" 2>/dev/null; then' \
+  '  chmod 0600 "$GOG_SERVICE_ACCOUNT_KEY"
+  if false; then'
+
+# The real ordering defect, reproduced the only way that reproduces it: the
+# rule counted into `missing` *before* 004's owner check reads that array.
+mutate 'the bind rule runs before the owner is derived' \
+  '# Who the heartbeat reports to.' \
+  'gateway_bind="${HERMES_GATEWAY_BIND:-loopback}"
+case "$gateway_bind" in
+  loopback) ;;
+  *) if [ -z "${HERMES_GATEWAY_TOKEN:-}" ]; then missing+=(HERMES_GATEWAY_TOKEN); fi ;;
+esac
+
+# Who the heartbeat reports to.'
+
+mutate 'password auth is reported as none' \
+  '      } else if (auth.password) {
+        mode = '"'"'password'"'"';' \
+  '      } else if (false) {
+        mode = '"'"'password'"'"';'
+
+# --- provisioning ----------------------------------------------------------
+
+mutate_role 'openclaw is installed at latest again' \
+  roles/openclaw/tasks/main.yml \
+  '    version: "{{ openclaw_version }}"' \
+  '    state: latest'
+
+mutate_role 'the openclaw pin becomes a dist-tag' \
+  roles/openclaw/defaults/main.yml \
+  'openclaw_version: 2026.9.2' \
+  'openclaw_version: latest'
+
+mutate_role 'the builder validator drifts from the service' \
+  roles/openclaw-cli/defaults/main.yml \
+  'openclaw_cli_version: 2026.9.2' \
+  'openclaw_cli_version: 2026.6.34'
+
+mutate_role 'the gog download is no longer verified' \
+  roles/openclaw/tasks/main.yml \
+  '    checksum: "{{ openclaw_gog_checksums[openclaw_gog_arch] }}"
+' \
+  ''
+
+mutate_role 'the fasttext download is no longer verified' \
+  roles/fasttext/tasks/main.yml \
+  '    checksum: "{{ fasttext_checksum }}"
+' \
+  ''
+
+mutate_role 'one architecture loses its digest' \
+  roles/openclaw/defaults/main.yml \
+  '  arm64: sha256:7c23b402c9234ba476e84b39ac6d875444b47ec516312a99e877e1386ba28295
+' \
+  ''
+
+mutate_role 'a digest is truncated' \
+  roles/openclaw/defaults/main.yml \
+  '  amd64: sha256:438efa460b8291f023299ad2ed5610701cad7508db88392039c0891e2175e3b1' \
+  '  amd64: sha256:438efa460b8291f023299ad2ed5610701cad7508'
+
+mutate_role 'the version is resolved at build time again' \
+  roles/openclaw/tasks/main.yml \
+  '- name: Resolve the gog release asset for this architecture' \
+  '- name: Get latest gog version
+  ansible.builtin.uri:
+    url: https://api.github.com/repos/openclaw/gogcli/releases/latest
+    return_content: true
+  register: gog_release
+
+- name: Resolve the gog release asset for this architecture'
+
+mutate_role 'the gog archive is left in the image' \
+  roles/openclaw/tasks/main.yml \
+  '- name: Clean up the gog archive
+  ansible.builtin.file:
+    path: "{{ openclaw_gog_archive }}"
+    state: absent
+  become: true
+
+' \
+  ''
+
+mutate_role 'the old repository owner comes back' \
+  roles/openclaw/defaults/main.yml \
+  'openclaw_gog_base: https://github.com/openclaw/gogcli/releases/download' \
+  'openclaw_gog_base: https://github.com/steipete/gogcli/releases/download'
+
+mutate_role 'the fasttext version is repeated in the tasks' \
+  roles/fasttext/tasks/main.yml \
+  '    chdir: "/tmp/fastText-{{ fasttext_version }}"' \
+  '    chdir: /tmp/fastText-0.9.2'
+
+mutate_role 'a version bump becomes a no-op on a host that has gog' \
+  roles/openclaw/tasks/main.yml \
+  '  when: not openclaw_gog_present
+  become: true
+
+- name: Clean up the gog archive' \
+  '  become: true
+
+- name: Clean up the gog archive'
+
+mutate_role 'the version guard matches any version at all' \
+  roles/openclaw/tasks/main.yml \
+  '    openclaw_gog_version_pattern: "(^|[^0-9.])v?{{ openclaw_gog_version | regex_escape }}([^0-9.]|$)"' \
+  '    openclaw_gog_version_pattern: "."'
+
+mutate_role 'the version guard matches a prefix' \
+  roles/openclaw/tasks/main.yml \
+  '([^0-9.]|$)"' \
+  '"'
+
+printf '\n'
+if [ "$skipped" -gt 0 ]; then
+  printf '%d mutation(s) skipped by the filter.\n' "$skipped"
+fi
+if [ ${#missed[@]} -eq 0 ]; then
+  printf 'Every mutation was caught.\n'
+  exit 0
+fi
+printf '%d mutation(s) survived or could not be applied:\n' "${#missed[@]}" >&2
+printf '  %s\n' "${missed[@]}" >&2
+exit 1
