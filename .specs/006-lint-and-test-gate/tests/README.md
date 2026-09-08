@@ -100,9 +100,11 @@ searched the whole 2.3 MB of `openclaw config schema`; `tools.loopDetection` acc
 and nothing else, under `additionalProperties: false`.
 
 This was not cosmetic. `entrypoint.sh` phase 3 runs `openclaw config validate` and **exits 1**
-when it fails, and the openclaw role installs `state: latest`, so the break arrives with the
-next image build rather than with any change to this repository. A service image built today
-would have refused to start, printing a schema error about a key nobody had touched in months.
+when it fails, and at the time the openclaw role installed `state: latest`, so the break arrived
+with the next image build rather than with any change to this repository. A service image built
+that day would have refused to start, printing a schema error about a key nobody had touched in
+months. (007 has since pinned `openclaw_version`, so the arrival is now a reviewed bump rather
+than a Thursday — which changes when this gate earns its keep, not whether it does.)
 
 That is SPEC finding D2, and it is precisely the third user story — "I want config schema
 violations caught at build time, so that an upstream rename fails a pipeline instead of every

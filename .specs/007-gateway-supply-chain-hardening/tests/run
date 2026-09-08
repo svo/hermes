@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+#
+# Runs every check for 007. Accumulates failures rather than stopping at the
+# first, so one run reveals every problem.
+#
+#   .specs/007-gateway-supply-chain-hardening/tests/run
+#
+# Not a `bin/test` check, and see README.md for why: 002's, 003's and 004's
+# entrypoint suites are not either, and adding one would run this whole suite
+# inside every disposable repository 006's own cases build. The scripts here
+# are still linted by the gate, which discovers by shebang rather than by
+# extension.
+
+set -uo pipefail
+
+tests_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${tests_dir}/../../.." && pwd)"
+entrypoint="${repo_root}/infrastructure/ansible/roles/openclaw/files/entrypoint.sh"
+
+failed=()
+skipped=()
+ran=0
+
+# Output is captured rather than streamed so that the skip notices inside it
+# can be relayed, then printed in full either way.
+#
+# A check that passes can still have skipped part of itself, and here that is
+# not hypothetical: provisioning-test skips its entire body when python3 or
+# PyYAML is absent, and skips its upstream digest comparison unless
+# HERMES_CHECK_UPSTREAM is set. Without this, a run in which track 2 asserted
+# nothing at all would print "All 007 checks passed." — a green verdict over a
+# suite that never opened a role. `bin/test` relays skips for exactly this
+# reason; a suite it does not run needs its own copy of the discipline rather
+# than an exemption from it.
+check() {
+  local name="$1" output status=0
+  shift
+  printf '\n== %s ==\n' "$name"
+  output="$("$@" 2>&1)" || status=$?
+  printf '%s\n' "$output"
+
+  while IFS= read -r notice; do
+    [ -n "$notice" ] || continue
+    notice="${notice#"${notice%%[![:space:]]*}"}"
+    skipped+=("${name}: ${notice#SKIP }")
+  done < <(grep -E '^[[:space:]]*SKIP ' <<< "$output" || true)
+
+  ran=$((ran + 1))
+  if [ "$status" -eq 0 ]; then
+    printf 'PASS %s\n' "$name"
+  else
+    printf 'FAIL %s\n' "$name" >&2
+    failed+=("$name")
+  fi
+}
+
+check "bash -n entrypoint.sh" bash -n "$entrypoint"
+check "shellcheck entrypoint.sh" shellcheck -s bash "$entrypoint"
+check "shellcheck stub-openclaw" shellcheck -s bash "${tests_dir}/stub-openclaw"
+check "shellcheck stub-gog" shellcheck -s bash "${tests_dir}/stub-gog"
+check "provisioning-test" bash "${tests_dir}/provisioning-test"
+
+printf '\n========================================\n'
+printf '%d checks passed, %d failed, %d skip notice(s)\n' \
+  "$(( ran - ${#failed[@]} ))" "${#failed[@]}" "${#skipped[@]}"
+
+# Repeated at the end on purpose. One scrolled past the top of a long run is a
+# thing that did not happen, and the reader has no other way to notice.
+if [ ${#skipped[@]} -gt 0 ]; then
+  printf '\nSkipped:\n'
+  printf '  %s\n' "${skipped[@]}"
+fi
+
+if [ ${#failed[@]} -eq 0 ]; then
+  printf '\nAll 007 checks passed.\n'
+  exit 0
+fi
+
+printf '\nFailing checks:\n' >&2
+printf '  %s\n' "${failed[@]}" >&2
+exit 1

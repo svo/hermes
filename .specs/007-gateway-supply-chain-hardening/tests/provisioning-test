@@ -1,0 +1,451 @@
+#!/usr/bin/env bash
+#
+# What the build installs, and whether it can prove what it installed.
+#
+#   .specs/007-gateway-supply-chain-hardening/tests/provisioning-test
+#
+# Findings D1a–D1d, D3a, D3b and D4: `openclaw` installed with `state: latest`,
+# `gog` resolved from `releases/latest` at build time through an anonymous
+# api.github.com call sharing a 60-per-hour limit, and both archives fetched
+# with nothing verifying what arrived.
+#
+# The roles are read as YAML rather than grepped. A grep for `state: latest`
+# would pass on a role that had it under a different key, and would fail on a
+# comment mentioning it — and every one of these facts is structural.
+#
+# Nothing here reaches the network. One case would like to, and says so: it
+# checks the pinned digests against the artefacts upstream is serving today,
+# and is opt-in because a suite that downloads twenty-seven megabytes on every
+# run is a suite people stop running.
+
+set -uo pipefail
+
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+# Overridable the way ENTRYPOINT is, so a case can be pointed at another copy
+# of the tree -- which is how mutation-check shows these assertions failing
+# against a role that lost its pin or its digest.
+ANSIBLE_TREE="${HERMES_ANSIBLE_TREE:-${REPO_ROOT}/infrastructure/ansible}"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  skip_case provisioning-test 'python3 is not installed; the roles were not read'
+  report_totals provisioning-test
+  exit $?
+fi
+if ! python3 -c 'import yaml' >/dev/null 2>&1; then
+  # PyYAML ships with Ansible, so the builder image and any machine that can
+  # run ansible-lint has it. A machine that cannot read the roles must say so
+  # rather than report on roles it never opened.
+  skip_case provisioning-test 'python3 has no yaml module; the roles were not read'
+  report_totals provisioning-test
+  exit $?
+fi
+
+# Every structural fact this suite asserts on, produced once. Emitting
+# KEY=VALUE lines and reading them back keeps the YAML knowledge in one place
+# instead of scattering a parser through the cases.
+FACTS="$(ANSIBLE_TREE="$ANSIBLE_TREE" python3 - <<'PY'
+import os
+import pathlib
+import re
+import sys
+
+import yaml
+
+tree = pathlib.Path(os.environ['ANSIBLE_TREE'])
+
+
+def load(path):
+    with open(tree / path, encoding='utf-8') as handle:
+        return yaml.safe_load(handle) or {}
+
+
+def tasks(path):
+    return [task for task in load(path) if isinstance(task, dict)]
+
+
+def module_args(task):
+    for key, value in task.items():
+        if '.' in key and isinstance(value, dict):
+            return key, value
+    return None, {}
+
+
+def find(path, module, needle=None):
+    """The args of the first task using `module`, optionally whose rendered
+    args mention `needle`. Missing is an answer, not an error: a case asserting
+    a task exists must be able to fail rather than crash."""
+    for task in tasks(path):
+        name, args = module_args(task)
+        if name != module:
+            continue
+        if needle is None or needle in yaml.safe_dump(args):
+            return args
+    return None
+
+
+def emit(key, value):
+    print('%s=%s' % (key, value))
+
+
+openclaw_defaults = load('roles/openclaw/defaults/main.yml')
+cli_defaults = load('roles/openclaw-cli/defaults/main.yml')
+fasttext_defaults = load('roles/fasttext/defaults/main.yml')
+
+emit('openclaw_version', openclaw_defaults.get('openclaw_version', ''))
+emit('openclaw_cli_version', cli_defaults.get('openclaw_cli_version', ''))
+emit('gog_version', openclaw_defaults.get('openclaw_gog_version', ''))
+emit('gog_base', openclaw_defaults.get('openclaw_gog_base', ''))
+emit('fasttext_version', fasttext_defaults.get('fasttext_version', ''))
+emit('fasttext_checksum', fasttext_defaults.get('fasttext_checksum', ''))
+
+checksums = openclaw_defaults.get('openclaw_gog_checksums') or {}
+emit('gog_checksum_keys', ','.join(sorted(checksums)))
+for arch, digest in sorted(checksums.items()):
+    emit('gog_checksum_%s' % arch, digest)
+
+npm = find('roles/openclaw/tasks/main.yml', 'community.general.npm') or {}
+emit('npm_state', npm.get('state', 'absent'))
+emit('npm_version', npm.get('version', 'absent'))
+
+cli_npm = find('roles/openclaw-cli/tasks/main.yml', 'community.general.npm') or {}
+emit('cli_npm_state', cli_npm.get('state', 'absent'))
+emit('cli_npm_version', cli_npm.get('version', 'absent'))
+
+gog_get = find('roles/openclaw/tasks/main.yml', 'ansible.builtin.get_url') or {}
+emit('gog_get_url', gog_get.get('url', 'absent'))
+emit('gog_get_checksum', gog_get.get('checksum', 'absent'))
+
+ft_get = find('roles/fasttext/tasks/main.yml', 'ansible.builtin.get_url') or {}
+emit('fasttext_get_url', ft_get.get('url', 'absent'))
+emit('fasttext_get_checksum', ft_get.get('checksum', 'absent'))
+
+# The guard that decides whether gog is installed at all. It has to key on the
+# pinned version: keying on the binary is what made a version bump a no-op.
+for task in tasks('roles/openclaw/tasks/main.yml'):
+    name, args = module_args(task)
+    if name == 'ansible.builtin.get_url':
+        emit('gog_get_when', task.get('when', 'absent'))
+    elif name == 'ansible.builtin.unarchive':
+        emit('gog_unarchive_when', task.get('when', 'absent'))
+        emit('gog_unarchive_creates', args.get('creates', 'absent'))
+    elif name == 'ansible.builtin.set_fact' and 'openclaw_gog_present' in args:
+        emit('gog_guard_expression', args['openclaw_gog_present'])
+        emit('gog_guard_pattern', (task.get('vars') or {}).get('openclaw_gog_version_pattern', 'absent'))
+
+for task in tasks('roles/fasttext/tasks/main.yml'):
+    name, args = module_args(task)
+    if name == 'ansible.builtin.unarchive':
+        emit('fasttext_unarchive_creates', args.get('creates', 'absent'))
+
+gog_unarchive = find('roles/openclaw/tasks/main.yml', 'ansible.builtin.unarchive') or {}
+emit('gog_unarchive_src', gog_unarchive.get('src', 'absent'))
+emit('gog_unarchive_remote_src', gog_unarchive.get('remote_src', 'absent'))
+emit('gog_unarchive_include', ','.join(gog_unarchive.get('include') or []))
+
+ft_unarchive = find('roles/fasttext/tasks/main.yml', 'ansible.builtin.unarchive') or {}
+emit('fasttext_unarchive_src', ft_unarchive.get('src', 'absent'))
+
+# Every get_url in the two roles this spec owns, and whether each declares a
+# checksum. Scoped deliberately: the keyring downloads in roles/node and
+# roles/claude-code are apt signing keys, verified by apt itself, and are
+# outside what 007 was asked to change.
+unverified = []
+for role in ('openclaw', 'fasttext'):
+    path = 'roles/%s/tasks/main.yml' % role
+    for task in tasks(path):
+        name, args = module_args(task)
+        if name == 'ansible.builtin.get_url' and 'checksum' not in args:
+            unverified.append('%s:%s' % (role, task.get('name', '<unnamed>')))
+emit('unverified_downloads', ','.join(unverified))
+
+# Anything still resolving a version at build time, anywhere in the tree.
+api_calls = []
+version_lookups = []
+for path in sorted(tree.rglob('*.yml')):
+    text = path.read_text(encoding='utf-8')
+    relative = path.relative_to(tree)
+    # Comments are stripped first: this file's own roles explain at length why
+    # the api.github.com task was deleted, and a grep that counted the
+    # explanation as an occurrence would make the fix impossible to describe.
+    code = re.sub(r'(?m)^\s*#.*$', '', text)
+    if 'api.github.com' in code:
+        api_calls.append(str(relative))
+    if re.search(r'releases/latest', code):
+        version_lookups.append(str(relative))
+emit('api_github_files', ','.join(api_calls))
+emit('releases_latest_files', ','.join(version_lookups))
+
+# A hardcoded version beside a variable that names it is a second source of
+# truth, and the fastText role used to carry four.
+ft_text = re.sub(r'(?m)^\s*#.*$', '', (tree / 'roles/fasttext/tasks/main.yml').read_text(encoding='utf-8'))
+literal = fasttext_defaults.get('fasttext_version', '\x00')
+emit('fasttext_literal_in_tasks', 'yes' if str(literal) in ft_text else 'no')
+
+gog_text = re.sub(r'(?m)^\s*#.*$', '', (tree / 'roles/openclaw/tasks/main.yml').read_text(encoding='utf-8'))
+gog_literal = str(openclaw_defaults.get('openclaw_gog_version', '\x00'))
+emit('gog_literal_in_tasks', 'yes' if gog_literal in gog_text else 'no')
+
+# The architecture names the role can produce, read out of the mapping it
+# actually applies rather than assumed. If the set_fact ever learned a third
+# architecture, the checksum table would have to grow with it.
+arches = sorted(set(re.findall(r"regex_replace\('\^[a-z0-9_]+\\?\$',\s*'([a-z0-9]+)'\)", gog_text)))
+emit('gog_arches', ','.join(arches))
+
+removed = []
+for role, path in (('openclaw', 'roles/openclaw/tasks/main.yml'),
+                   ('fasttext', 'roles/fasttext/tasks/main.yml')):
+    for task in tasks(path):
+        name, args = module_args(task)
+        if name != 'ansible.builtin.file' or args.get('state') != 'absent':
+            continue
+        target = yaml.safe_dump([args.get('path', ''), task.get('loop', '')])
+        if 'archive' in target:
+            removed.append(role)
+emit('archive_cleanup_roles', ','.join(sorted(set(removed))))
+PY
+)" || {
+  printf 'provisioning-test: the roles could not be read\n' >&2
+  exit 1
+}
+
+# fact <key> — the value emitted above, or the empty string.
+fact() {
+  printf '%s\n' "$FACTS" | sed -n "s/^$1=//p" | head -1
+}
+
+# --- pinning ---------------------------------------------------------------
+
+should_pin_an_explicit_openclaw_version_when_the_role_installs_it() {
+  case_start "${FUNCNAME[0]}"
+  assert_equals "state: latest is gone" "absent" "$(fact npm_state)"
+  assert_equals "the task takes its version from the role variable" \
+    '{{ openclaw_version }}' "$(fact npm_version)"
+  # A version, not a range and not a dist-tag. `latest` through the version key
+  # would reintroduce exactly what de52c54 reintroduced.
+  local version
+  version="$(fact openclaw_version)"
+  case "$version" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) fail "openclaw_version is '${version}', which is not an exact version" ;;
+  esac
+  case_end
+}
+
+should_pin_the_builder_cli_to_the_same_openclaw_version() {
+  case_start "${FUNCNAME[0]}"
+  # The builder's `openclaw config validate` judges the container's config
+  # against the schema *that* CLI carries. A builder on a different version
+  # validates against a schema the service image does not run, which is
+  # finding D2 one level up.
+  assert_equals "the builder CLI is pinned too" "absent" "$(fact cli_npm_state)"
+  assert_equals "and takes its version from its own variable" \
+    '{{ openclaw_cli_version }}' "$(fact cli_npm_version)"
+  assert_equals "the two pins agree" "$(fact openclaw_version)" "$(fact openclaw_cli_version)"
+  case_end
+}
+
+should_pin_an_explicit_gog_version_when_the_role_installs_it() {
+  case_start "${FUNCNAME[0]}"
+  local version
+  version="$(fact gog_version)"
+  case "$version" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) fail "openclaw_gog_version is '${version}', which is not an exact version" ;;
+  esac
+  assert_contains "the URL is built from the pinned version" "$(fact gog_get_url)" \
+    '{{ openclaw_gog_version }}'
+  case_end
+}
+
+should_resolve_no_version_at_build_time_when_the_build_runs() {
+  case_start "${FUNCNAME[0]}"
+  # D4 dissolving rather than being retried around. With the version pinned
+  # there is nothing to resolve, so the anonymous call and its shared
+  # 60-per-hour rate limit are gone rather than wrapped in a retry.
+  assert_equals "no api.github.com call anywhere in the tree" "" "$(fact api_github_files)"
+  assert_equals "nothing resolves releases/latest" "" "$(fact releases_latest_files)"
+  case_end
+}
+
+should_name_each_version_once_when_the_roles_use_it() {
+  case_start "${FUNCNAME[0]}"
+  # The fastText role carried the literal 0.9.2 four times — in the URL and in
+  # three /tmp paths — so a bump meant finding all four. A version that appears
+  # in the tasks at all is a second source of truth.
+  assert_equals "fastText's version is not repeated in its tasks" "no" \
+    "$(fact fasttext_literal_in_tasks)"
+  assert_equals "gog's version is not repeated in its tasks" "no" \
+    "$(fact gog_literal_in_tasks)"
+  case_end
+}
+
+# --- verification ----------------------------------------------------------
+
+should_verify_a_checksum_when_it_downloads_gog() {
+  case_start "${FUNCNAME[0]}"
+  assert_equals "the download is checksummed, per architecture" \
+    "{{ openclaw_gog_checksums[openclaw_gog_arch] }}" "$(fact gog_get_checksum)"
+  # get_url, not unarchive: unarchive has no checksum option at all, and its
+  # own documentation says to fetch with get_url when verification is wanted.
+  # This assertion is what stops a well-meaning simplification putting the URL
+  # back into the unarchive and silently dropping the check.
+  assert_contains "and the archive is unpacked from the verified copy" \
+    "$(fact gog_unarchive_src)" '{{ openclaw_gog_archive }}'
+  assert_equals "the tar member is the dot-slash form GNU tar needs" "./gog" \
+    "$(fact gog_unarchive_include)"
+  case_end
+}
+
+should_verify_a_checksum_when_it_downloads_fasttext() {
+  case_start "${FUNCNAME[0]}"
+  assert_equals "the download is checksummed" "{{ fasttext_checksum }}" \
+    "$(fact fasttext_get_checksum)"
+  assert_contains "and the archive is unpacked from the verified copy" \
+    "$(fact fasttext_unarchive_src)" '{{ fasttext_archive }}'
+  case_end
+}
+
+should_leave_no_download_unverified_when_the_roles_fetch_an_artefact() {
+  case_start "${FUNCNAME[0]}"
+  # Scoped to the two roles this spec owns. The apt signing keys fetched by
+  # roles/node and roles/claude-code are verified by apt against the repository
+  # signature and are a separate question — see README.md.
+  assert_equals "every get_url in the openclaw and fasttext roles is verified" \
+    "" "$(fact unverified_downloads)"
+  case_end
+}
+
+should_declare_a_digest_for_every_architecture_the_role_can_resolve() {
+  case_start "${FUNCNAME[0]}"
+  # The risk the plan names: a release whose asset naming differs across
+  # architectures. The checksum table has to cover exactly the names the
+  # role's own regex_replace mapping produces — no more, and above all no
+  # fewer, because a missing key fails the build rather than skipping the check.
+  assert_equals "the mapping and the digest table agree" \
+    "$(fact gog_arches)" "$(fact gog_checksum_keys)"
+  case_end
+}
+
+should_use_sha256_digests_of_the_documented_shape() {
+  case_start "${FUNCNAME[0]}"
+  local key digest
+  for key in gog_checksum_amd64 gog_checksum_arm64 fasttext_checksum; do
+    digest="$(fact "$key")"
+    if ! printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+      fail "${key} is '${digest}', not an <algorithm>:<64 hex digits> sha256 digest"
+    fi
+  done
+  case_end
+}
+
+should_key_the_install_guard_on_the_version_when_the_role_reruns() {
+  case_start "${FUNCNAME[0]}"
+  # The guard this replaced was `creates: /usr/local/bin/gog` -- the existence
+  # of *a* gog, not of the *pinned* one. On a host that already had gog,
+  # bumping openclaw_gog_version would have downloaded the new tarball, skipped
+  # the install, and reported success while leaving the old binary in place:
+  # the build claiming a version it had not installed, which is the failure
+  # this whole spec exists to end, reintroduced by an idempotence guard.
+  assert_equals "the install no longer keys on the binary" "absent" \
+    "$(fact gog_unarchive_creates)"
+  assert_equals "the download is guarded on the version" "not openclaw_gog_present" \
+    "$(fact gog_get_when)"
+  assert_equals "and so is the install" "not openclaw_gog_present" \
+    "$(fact gog_unarchive_when)"
+  assert_contains "the guard compares against the pinned version" \
+    "$(fact gog_guard_pattern)" '{{ openclaw_gog_version'
+  # A pattern that matched anything would make every host look up to date.
+  # Anchoring on a digit boundary is also what stops a pin of 0.39.1 being
+  # satisfied by an installed 0.39.10.
+  assert_contains "and it is anchored, not a substring match" \
+    "$(fact gog_guard_pattern)" '([^0-9.]|$)'
+  case_end
+}
+
+should_not_guard_the_fasttext_unpack_on_a_directory_it_deletes() {
+  case_start "${FUNCNAME[0]}"
+  # `creates:` there could only fire after a run that died between unpacking
+  # and the cleanup -- and what it would skip is re-extraction over a
+  # half-unpacked tree, which is the one case where re-extracting is what is
+  # wanted.
+  assert_equals "no dead guard on the fastText unpack" "absent" \
+    "$(fact fasttext_unarchive_creates)"
+  case_end
+}
+
+should_remove_the_downloaded_archives_when_the_build_finishes() {
+  case_start "${FUNCNAME[0]}"
+  # A verified archive is still a 27MB layer nobody needs at runtime.
+  assert_equals "both roles clean up after themselves" "fasttext,openclaw" \
+    "$(fact archive_cleanup_roles)"
+  case_end
+}
+
+should_fetch_gog_from_the_canonical_owner() {
+  case_start "${FUNCNAME[0]}"
+  # The project was renamed steipete/gogcli -> openclaw/gogcli. GitHub still
+  # redirects the old path, but a redirect lasts only as long as the abandoned
+  # namespace stays abandoned: whoever creates a repository at the old name
+  # inherits the URL this build fetches from. The checksum makes that
+  # survivable; naming the current owner makes it moot.
+  assert_contains "the base URL names the current owner" "$(fact gog_base)" \
+    'github.com/openclaw/gogcli'
+  case_end
+}
+
+# --- the digests against reality -------------------------------------------
+
+should_match_the_published_digests_when_upstream_is_reachable() {
+  case_start "${FUNCNAME[0]}"
+  if [ -z "${HERMES_CHECK_UPSTREAM:-}" ]; then
+    # Skipped, loudly. A pinned digest nobody has ever compared against the
+    # artefact is a number, not a verification — so this case exists, and the
+    # skip says what was not checked rather than saying nothing.
+    skip_case "${FUNCNAME[0]}" \
+      'HERMES_CHECK_UPSTREAM is not set; the pinned digests were not compared with upstream'
+    CURRENT_CASE=""
+    return 0
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    skip_case "${FUNCNAME[0]}" 'curl is not installed'
+    CURRENT_CASE=""
+    return 0
+  fi
+
+  local version base published expected actual arch
+  version="$(fact gog_version)"
+  base="$(fact gog_base)"
+  published="$(curl -sSLf --max-time 120 "${base}/v${version}/checksums.txt" 2>/dev/null)" || {
+    fail "could not fetch the published checksums for v${version}"
+    case_end
+    return 0
+  }
+  for arch in amd64 arm64; do
+    expected="$(fact "gog_checksum_${arch}")"
+    actual="$(printf '%s\n' "$published" \
+      | sed -n "s/^\\([0-9a-f]\\{64\\}\\)  gogcli_${version}_linux_${arch}\\.tar\\.gz\$/\\1/p")"
+    assert_equals "the pinned ${arch} digest is the published one" \
+      "$expected" "sha256:${actual}"
+  done
+  case_end
+}
+
+should_pin_an_explicit_openclaw_version_when_the_role_installs_it
+should_pin_the_builder_cli_to_the_same_openclaw_version
+should_pin_an_explicit_gog_version_when_the_role_installs_it
+should_resolve_no_version_at_build_time_when_the_build_runs
+should_name_each_version_once_when_the_roles_use_it
+should_verify_a_checksum_when_it_downloads_gog
+should_verify_a_checksum_when_it_downloads_fasttext
+should_leave_no_download_unverified_when_the_roles_fetch_an_artefact
+should_declare_a_digest_for_every_architecture_the_role_can_resolve
+should_use_sha256_digests_of_the_documented_shape
+should_key_the_install_guard_on_the_version_when_the_role_reruns
+should_not_guard_the_fasttext_unpack_on_a_directory_it_deletes
+should_remove_the_downloaded_archives_when_the_build_finishes
+should_fetch_gog_from_the_canonical_owner
+should_match_the_published_digests_when_upstream_is_reachable
+
+report_totals provisioning-test

@@ -11,8 +11,11 @@
 # needs none of it, and pulling it in would put the thing under test into the
 # thing testing it. Only the validator is wanted here.
 - name: Install the OpenClaw CLI for config schema validation
+  # Pinned to the same version the service image installs. A validator on a
+  # different version judges the config against a different schema; see
+  # defaults/main.yml.
   community.general.npm:
     name: openclaw
-    state: latest
+    version: "{{ openclaw_cli_version }}"
     global: true
   become: true

@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+#
+# Fake `openclaw`, standing in for the subcommands 007's cases drive. No
+# network, no credentials, no image.
+#
+#   onboard          writes what onboarding leaves behind, honouring
+#                    --gateway-port and --gateway-bind rather than ignoring
+#                    them, and carrying the gateway token onboarding is
+#                    documented to generate
+#   gateway          records that it was reached, and with which --bind
+#   gateway health   the readiness probe 003's registrar polls
+#   config get       one dotted path out of the config, so a case can ask the
+#                    same question README tells an operator to ask
+#   config validate  records that the phase 3 gate ran; never judges
+#   automations ...  just enough that the registrar finishes and gets out of
+#                    the way
+#
+# Behaviour switches, all defaulting to the documented happy path:
+#
+#   OPENCLAW_STUB_ONBOARD_AUTH    token (default) -> onboarding writes
+#                                 gateway.auth.{mode,token}
+#                                 none            -> it writes no auth at all
+#                                 bare            -> it writes a token with no
+#                                                    mode, the shape upstream
+#                                                    documents as still meaning
+#                                                    token auth
+#                                 password        -> password auth, the third
+#                                                    branch of the startup line
+#   OPENCLAW_STUB_VALIDATE_ERROR  text -> `config validate` rejects with this
+#                                 message. The phase 3 gate passes the
+#                                 validator's output through a redaction filter
+#                                 to `docker logs`, and 007 adds a credential to
+#                                 the file that validator reads -- so a case has
+#                                 to be able to make it quote one.
+#
+# The auth default is not a convenience. Upstream documents onboarding as using
+# token auth by default and generating a token when nothing else applies, so a
+# stub that onboarded without one would model a container that has never
+# existed — and would quietly turn the "leave an existing credential alone"
+# cases green by giving them nothing to leave alone.
+#
+# Every invocation is appended to OPENCLAW_STUB_ARGV_LOG in the bracketed shape
+# 005's stub-gog and 006's stub-openclaw both use, because the flags this spec
+# changes are only observable in argv: the config records the bind, but only
+# the log records that `exec openclaw gateway` was told the same thing.
+
+set -uo pipefail
+
+config="${HOME}/.openclaw/openclaw.json"
+markers="${OPENCLAW_STUB_MARKERS:-}"
+
+# One record, one write.
+#
+# This is not a micro-optimisation, it is the whole correctness of the log. Two
+# processes append to it concurrently: the foreground `exec openclaw gateway`,
+# and 003's briefing registrar probing `openclaw gateway health --port <n>` from
+# a background subshell. Written as a `{ printf; printf; ... } >> file` block
+# each line is its own write, so the two records interleave — and because both
+# calls log under the command name `gateway`, a reader then attributes the
+# registrar's arguments to the exec.
+#
+# That is not hypothetical. It was caught by running bind-test twenty times:
+# one run in twenty reported the gateway's `--bind` as `3000`, because the exec
+# wrote `ARG [--bind]` and the registrar's `ARG [3000]` landed between it and
+# `ARG [lan]`. A single write(2) with O_APPEND cannot split that way.
+log_invocation() {
+  if [ -z "${OPENCLAW_STUB_ARGV_LOG:-}" ]; then
+    return 0
+  fi
+  local arg record
+  printf -v record 'INVOCATION [%s] %d\n' "${1:-none}" "$#"
+  for arg in "$@"; do
+    record+="$(printf 'ARG [%s]' "$arg")"$'\n'
+  done
+  printf '%s' "$record" >> "$OPENCLAW_STUB_ARGV_LOG"
+}
+
+usage() {
+  printf 'stub-openclaw: unsupported invocation: %s\n' "$*" >&2
+  exit 64
+}
+
+log_invocation "$@"
+
+case "${1:-}" in
+  onboard)
+    mkdir -p "$(dirname "$config")"
+    if [ -n "$markers" ]; then
+      : > "${markers}/onboarded"
+    fi
+
+    # The flags are read rather than assumed. A stub that hardcoded the bind
+    # would pass whatever the entrypoint sent it, including nothing.
+    stub_port=3000
+    stub_bind=lan
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --gateway-port) stub_port="${2:-$stub_port}" ;;
+        --gateway-bind) stub_bind="${2:-$stub_bind}" ;;
+      esac
+      shift
+    done
+
+    STUB_CONFIG="$config" \
+    STUB_PORT="$stub_port" \
+    STUB_BIND="$stub_bind" \
+    STUB_AUTH="${OPENCLAW_STUB_ONBOARD_AUTH:-token}" node -e "
+      const fs = require('fs');
+      const config = {
+        gateway: {
+          mode: 'local',
+          port: Number(process.env.STUB_PORT),
+          bind: process.env.STUB_BIND
+        },
+        agents: { defaults: {} },
+        channels: {},
+        env: {}
+      };
+      if (process.env.STUB_AUTH === 'token') {
+        config.gateway.auth = {
+          mode: 'token',
+          token: 'onboarding-generated-token-not-a-secret'
+        };
+      } else if (process.env.STUB_AUTH === 'bare') {
+        config.gateway.auth = {
+          token: 'onboarding-generated-token-not-a-secret'
+        };
+      } else if (process.env.STUB_AUTH === 'password') {
+        config.gateway.auth = {
+          password: 'onboarding-generated-password-not-a-secret'
+        };
+      }
+      fs.writeFileSync(process.env.STUB_CONFIG, JSON.stringify(config, null, 2) + '\n');
+    "
+    exit $?
+    ;;
+
+  gateway)
+    case "${2:-}" in
+      health)
+        printf 'ok\n'
+        exit 0
+        ;;
+      *)
+        # `exec openclaw gateway` is the last line of the entrypoint, so this
+        # marker is how a case asserts a rejected configuration never got that
+        # far — and the argv log above is how it asserts what bind it was told.
+        if [ -n "$markers" ]; then
+          : > "${markers}/gateway-started"
+        fi
+        exit 0
+        ;;
+    esac
+    ;;
+
+  automations | cron)
+    # 003's registrar only has to finish quietly here. Reporting the briefing
+    # as already present makes it log one line and exit.
+    case "${2:-}" in
+      list) printf 'job-0001  morning-briefing  0 8 * * *\n'; exit 0 ;;
+      *) usage "$@" ;;
+    esac
+    ;;
+
+  config)
+    case "${2:-}" in
+      get)
+        [ -n "${3:-}" ] || usage "$@"
+        STUB_CONFIG="$config" STUB_QUERY="$3" node -e "
+          const fs = require('fs');
+          const config = JSON.parse(fs.readFileSync(process.env.STUB_CONFIG, 'utf8'));
+          const value = process.env.STUB_QUERY.split('.').reduce(
+            (node, key) => (node === undefined || node === null ? undefined : node[key]),
+            config
+          );
+          if (value === undefined) process.exit(1);
+          console.log(typeof value === 'string' ? value : JSON.stringify(value));
+        "
+        exit $?
+        ;;
+
+      validate)
+        # No schema opinion of its own. 004's stub carries a transcription and
+        # 006's check runs the real validator; a third opinion here would only
+        # be a third thing to keep in step with upstream.
+        #
+        # It can still be told to fail, because what the gate does with a
+        # failure -- redact the message and refuse to start -- is 007's problem
+        # the moment 007 puts a fifth credential into the file being validated.
+        if [ -n "$markers" ]; then
+          : > "${markers}/config-validated"
+        fi
+        if [ -n "${OPENCLAW_STUB_VALIDATE_ERROR:-}" ]; then
+          printf '%s\n' "$OPENCLAW_STUB_VALIDATE_ERROR" >&2
+          exit 1
+        fi
+        exit 0
+        ;;
+
+      *)
+        usage "$@"
+        ;;
+    esac
+    ;;
+
+  *)
+    usage "$@"
+    ;;
+esac

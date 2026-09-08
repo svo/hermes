@@ -1,0 +1,21 @@
+---
+# The fastText release this image builds, and the digest of the archive it
+# builds from.
+#
+# The version was already fixed -- it was written into the URL and into three
+# separate /tmp paths -- but nothing verified what arrived, and nothing said
+# the four copies of "0.9.2" had to agree. Naming it once removes the second
+# problem; the checksum removes the first.
+#
+# There are no uploaded release assets on this tag, so GitHub's generated
+# source archive is the only artifact there is. That archive is regenerated on
+# demand rather than stored, which has broken published digests across the
+# whole of GitHub before, so this digest is worth treating as a fact about a
+# build rather than a permanent property of the tag: if it ever stops matching,
+# check whether the tag moved before assuming a compromise.
+#
+# Confirmed by downloading the archive and hashing it, twice, and against both
+# the /archive/v<version>.zip and /archive/refs/tags/v<version>.zip spellings.
+fasttext_version: 0.9.2
+fasttext_checksum: sha256:93cc8a21633e6c6ecf4b5164925ad68a5eda332373d4316d2f56d05f4bfbe823
+fasttext_archive: /tmp/fasttext.zip

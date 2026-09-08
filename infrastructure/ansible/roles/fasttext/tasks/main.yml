@@ -8,18 +8,40 @@
   become: true
 
 - name: Download fastText
+  # Fetched and verified before anything unpacks or compiles it.
+  #
+  # This was an `unarchive` straight from the URL, which cannot check a digest:
+  # the module has no `checksum` option and its own documentation says to use
+  # `get_url` with `remote_src=yes` instead. So an archive that had been
+  # replaced upstream would have been unpacked, compiled, and installed into
+  # the image with nothing noticing. The classifier this builds decides which
+  # of the user's mail is urgent, and it runs inside the same container as the
+  # agent's shell.
+  ansible.builtin.get_url:
+    url: "https://github.com/facebookresearch/fastText/archive/v{{ fasttext_version }}.zip"
+    dest: "{{ fasttext_archive }}"
+    checksum: "{{ fasttext_checksum }}"
+    mode: '0644'
+
+- name: Unpack fastText
+  # No `creates:` guard. The cleanup below deletes this directory on every
+  # successful run, so the guard could only ever fire after a run that died
+  # between here and the cleanup -- and what it would then skip is
+  # re-extraction over a half-unpacked tree, which is the one case where
+  # re-extracting is exactly what is wanted. A guard that is dead when it would
+  # help and wrong when it fires is worse than no guard.
   ansible.builtin.unarchive:
-    src: https://github.com/facebookresearch/fastText/archive/v0.9.2.zip
+    src: "{{ fasttext_archive }}"
     dest: /tmp
     remote_src: true
 
 - name: Build fastText
   community.general.make:
-    chdir: /tmp/fastText-0.9.2
+    chdir: "/tmp/fastText-{{ fasttext_version }}"
 
 - name: Install fastText binary
   ansible.builtin.copy:
-    src: /tmp/fastText-0.9.2/fasttext
+    src: "/tmp/fastText-{{ fasttext_version }}/fasttext"
     dest: /usr/local/bin/fasttext
     remote_src: true
     mode: '0755'
@@ -27,8 +49,11 @@
 
 - name: Clean up fastText build
   ansible.builtin.file:
-    path: /tmp/fastText-0.9.2
+    path: "{{ item }}"
     state: absent
+  loop:
+    - "/tmp/fastText-{{ fasttext_version }}"
+    - "{{ fasttext_archive }}"
 
 - name: Create model directory
   ansible.builtin.file:

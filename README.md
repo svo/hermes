@@ -8,7 +8,7 @@
 [![Build Builder](https://github.com/svo/hermes/actions/workflows/builder.yml/badge.svg)](https://github.com/svo/hermes/actions/workflows/builder.yml)
 [![Build Service](https://github.com/svo/hermes/actions/workflows/service.yml/badge.svg)](https://github.com/svo/hermes/actions/workflows/service.yml)
 
-Docker image running an [OpenClaw](https://docs.openclaw.ai) gateway with [gog](https://github.com/steipete/gog) (Google Suite CLI) for Gmail, Calendar, Drive, and Contacts access.
+Docker image running an [OpenClaw](https://docs.openclaw.ai) gateway with [gog](https://github.com/openclaw/gogcli) (Google Suite CLI) for Gmail, Calendar, Drive, and Contacts access.
 
 ## Prerequisites
 
@@ -32,6 +32,95 @@ Docker image running an [OpenClaw](https://docs.openclaw.ai) gateway with [gog](
 # Create and push multi-arch manifest
 ./create-latest.sh service
 ```
+
+## Pinned versions and upgrades
+
+The three tools this repository fetches by hand are pinned to an exact version, and both
+artefacts downloaded directly are verified against a checksum.
+
+That is a narrower claim than "everything is pinned", and deliberately so. Debian packages come
+from apt at whatever version the distribution serves, verified by apt against the repository
+signature; `typescript`, `ts-node` and `@anthropic-ai/claude-code` install unpinned from npm on
+the builder and development images. Those are the next thing to pin, not something this change
+quietly covers.
+
+| What | Where | Currently |
+|---|---|---|
+| OpenClaw (service image) | `roles/openclaw/defaults/main.yml` → `openclaw_version` | `2026.9.2` |
+| OpenClaw CLI (builder image) | `roles/openclaw-cli/defaults/main.yml` → `openclaw_cli_version` | `2026.9.2` |
+| gog | `roles/openclaw/defaults/main.yml` → `openclaw_gog_version` + `openclaw_gog_checksums` | `0.39.1` |
+| fastText | `roles/fasttext/defaults/main.yml` → `fasttext_version` + `fasttext_checksum` | `0.9.2` |
+
+`openclaw` used to install with `state: latest` and `gog` used to resolve `releases/latest` at
+build time, so a rebuild that changed nothing in this repository could install a different
+agent runtime. OpenClaw's configuration schemas declare `additionalProperties: false`, which
+makes an unknown key a hard validation error rather than an ignored one — so an upstream key
+rename turned a working image into one the gateway refused to load. The git history records the
+loop: a bad option added, removed, an invalid timezone field removed twice, the version pinned
+in `abc6127`, and unpinned again in `de52c54` the next day.
+
+Upgrading is now a diff someone reads.
+
+### Bumping OpenClaw
+
+`openclaw_version` and `openclaw_cli_version` must move together and in the same commit: the
+builder's `openclaw config validate` judges the container's configuration against the schema
+*that* CLI carries, so a builder on a different version would pass a config the service image
+refuses to load.
+
+```bash
+npm view openclaw dist-tags                 # what is published
+# edit both defaults/main.yml files
+.specs/007-gateway-supply-chain-hardening/tests/provisioning-test   # asserts the two agree
+npm install -g openclaw@<the new version>   # the validator has to BE the new one
+./bin/test                                  # config-schema now judges the new schema
+```
+
+That third line is the one people skip, and skipping it makes the check meaningless. `bin/test`'s
+`config-schema` validates with whatever `openclaw` is on `PATH` — in CI, the copy baked into the
+published builder image, which was built from the *previous* pin. Editing `openclaw_cli_version`
+changes what the *next* builder image will carry; it does not change the validator running today.
+So the sequence is: install the new CLI locally, run the gate, and read the result; then land the
+bump, let `builder.yml` publish a builder carrying it, and CI validates against the new schema
+from then on.
+
+What the check then tells you is the thing worth knowing: `config-schema` runs the real entrypoint
+against a stub and validates the configuration it produces. A schema change that would have
+bricked every running container shows up as a red gate you are looking at, instead of as a dead
+assistant on Friday.
+
+### Bumping gog
+
+```bash
+curl -sSL https://github.com/openclaw/gogcli/releases/download/v<version>/checksums.txt
+```
+
+That file lists bare `<digest>  <filename>` pairs. Ansible wants `<algorithm>:<digest>`, so the
+two `linux` lines become:
+
+```yaml
+openclaw_gog_checksums:
+  amd64: sha256:<the gogcli_<version>_linux_amd64.tar.gz digest>
+  arm64: sha256:<the gogcli_<version>_linux_arm64.tar.gz digest>
+```
+
+Change `openclaw_gog_version` to match. A digest that does not match fails the build — which is
+the behaviour being bought, so do not "fix" a mismatch by copying whatever the build reports
+without first working out why it changed.
+
+To check the pins against what upstream is serving right now:
+
+```bash
+HERMES_CHECK_UPSTREAM=1 .specs/007-gateway-supply-chain-hardening/tests/provisioning-test
+```
+
+### The weekly rebuild
+
+All three workflows still rebuild on a Thursday cron. That is worth keeping: it picks up
+Debian base-image security patches. What it no longer does is silently change the agent
+runtime, because the runtime version is now a value in this repository rather than whatever npm
+served that morning. `--pull always` in the `docker run` above is likewise still right — it
+fetches the newest *published image*, and what is inside that image is pinned by this commit.
 
 ## Running
 
@@ -239,7 +328,7 @@ channel-ingress diagnostics are documented as redacted — so do not expect to f
 
 ## Google Calendar/Email Integration
 
-The image includes [gog](https://github.com/steipete/gog), a CLI for Google Suite (Gmail, Calendar, Drive, Contacts). Two authentication methods are supported:
+The image includes [gog](https://github.com/openclaw/gogcli), a CLI for Google Suite (Gmail, Calendar, Drive, Contacts). Two authentication methods are supported:
 
 ### Option A: Service Account (Google Workspace, fully automated)
 
@@ -715,10 +804,14 @@ Five checks can skip on a developer machine:
 | `config-schema` validator | no `openclaw` on `PATH`. The generated config is still checked for shape; it is just not checked against the live schema. `npm install -g openclaw` closes it. |
 | `hermes-check` | `bin/hermes-check-test` is missing, which should not happen on a full checkout. |
 
-The `config-schema` one matters most. `openclaw` is installed with `state: latest`, so the
-schema can change under a build that changed nothing — which is how `tools.loopDetection` came
-to carry three keys the gateway would refuse to load. The validator is what catches that, and
-`infrastructure/ansible/roles/openclaw-cli` puts it in the builder image so CI runs it.
+The `config-schema` one matters most. It is what catches a schema change that would otherwise
+reach a running container — which is how `tools.loopDetection` came to carry three keys the
+gateway would refuse to load, back when `openclaw` installed with `state: latest` and could
+change under a build that changed nothing. The version is pinned now, so that no longer happens
+by accident; it happens when somebody bumps `openclaw_version`, which is exactly when this
+check should be the thing that answers. `infrastructure/ansible/roles/openclaw-cli` puts the
+validator in the builder image, pinned to the same version, so CI runs it against the schema
+the service image actually carries.
 
 That last part is true of the *next* builder image, not the one on Docker Hub today: the role
 arrives with this change, and `builder.yml` cannot publish it until this gate passes. Until a

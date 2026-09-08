@@ -1,0 +1,21 @@
+---
+# The OpenClaw CLI version on the builder image.
+#
+# It must equal `openclaw_version` in roles/openclaw. The builder's only use
+# for the CLI is `openclaw config validate`, which checks the container's
+# configuration against the schema *that CLI* carries -- so a builder pinned to
+# a different version validates against a schema the service image does not
+# run, and the gate then passes a config the container would refuse to load.
+# That is finding D2 again, one level up.
+#
+# The two are separate declarations rather than one shared variable because
+# these roles are deliberately independent: playbook-builder pulls in this one
+# and never the service's. `should_pin_the_builder_cli_to_the_same_openclaw_version`
+# in .specs/007-gateway-supply-chain-hardening/tests/provisioning-test asserts
+# they are equal.
+#
+# That suite is not a `bin/test` check, so nothing in CI runs the assertion:
+# it catches drift when somebody runs it, not the moment drift lands. Bump both
+# in one commit and run the suite; see that directory's README.md for why it is
+# not wired into the gate and what wiring it would cost.
+openclaw_cli_version: 2026.9.2

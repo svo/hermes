@@ -308,8 +308,10 @@ node -e "
   // globalCircuitBreakerThreshold — are gone from the schema, which declares
   // additionalProperties: false, so writing them made the whole config
   // invalid. Phase 3 then refused to start the gateway, and because the
-  // openclaw role installs state: latest, that landed on the next image
-  // build rather than on any change made here.
+  // openclaw role installed state: latest at the time, that landed on the
+  // next image build rather than on any change made here. 007 pinned the
+  // version, so an upstream schema change now arrives when someone bumps
+  // openclaw_version — which is a diff, and a build that runs this gate.
   //
   // This is the finding 006 exists to catch, caught by 006: the gate runs this
   // block against a stub and validates the result, so an upstream schema change

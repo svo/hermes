@@ -1,0 +1,54 @@
+---
+# Pinned versions, and the digests that prove what was downloaded.
+#
+# `state: latest` meant the OpenClaw in an image was whatever npm had published
+# that morning. OpenClaw's config schemas declare additionalProperties: false,
+# so a key removed upstream is a hard validation error rather than an ignored
+# one -- which turned a working image into one the gateway refused to load, on
+# a build that changed nothing in this repository. The git history is the
+# evidence: 6585464 added tools.loopDetection with three threshold keys that
+# the schema later stopped accepting, and 78ba48e had to remove all three;
+# f46400b removed agents.defaults.maxTokens as a "Removing bad configuration
+# option"; 217f4bc and 8684128 removed an invalid cron timezone field twice;
+# abc6127 pinned the version, and de52c54 unpinned it again the next day.
+#
+# Bumping is now a one-line diff and a pull request. That is the whole point:
+# upgrade discovery moves off a Thursday cron and onto a review, where it can
+# be tested before it reaches a running container.
+openclaw_version: 2026.9.2
+
+# gog, pinned the same way and verified.
+#
+# This replaces an anonymous `ansible.builtin.uri` call to
+# api.github.com/repos/.../releases/latest, which resolved the version at build
+# time. That one task carried three problems: the installed version was
+# whatever had been published that morning, the call shared the 60-per-hour
+# anonymous rate limit with every other caller on a GitHub-hosted runner, and
+# nothing could verify the download because nothing knew in advance what it was
+# going to get. A pinned version answers all three at once -- the rate limit
+# disappears along with the request rather than being retried around, and a
+# known version has a known digest.
+#
+# The owner is `openclaw`, not `steipete`. The project was renamed and GitHub
+# still redirects the old path, but a redirect is only as durable as the
+# abandoned namespace: anyone who creates a repository at the old name inherits
+# the URL this build would fetch from. The checksum below makes that
+# survivable; naming the current owner makes it unnecessary.
+openclaw_gog_version: 0.39.1
+openclaw_gog_base: https://github.com/openclaw/gogcli/releases/download
+openclaw_gog_archive: /tmp/gogcli.tar.gz
+
+# Published in the release's own checksums.txt, and confirmed by downloading
+# both tarballs and hashing them rather than by copying the file on trust.
+#
+# Keyed by the same architecture names `openclaw_gog_arch` produces below, so a
+# platform with no entry fails with an undefined-key error at the download
+# instead of installing something unverified.
+#
+# To bump: change openclaw_gog_version, fetch
+#   https://github.com/openclaw/gogcli/releases/download/v<version>/checksums.txt
+# and copy the two linux lines here. A digest that does not match fails the
+# build, which is the behaviour being bought.
+openclaw_gog_checksums:
+  amd64: sha256:438efa460b8291f023299ad2ed5610701cad7508db88392039c0891e2175e3b1
+  arm64: sha256:7c23b402c9234ba476e84b39ac6d875444b47ec516312a99e877e1386ba28295
