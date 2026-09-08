@@ -241,6 +241,14 @@ config_validated() {
   [ -f "${RUN_DIR}/config-validated" ]
 }
 
+# Did the approvals migration run? 008 replaced this container's
+# exec-approvals.json heredoc with a one-off `openclaw doctor --fix`, guarded on
+# a legacy file being present -- so "it ran" and "it did not run" are both
+# assertions, and neither is visible in the config.
+doctor_ran() {
+  [ -f "${RUN_DIR}/doctor-ran" ]
+}
+
 # A value out of the config the last run wrote, by jq path expression. An
 # absent file reads as an empty config: a run rejected in phase 1 writes
 # nothing at all, and that is the answer, not a jq failure.

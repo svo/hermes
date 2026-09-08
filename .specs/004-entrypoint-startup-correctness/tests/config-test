@@ -36,9 +36,18 @@ should_write_every_tools_key_when_onboarding_omitted_the_object() {
   run_entrypoint
   assert_equals "deny list" '["gateway"]' "$(config_get '.tools.deny')"
   assert_equals "exec security" "full" "$(config_get '.tools.exec.security')"
-  assert_equals "warning threshold" "5" "$(config_get '.tools.loopDetection.warningThreshold')"
-  assert_equals "critical threshold" "10" "$(config_get '.tools.loopDetection.criticalThreshold')"
-  assert_equals "circuit breaker" "15" "$(config_get '.tools.loopDetection.globalCircuitBreakerThreshold')"
+  # This case asserted three loopDetection thresholds until 78ba48e removed them
+  # from the entrypoint: the schema declares additionalProperties: false and had
+  # stopped accepting them, so writing them made the whole config invalid. The
+  # assertions outlived the keys and this suite has been red ever since. 008
+  # re-read the live schema and confirmed the object still names exactly one
+  # key, so `enabled` is what is asserted -- and asserted here rather than
+  # dropped, because "loop detection is still switched on" is the part that
+  # matters and nothing else in this suite says it.
+  assert_equals "loop detection is on" "true" \
+    "$(config_get '.tools.loopDetection.enabled')"
+  assert_equals "and carries nothing else" '{"enabled":true}' \
+    "$(config_get '.tools.loopDetection')"
   assert_equals "no stale allow list" "null" "$(config_get '.tools.allow')"
   case_end
 }

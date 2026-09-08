@@ -112,6 +112,148 @@ ONBOARDED
     # transcription that can reject. The marker lets a case assert the gate ran
     # ahead of the fork.
     case "${2:-}" in
+      set)
+        # Write-if-absent, which is the only shape the entrypoint uses. 008 sets
+        # tools.exec.security this way so that a restart cannot revert an
+        # operator's tightened exec policy -- 004's finding B6, which used to be
+        # held by the `[ ! -f ]` guard on exec-approvals.json.
+        #
+        # Strict about the flag for the same reason 008's `config patch` is: a
+        # stub that ignored --expect-current-absent would perform an
+        # unconditional write and turn the case that pins this green.
+        stub_path="${3:-}"
+        stub_value="${4:-}"
+        if [ -z "$stub_path" ] || [ -z "$stub_value" ]; then usage "$@"; fi
+        shift 4
+        stub_expect_absent='no'
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --expect-current-absent) stub_expect_absent='yes' ;;
+            *) usage "config set $*" ;;
+          esac
+          shift
+        done
+        [ "$stub_expect_absent" = 'yes' ] || usage 'config set (without --expect-current-absent)'
+
+        STUB_CONFIG="$config" STUB_PATH="$stub_path" STUB_VALUE="$stub_value" node -e "
+          const fs = require('fs');
+          const configPath = process.env.STUB_CONFIG;
+          let config = {};
+          try {
+            config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+          } catch {}
+
+          const parts = process.env.STUB_PATH.split('.');
+          let node = config;
+          for (const key of parts.slice(0, -1)) {
+            if (node[key] === null || typeof node[key] !== 'object') node[key] = {};
+            node = node[key];
+          }
+          const leaf = parts[parts.length - 1];
+          if (Object.prototype.hasOwnProperty.call(node, leaf)) {
+            // The refusal upstream gives, and the exit code the entrypoint reads.
+            console.error('conditional config set expectation did not match the ' +
+              'authored config, so nothing was changed');
+            process.exit(1);
+          }
+          node[leaf] = process.env.STUB_VALUE;
+          fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+        "
+        exit $?
+        ;;
+
+      patch)
+        # 008 routes the main config block through `openclaw config patch`
+        # rather than letting the entrypoint open openclaw.json itself. The
+        # merge is modelled here; the verdict is not.
+        #
+        # Upstream's contract, from `openclaw config patch --help`: objects
+        # merge recursively, arrays and scalars replace, and null deletes a
+        # path. The entrypoint emits strict JSON, which is the JSON5 subset the
+        # real command accepts, so JSON.parse is enough and no JSON5 parser is
+        # needed here.
+        #
+        # It validates nothing on purpose. A stub with a schema opinion would be
+        # a third transcription to keep in step with upstream; 006's
+        # config-schema-check runs the REAL validator over the file this
+        # produces, which is the check that decides whether the payload is
+        # legal. This decides only what the file looks like.
+        #
+        #   OPENCLAW_STUB_PATCH_ERROR  text -> `config patch` rejects with this
+        #                              message and writes nothing, the way a
+        #                              schema violation does. The entrypoint
+        #                              redacts that message before it reaches
+        #                              the log, so a case has to be able to make
+        #                              it quote a credential.
+        if [ -n "${OPENCLAW_STUB_PATCH_ERROR:-}" ]; then
+          printf '%s\n' "$OPENCLAW_STUB_PATCH_ERROR" >&2
+          exit 1
+        fi
+        # Strict about its flags, and that is load-bearing rather than tidy.
+        # A stub that shrugged at an unrecognised flag let two real regressions
+        # through 008's mutation check: `--dry-run` writes nothing at all, and
+        # `--replace-path agents.defaults.models` restores the whole-object
+        # clobber 008 exists to remove. Both produced a green run against a
+        # permissive stub, because the merge it performed was its own rather
+        # than the one it was asked for.
+        shift 2
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --stdin) ;;
+            *) usage "config patch $*" ;;
+          esac
+          shift
+        done
+
+        STUB_CONFIG="$config" node -e "
+          const fs = require('fs');
+          const configPath = process.env.STUB_CONFIG;
+
+          let patch;
+          try {
+            patch = JSON.parse(fs.readFileSync(0, 'utf8'));
+          } catch (error) {
+            console.error('stub-openclaw: config patch got a malformed document: ' +
+              error.message);
+            process.exit(1);
+          }
+          if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+            console.error('stub-openclaw: config patch expects a JSON object');
+            process.exit(1);
+          }
+
+          let config = {};
+          try {
+            config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+          } catch {}
+
+          // null deletes; a plain object merges into a plain object; anything
+          // else — array, scalar, or an object landing on a non-object —
+          // replaces. That is upstream's rule, restated.
+          const isPlainObject = (value) =>
+            value !== null && typeof value === 'object' && !Array.isArray(value);
+
+          const merge = (target, source) => {
+            for (const [key, value] of Object.entries(source)) {
+              if (value === null) {
+                delete target[key];
+              } else if (isPlainObject(value) && isPlainObject(target[key])) {
+                merge(target[key], value);
+              } else if (isPlainObject(value)) {
+                target[key] = merge({}, value);
+              } else {
+                target[key] = value;
+              }
+            }
+            return target;
+          };
+
+          merge(config, patch);
+          fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+        "
+        exit $?
+        ;;
+
       validate)
         if [ -n "$markers" ]; then
           : > "${markers}/config-validated"

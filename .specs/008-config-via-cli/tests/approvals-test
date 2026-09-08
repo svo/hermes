@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+#
+# Where the exec policy lives, and what happens to the file it used to live in.
+#
+#   .specs/008-config-via-cli/tests/approvals-test
+#
+# Finding D3, and acceptance criterion 4: "either the container stops writing
+# exec-approvals.json and the exec policy is set where the policy now lives, or
+# the file is shown still to be honoured."
+#
+# The probe answered it, and answered it harder than the spec expected. The file
+# is not merely ignored: approvals live in
+# ~/.openclaw/state/openclaw.sqlite#exec_approvals_config, and a leftover file
+# carrying a non-empty policy is a legacy document upstream refuses to read past.
+# `openclaw exec-policy show` against the exact heredoc this container used to
+# write answers:
+#
+#   Legacy exec approvals exist at /root/.openclaw/exec-approvals.json.
+#   Run `openclaw doctor --fix` before using exec approvals.
+#
+# So the container was blocking its own exec approvals with the file it wrote to
+# configure them. These cases pin the first branch of the criterion: the write is
+# gone, the policy is set at tools.exec.security, and a volume that already
+# carries a file is migrated rather than deleted -- because deleting it would
+# discard an operator's tightened `security: allowlist`, which is the bug 004's
+# write-if-absent guard existed to prevent.
+
+set -uo pipefail
+
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+readonly LEGACY_APPROVALS='.openclaw/exec-approvals.json'
+
+# Did the migration run? It is guarded on the legacy file, so "it ran" and "it
+# did not run" are both assertions, and neither is visible in the config.
+doctor_ran() {
+  [ -f "${RUN_DIR}/doctor-ran" ]
+}
+
+# --- the write is gone -----------------------------------------------------
+
+should_write_no_approvals_file_when_the_container_is_new() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "exec-approvals.json" "no" "$(home_file_present "$LEGACY_APPROVALS")"
+  case_end
+}
+
+should_set_the_policy_where_it_lives_now_when_the_container_is_new() {
+  case_start "${FUNCNAME[0]}"
+  # The other half of the same criterion. Removing the write would be a
+  # regression on its own; what makes it a fix is that the intent it carried --
+  # `defaults.security: full` -- is set at the key the schema recognises, which
+  # is also the key upstream sources the effective policy from when there are no
+  # stored overrides.
+  run_entrypoint
+  assert_equals "the exec policy" "full" "$(config_get tools.exec.security)"
+  case_end
+}
+
+should_write_no_approvals_file_when_the_container_restarts() {
+  case_start "${FUNCNAME[0]}"
+  # A second start is where a write-on-every-start would show up, and where the
+  # old block's `[ ! -f ]` guard used to be the thing standing in the way.
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home"
+  run_entrypoint --home "$home"
+  assert_equals "the restart succeeded" "0" "$RUN_STATUS"
+  assert_equals "exec-approvals.json" "no" "$(home_file_present "$LEGACY_APPROVALS")"
+  case_end
+}
+
+# --- the migration, and its guard ------------------------------------------
+
+should_not_run_the_migration_when_no_legacy_file_exists() {
+  case_start "${FUNCNAME[0]}"
+  # `doctor --fix` is broad: in the probe it also altered
+  # browser.extensionRelay.allowLegacyAuth and rebuilt the agent roster. Running
+  # it on every start would put a wide repair into the startup path of every
+  # container for ever, which is a worse thing than the one being fixed. The
+  # guard is what keeps it a one-off.
+  run_entrypoint
+  if doctor_ran; then
+    fail "doctor ran on a container that has no legacy approvals file"
+  fi
+  case_end
+}
+
+should_migrate_the_legacy_file_when_a_volume_carries_one() {
+  case_start "${FUNCNAME[0]}"
+  local home; home="$(new_home)"
+  printf '%s\n' '{"version":1,"defaults":{"security":"full"}}' \
+    > "${home}/${LEGACY_APPROVALS}"
+  run_entrypoint --home "$home"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  if ! doctor_ran; then fail "the legacy file was left in place"; fi
+  assert_equals "the legacy file was retired" "no" \
+    "$(home_file_present "$LEGACY_APPROVALS")"
+  case_end
+}
+
+should_migrate_rather_than_delete_when_the_operator_tightened_the_policy() {
+  case_start "${FUNCNAME[0]}"
+  # The reason this is a migration and not an `rm`. 004 found that rewriting the
+  # file reverted an operator's tightened policy to `full` -- a restart quietly
+  # widening what the agent may run -- and deleting it would do the same thing by
+  # another route. `doctor --fix` imports the policy into SQLite, so the setting
+  # survives the format change.
+  #
+  # What is asserted here is the route, because SQLite is upstream's and this
+  # suite has no window into it: the file was handed to the importer rather than
+  # unlinked. The probe is what confirms the import itself -- afterwards
+  # `openclaw exec-policy show` reports `Approvals State: stored`.
+  local home; home="$(new_home)"
+  printf '%s\n' '{"version":1,"defaults":{"security":"allowlist"}}' \
+    > "${home}/${LEGACY_APPROVALS}"
+  run_entrypoint --home "$home"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  if ! doctor_ran; then
+    fail "the operator's tightened policy was discarded without being imported"
+  fi
+  assert_contains "the container says what it did" "$RUN_ALL" "approvals: migrating"
+  case_end
+}
+
+should_run_the_migration_once_when_the_container_restarts() {
+  case_start "${FUNCNAME[0]}"
+  # Once per volume, not once per start. The guard keys on the file, and the
+  # migration removes the file, so the second start must find nothing to do.
+  local home; home="$(new_home)"
+  printf '%s\n' '{"version":1,"defaults":{"security":"full"}}' \
+    > "${home}/${LEGACY_APPROVALS}"
+  run_entrypoint --home "$home"
+  if ! doctor_ran; then fail "the first start did not migrate"; fi
+  run_entrypoint --home "$home"
+  assert_equals "the restart succeeded" "0" "$RUN_STATUS"
+  if doctor_ran; then fail "doctor ran again on a volume it had already migrated"; fi
+  case_end
+}
+
+# --- a failed migration is not a dead container ----------------------------
+
+should_start_anyway_when_the_migration_fails() {
+  case_start "${FUNCNAME[0]}"
+  # Chat access matters more than the approvals migration, and a container that
+  # refuses to start because a one-off repair failed helps nobody -- the same
+  # judgement 003 makes about the briefing registrar. The file stays, so the next
+  # start tries again.
+  local home; home="$(new_home)"
+  printf '%s\n' '{"version":1,"defaults":{"security":"full"}}' \
+    > "${home}/${LEGACY_APPROVALS}"
+  run_entrypoint --home "$home" OPENCLAW_STUB_DOCTOR_FAILS=yes
+  assert_equals "the run succeeded anyway" "0" "$RUN_STATUS"
+  if ! gateway_started; then fail "a failed migration stopped the gateway"; fi
+  assert_equals "the file is still there to retry" "yes" \
+    "$(home_file_present "$LEGACY_APPROVALS")"
+  case_end
+}
+
+should_say_what_is_broken_when_the_migration_fails() {
+  case_start "${FUNCNAME[0]}"
+  # A silent failure here leaves exec approvals blocked with nothing in the log
+  # to say why, which is the exact shape of the finding.
+  local home; home="$(new_home)"
+  printf '%s\n' '{"version":1,"defaults":{"security":"full"}}' \
+    > "${home}/${LEGACY_APPROVALS}"
+  run_entrypoint --home "$home" OPENCLAW_STUB_DOCTOR_FAILS=yes
+  assert_contains "it names the consequence" "$RUN_ERR" "Exec approvals stay blocked"
+  assert_contains "and the command that fixes it" "$RUN_ERR" "openclaw doctor --fix"
+  case_end
+}
+
+should_write_no_approvals_file_when_the_configuration_is_rejected() {
+  case_start "${FUNCNAME[0]}"
+  # Phase 2 aborts partway. Nothing should have created the retired file on the
+  # way past, on any path.
+  run_entrypoint \
+    OPENCLAW_STUB_PATCH_ERROR='Config validation failed: cron: Unrecognized key: "nope"'
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_equals "exec-approvals.json" "no" "$(home_file_present "$LEGACY_APPROVALS")"
+  case_end
+}
+
+# --- the verdict is the file, not the exit code ----------------------------
+
+should_report_no_migration_when_doctor_succeeds_but_keeps_the_file() {
+  case_start "${FUNCNAME[0]}"
+  # `doctor --fix` exits ZERO and deliberately retains the legacy document when
+  # SQLite already holds approvals it would conflict with:
+  #
+  #   Preserved canonical SQLite exec approvals and retained conflicting legacy JSON.
+  #
+  # A container that read the exit code would announce a migration, leave the
+  # blocking file in place, and say nothing more about it ever again.
+  local home; home="$(new_home)"
+  printf '%s\n' '{"version":1,"defaults":{"security":"allowlist"}}' \
+    > "${home}/${LEGACY_APPROVALS}"
+  run_entrypoint --home "$home" OPENCLAW_STUB_DOCTOR_KEEPS_FILE=yes
+  assert_equals "the start survived" "0" "$RUN_STATUS"
+  assert_not_contains "it does not claim to have migrated" "$RUN_OUT" \
+    "approvals: migrated"
+  assert_contains "it says the file is still there" "$RUN_ERR" \
+    "exec-approvals.json is still there"
+  # The operator is the only one who can settle a conflict, so they are told how.
+  assert_contains "and how to settle it" "$RUN_ERR" "openclaw config set tools.exec.security"
+  case_end
+}
+
+should_report_a_migration_when_doctor_retires_the_file_but_exits_non_zero() {
+  case_start "${FUNCNAME[0]}"
+  # The other half. `doctor --fix` is a maintenance pass over everything, so it
+  # fails on things that have nothing to do with approvals -- a plugin whose tool
+  # schema will not load is enough. The approvals migration still happened, and a
+  # container reading the exit code would warn about work that succeeded.
+  local home; home="$(new_home)"
+  printf '%s\n' '{"version":1,"defaults":{"security":"full"}}' \
+    > "${home}/${LEGACY_APPROVALS}"
+  run_entrypoint --home "$home" OPENCLAW_STUB_DOCTOR_NOISY_EXIT=yes
+  assert_equals "the start survived" "0" "$RUN_STATUS"
+  assert_equals "the file is gone" "no" "$(home_file_present "$LEGACY_APPROVALS")"
+  assert_contains "and it is reported as migrated" "$RUN_OUT" "approvals: migrated"
+  case_end
+}
+
+should_not_log_a_credential_when_doctor_is_quoted() {
+  case_start "${FUNCNAME[0]}"
+  # doctor reads the config, which holds five credentials, and prints a couple of
+  # hundred lines of report. On the path where any of it reaches the log it goes
+  # through the same filter as the setter's output and the phase 3 validator's.
+  local home; home="$(new_home)"
+  printf '%s\n' '{"version":1,"defaults":{"security":"full"}}' \
+    > "${home}/${LEGACY_APPROVALS}"
+  run_entrypoint --home "$home" \
+    ANTHROPIC_API_KEY=sk-ant-secret \
+    OPENCLAW_STUB_DOCTOR_KEEPS_FILE=yes \
+    OPENCLAW_STUB_DOCTOR_ECHO='doctor saw env.vars.ANTHROPIC_API_KEY=sk-ant-secret'
+  assert_not_contains "the anthropic key" "$RUN_ALL" "sk-ant-secret"
+  assert_contains "and the redaction is visible" "$RUN_ALL" "[redacted]"
+  case_end
+}
+
+
+should_write_no_approvals_file_when_the_container_is_new
+should_set_the_policy_where_it_lives_now_when_the_container_is_new
+should_write_no_approvals_file_when_the_container_restarts
+should_not_run_the_migration_when_no_legacy_file_exists
+should_migrate_the_legacy_file_when_a_volume_carries_one
+should_migrate_rather_than_delete_when_the_operator_tightened_the_policy
+should_run_the_migration_once_when_the_container_restarts
+should_start_anyway_when_the_migration_fails
+should_say_what_is_broken_when_the_migration_fails
+should_report_no_migration_when_doctor_succeeds_but_keeps_the_file
+should_report_a_migration_when_doctor_retires_the_file_but_exits_non_zero
+should_not_log_a_credential_when_doctor_is_quoted
+should_write_no_approvals_file_when_the_configuration_is_rejected
+
+report_totals "approvals-test"

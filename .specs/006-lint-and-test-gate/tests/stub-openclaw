@@ -281,6 +281,129 @@ cmd_gateway() {
   esac
 }
 
+# `config set <path> <value> --expect-current-absent`, the write-if-absent shape
+# 008 uses for tools.exec.security so that a restart cannot revert an operator's
+# tightened exec policy (004's finding B6). Strict about the flag: a stub that
+# ignored it would perform an unconditional write and hide the regression.
+cmd_config_set() {
+  local path="${1:-}" value="${2:-}"
+  if [ -z "$path" ] || [ -z "$value" ]; then
+    unimplemented "config set (missing path or value)"
+  fi
+  shift 2
+  local expect_absent='no' arg
+  for arg in "$@"; do
+    case "$arg" in
+      --expect-current-absent) expect_absent='yes' ;;
+      *) unimplemented "config set ${arg}" ;;
+    esac
+  done
+  if [ "$expect_absent" != 'yes' ]; then
+    unimplemented "config set (without --expect-current-absent)"
+  fi
+
+  STUB_CONFIG="$config_path" STUB_PATH="$path" STUB_VALUE="$value" node -e "
+    const fs = require('fs');
+    const configPath = process.env.STUB_CONFIG;
+    let config = {};
+    try {
+      config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    } catch {}
+    const parts = process.env.STUB_PATH.split('.');
+    let node = config;
+    for (const key of parts.slice(0, -1)) {
+      if (node[key] === null || typeof node[key] !== 'object') node[key] = {};
+      node = node[key];
+    }
+    const leaf = parts[parts.length - 1];
+    if (Object.prototype.hasOwnProperty.call(node, leaf)) {
+      console.error('conditional config set expectation did not match the ' +
+        'authored config, so nothing was changed');
+      process.exit(1);
+    }
+    node[leaf] = process.env.STUB_VALUE;
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+  "
+}
+
+# `config patch`, which 008 made the entrypoint's only route to openclaw.json.
+#
+# Upstream's contract, from `openclaw config patch --help`: objects merge
+# recursively, arrays and scalars replace, and null deletes a path. The
+# entrypoint emits strict JSON — the JSON5 subset the real command accepts — so
+# JSON.parse is enough here and no JSON5 parser is needed.
+#
+# It judges nothing, for the same reason `config validate` below judges nothing:
+# the verdict that matters comes from the real `openclaw` this check runs itself,
+# against the file this stub let the entrypoint write. A stub that validated
+# would be a gate marking its own homework. What it must get right is the
+# *merge*, because that is what decides which keys reach the real validator.
+cmd_config_patch() {
+  local stdin_only='no'
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --stdin) stdin_only='yes' ;;
+      # Rejected rather than ignored. A stub that shrugged at an unrecognised
+      # flag let two real regressions through 008's mutation check: `--dry-run`
+      # writes nothing at all, and `--replace-path agents.defaults.models`
+      # restores the whole-object clobber 008 exists to remove. This is the
+      # check `bin/test` actually runs, so it is the one that must not be kind.
+      *) unimplemented "config patch ${arg}" ;;
+    esac
+  done
+  # The entrypoint pipes its payload in. A call that named a file instead would
+  # be a different contract, and this stub would be modelling something the
+  # container does not do.
+  if [ "$stdin_only" != 'yes' ]; then
+    unimplemented "config patch (without --stdin)"
+  fi
+
+  STUB_CONFIG="$config_path" node -e "
+    const fs = require('fs');
+    const configPath = process.env.STUB_CONFIG;
+
+    let patch;
+    try {
+      patch = JSON.parse(fs.readFileSync(0, 'utf8'));
+    } catch (error) {
+      console.error('stub-openclaw: config patch got a malformed document: ' +
+        error.message);
+      process.exit(1);
+    }
+    if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+      console.error('stub-openclaw: config patch expects a JSON object');
+      process.exit(1);
+    }
+
+    let config = {};
+    try {
+      config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    } catch {}
+
+    const isPlainObject = (value) =>
+      value !== null && typeof value === 'object' && !Array.isArray(value);
+
+    const merge = (target, source) => {
+      for (const [key, value] of Object.entries(source)) {
+        if (value === null) {
+          delete target[key];
+        } else if (isPlainObject(value) && isPlainObject(target[key])) {
+          merge(target[key], value);
+        } else if (isPlainObject(value)) {
+          target[key] = merge({}, value);
+        } else {
+          target[key] = value;
+        }
+      }
+      return target;
+    };
+
+    merge(config, patch);
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+  "
+}
+
 log_invocation "$@"
 
 command="${1:-}"
@@ -291,9 +414,15 @@ fi
 case "$command" in
   onboard) cmd_onboard "$@" ;;
   config)
-    case "${1:-}" in
+    sub="${1:-}"
+    if [ "$#" -gt 0 ]; then
+      shift
+    fi
+    case "$sub" in
+      patch) cmd_config_patch "$@" ;;
+      set) cmd_config_set "$@" ;;
       validate) printf 'stub-openclaw: config validate is not judged here\n' ;;
-      *) unimplemented "config ${1:-}" ;;
+      *) unimplemented "config ${sub}" ;;
     esac
     ;;
   gateway) cmd_gateway "$@" ;;

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+#
+# Fake `gog`. The entrypoint calls it once, to hand over the Google service
+# account credential, and 007's permissions cases are the only ones in this
+# repository that take that branch — so a stub is needed here where 004's
+# suite could do without one.
+#
+# It records and succeeds. What `gog auth service-account set` does with the
+# credential is 008's question; this suite only cares that the branch runs and
+# that the file it names is left at 0600 afterwards.
+
+set -uo pipefail
+
+# One record, one write, for the reason stub-openclaw's log_invocation
+# explains at length: concurrent appenders interleave line-at-a-time writes,
+# and a reader then attributes one process's arguments to another. `gog` is
+# only called once per run today, so this is the cheaper of "be correct" and
+# "remember to fix it when it is not".
+if [ -n "${GOG_STUB_ARGV_LOG:-}" ]; then
+  printf -v record 'INVOCATION [%s] %d\n' "${1:-none}" "$#"
+  for arg in "$@"; do
+    record+="$(printf 'ARG [%s]' "$arg")"$'\n'
+  done
+  printf '%s' "$record" >> "$GOG_STUB_ARGV_LOG"
+fi
+
+exit 0

@@ -47,8 +47,13 @@ failures come before the systemic fix.
 | 008 | [config-via-cli](008-config-via-cli/SPEC.md) | D2, D3–D6 | Dissolves the hand-written-key class 004 could only gate |
 | 009 | [channel-teardown](009-channel-teardown/SPEC.md) | A2g, B3d | Removing a token should remove the channel |
 
-**008 and 009 are not planned yet** — `SPEC.md` only. 008 opens with a `verify-locally` check
-that decides whether it is a tidy-up or a live problem; run that before planning it.
+**009 is not planned yet** — `SPEC.md` only.
+
+**008's `verify-locally` check has been run**, and it decided the shape of the plan. Two of its
+five findings changed verdict: D4 is falsified (`tools.exec.security` *is* in the schema, enum
+`deny|allowlist|full`), and D3 is worse than stated — the `exec-approvals.json` the container
+wrote does not merely do nothing, it puts exec approvals into a blocked legacy state. See
+[`008/PLAN.md`](008-config-via-cli/PLAN.md) § The probe, first.
 
 **006 may be pulled forward.** In a green-field ordering the lint gate would come first,
 because it would catch 005's bugs automatically on the way in. It sits at position six
@@ -80,17 +85,18 @@ fails until 001 and 005 land — see `006/PLAN.md` § Preconditions.
 
 ## Shared-file ownership
 
-Five specs edit `entrypoint.sh` and two edit `hermes-check`. To keep the changes
+Six specs edit `entrypoint.sh` and two edit `hermes-check`. To keep the changes
 non-colliding, each plan declares an owned region. No two specs modify the same lines.
 
 Regions are named by content, not by line number. Each spec that lands moves every line below
 it, so the numbers written into `SPEC.md` and `PLAN.md` are the ones that were true when they
-were written — anchor on the content instead. 001 through 007 have landed; 003 replaced a
-22-line block with a 230-line one, 005 rewrote the calendar loops around a single parse, and 007
-added roughly 180 lines between the channel blocks and the phase 3 gate.
+were written — anchor on the content instead. 001 through 008 have landed; 003 replaced a
+22-line block with a 230-line one, 005 rewrote the calendar loops around a single parse, 007
+added roughly 180 lines between the channel blocks and the phase 3 gate, and 008 replaced the
+first `node -e` block with a payload builder and a piped setter.
 
-007 is the deliberate exception to "no two specs modify the same lines", and it crosses into
-004 twice.
+007 and 008 are the deliberate exceptions to "no two specs modify the same lines". Each crosses
+into 004 twice.
 
 The first is sanctioned by its own plan: the bind/token rule lives inside 004's phase 1
 validation block, because `007/PLAN.md` task 3 says to register it there rather than add a second
@@ -106,7 +112,41 @@ through `redact_secrets`, which listed four. One entry was added to that list. A
 secret to a file owns the redaction of that secret wherever the file is read aloud — leaving it
 to 004 would have meant shipping the leak and filing it.
 
-004's mutation anchors are unaffected by both, and its suite is unchanged either side.
+004's mutation anchors are unaffected by either of 007's crossings, and 004's suite was unchanged
+either side of it.
+
+**008 crosses into 004 twice as well**, and both are declared in its plan rather than discovered
+afterwards.
+
+The first is the `exec-approvals.json` guard. The table gives it to 004, which wrote `[ ! -f ]`
+to stop a restart reverting an operator's tightened `defaults.security`. 008 removes the write
+entirely — its acceptance criterion 4 names that file — having found the format retired and a
+leftover one actively blocking exec approvals. 004's reason for the guard is honoured rather than
+discarded: `openclaw doctor --fix` *imports* the operator's policy into SQLite instead of
+deleting it, so a tightened setting survives.
+
+The second is hoisting `redact_secrets` above phase 2. 004 defined it immediately above its phase
+3 gate, the only place that read the config aloud; 008 gives phase 2 a second one, because
+`openclaw config patch` quotes the payload back when it rejects it and that payload carries the
+Anthropic key. The definition moves, its body does not change, and bash resolves function names
+at call time, so the phase 3 gate calls exactly what it always did. Same rule as 007's second
+crossing: a spec that puts a credential where something reads it aloud owns the redaction of it.
+
+008 also changed five of 004's own cases and two of its stub's tables, because it inverted the
+behaviour they pinned: `state-test`'s three approvals cases, `config-test`'s `loopDetection`
+assertions, `gate-test`'s unverified-key list, the stub's `UNVERIFIED` list — which named
+`tools.exec.security` as a key nobody had checked, so 008 checked it and emptied the list, the
+outcome 004 was pinning the way to — and its `TOOLS_EXEC_KEYS`, which had to learn the key that
+list stopped excusing. `harness.sh` gained a `doctor_ran` helper.
+
+Two of those 004 assertions were already red on `main` before 008 began: `config-test` and
+`gate-test` still named the three `loopDetection` thresholds that `78ba48e` removed from the
+entrypoint. They are fixed here, and 004's suite is green again.
+
+007's `permissions-test` changes too, for the same reason rather than as a crossing: the file
+whose mode it asserted is no longer written, so the case became "no file is written", and a new
+one covers the mode of a legacy file a failed migration leaves behind. 007's stub learned
+`doctor` because the entrypoint can now call it.
 
 | File | Region | Owner |
 |---|---|---|
@@ -116,6 +156,7 @@ to 004 would have meant shipping the leak and filing it.
 | `entrypoint.sh` | The bind flags on `openclaw onboard` and on the final `exec openclaw gateway`; the gateway bind/auth block and the permissions step between the channel blocks and the phase 3 gate; the `0600` chmod after onboarding; and, inside 004's regions, the `HERMES_GATEWAY_BIND`/`HERMES_GATEWAY_TOKEN` rule in phase 1 and the `HERMES_GATEWAY_TOKEN` entry in `redact_secrets` | **007** |
 | `hermes-check` | `sanitize_field()` helper and the emit sites | **001** |
 | `hermes-check` | VIP matching, counters, jq guards, date parsing | **005** |
+| `entrypoint.sh` | The first `node -e` block, now a payload builder piped into `openclaw config patch`, and the `tools.exec.security` write-if-absent immediately below it; and, inside 004's regions, the `exec-approvals.json` guard and the position of `redact_secrets` | **008** |
 | `entrypoint.sh` | A channel-teardown block, after both channel blocks and before the phase 3 gate — the same stretch 007's gateway and permissions blocks now occupy, so land it above them: teardown has to run before the permissions step, not after it | **009** |
 
 ## Evidence and confidence

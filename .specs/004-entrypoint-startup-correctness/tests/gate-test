@@ -163,19 +163,27 @@ should_say_nothing_on_stderr_when_the_gate_passes() {
   case_end
 }
 
-should_report_only_the_known_unverified_keys_when_validate_runs() {
+should_report_no_unverified_keys_when_validate_runs() {
   case_start "${FUNCNAME[0]}"
-  # Four keys this entrypoint writes are absent from the published schema
-  # documentation. They are not rejected — absent from one page is weaker
+  # Four keys this entrypoint wrote were absent from the published schema
+  # documentation. They were not rejected — absent from one page is weaker
   # evidence than documented as something else, and deleting working
-  # configuration on that basis would be a guess. Pinning the list here means a
-  # new hand-written key cannot be added without someone having to decide.
+  # configuration on that basis would be a guess. Pinning the list here meant a
+  # new hand-written key could not be added without someone having to decide.
+  #
+  # Someone decided. Three of the four were the loopDetection thresholds, gone
+  # from the entrypoint since 78ba48e; the fourth was tools.exec.security, and
+  # 008 checked it against `openclaw config schema` rather than against a
+  # documentation page and found it present. The list is empty, which is the
+  # outcome this case was pinning the way to.
+  #
+  # The case stays. An empty list is a claim that has to keep being true, and it
+  # is the assertion that goes red the next time a key arrives here unchecked.
   run_entrypoint
   local report
   report="$(validate --json 2>&1)"
   assert_equals "validate exit status" "0" "$?"
-  assert_equals "the unverified list" \
-    '["tools.exec.security","tools.loopDetection.warningThreshold","tools.loopDetection.criticalThreshold","tools.loopDetection.globalCircuitBreakerThreshold"]' \
+  assert_equals "the unverified list" '[]' \
     "$(printf '%s' "$report" | jq -c '.unverified')"
   case_end
 }
@@ -191,6 +199,6 @@ should_not_register_the_briefing_when_the_written_configuration_is_invalid
 should_surface_the_validator_message_when_the_gate_fails
 should_not_log_a_token_when_the_gate_fails
 should_say_nothing_on_stderr_when_the_gate_passes
-should_report_only_the_known_unverified_keys_when_validate_runs
+should_report_no_unverified_keys_when_validate_runs
 
 report_totals "gate-test"

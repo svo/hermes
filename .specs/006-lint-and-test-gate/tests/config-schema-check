@@ -348,9 +348,26 @@ const expected = new Map([
   ['agents.defaults.heartbeat.activeHours.end', env.HERMES_QUIET_HOURS_START],
   ['agents.defaults.heartbeat.activeHours.timezone', env.HERMES_TIMEZONE],
   ['agents.defaults.compaction.model', 'anthropic/claude-haiku-4-5'],
-  // The whole map, so that the model onboarding seeded is shown to be gone
-  // rather than left beside the one the container actually uses.
+  // The whole map, so that the model onboarding seeded is shown to be STILL
+  // THERE beside the one the container uses.
+  //
+  // This expectation was the exact opposite until 008, and the inversion is the
+  // point of that spec rather than a concession to it. The entrypoint used to
+  // assign this object whole, which deleted every entry it did not write on
+  // every start — and this map is upstream's, seeded by its own
+  // `modelPolicyAllowlist` migration, so what was being deleted were entries of
+  // a model policy allowlist. `openclaw config patch` merges recursively, so
+  // they survive. `--replace-path agents.defaults.models` would restore the old
+  // behaviour exactly and is deliberately not used: an operator adding a model's
+  // parameters beside the container's is the case 008's third acceptance
+  // criterion is about, and upstream protects this path for the same reason —
+  // `openclaw config set` demands an explicit `--replace` to overwrite it.
+  //
+  // The seeded entry is spelled out rather than skipped, because "the container
+  // no longer wipes the map" and "the container writes its own entry correctly"
+  // are separate promises and this is the only place that holds both.
   ['agents.defaults.models', {
+    'anthropic/claude-opus-5': {},
     'anthropic/claude-haiku-4-5': { params: { cacheRetention: 'long' } }
   }],
   // Only enabled. warningThreshold, criticalThreshold and
@@ -461,7 +478,33 @@ if (section === 'emptiness') {
   // undefined, and it is the shape the vanished ANTHROPIC_API_KEY actually
   // took. Nothing this entrypoint writes is legitimately empty, so an empty
   // object or list is always the residue of something that went missing.
+  //
+  // "Writes" is doing work in that sentence, and it did not have to before 008.
+  // The entrypoint now patches rather than rewrites, so the file it leaves
+  // behind also holds keys it never touched — onboarding's seed, carried
+  // through. `agents.defaults.models['anthropic/claude-opus-5']` is `{}` there
+  // and legitimately so: an entry with no parameters means upstream's defaults
+  // for that model. Blaming the entrypoint for it would be blaming it for not
+  // deleting something, which is the behaviour 008 exists to remove.
+  //
+  // So a leaf that is byte-identical to the seed is upstream's and is skipped.
+  // Every leaf the entrypoint actually produced is still judged exactly as
+  // before: a value it emptied differs from the seed, and a key it added is not
+  // in the seed at all.
+  //
+  // An unreadable seed falls back to skipping nothing, which is the strict
+  // direction: this section then judges every leaf, exactly as it did before
+  // 008. The `coverage` section below reads the same file and does not guard it,
+  // but that one is *about* the seed and has nothing to say without it — this
+  // one only consults it to be lenient, so it must not go quiet when it cannot.
+  let untouched = new Map();
+  try {
+    untouched = leaves(readJson(env.SEED_PATH), '', new Map());
+  } catch {}
   for (const [path, encoded] of leaves(config, '', new Map())) {
+    if (untouched.get(path) === encoded) {
+      continue;
+    }
     if (encoded === 'null') {
       problems.push('null value at ' + path);
     } else if (encoded === '""') {

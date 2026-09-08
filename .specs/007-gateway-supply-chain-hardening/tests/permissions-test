@@ -42,10 +42,34 @@ should_write_the_config_mode_0600_when_it_starts() {
   case_end
 }
 
-should_write_the_approvals_mode_0600_when_it_starts() {
+# This asserted `600` on exec-approvals.json until 008 stopped the entrypoint
+# writing that file at all -- it is a retired format, and a leftover one with a
+# policy blocks exec approvals rather than configuring them. The permissions
+# question it was asking does not disappear with the write, it splits in two,
+# and both halves are worth holding.
+should_write_no_approvals_file_when_it_starts() {
   case_start "${FUNCNAME[0]}"
   run_entrypoint
-  assert_equals "exec-approvals.json" "600" "$(approvals_mode)"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "exec-approvals.json" "absent" "$(approvals_mode)"
+  case_end
+}
+
+should_tighten_a_legacy_approvals_file_when_the_migration_could_not_retire_it() {
+  case_start "${FUNCNAME[0]}"
+  # The chmod loop still names this path, guarded by `[ -f ]`, and that guard is
+  # doing real work rather than being defensive boilerplate: a migration that
+  # fails is not fatal, so the file stays -- holding an exec policy, on a volume
+  # the host can read. An older image left it 0644.
+  local home approvals; home="$(new_home)"
+  approvals="${home}/.openclaw/exec-approvals.json"
+  mkdir -p "${home}/.openclaw"
+  printf '%s\n' '{"version":1,"defaults":{"security":"allowlist"}}' > "$approvals"
+  chmod 0644 "$approvals"
+
+  run_entrypoint --home "$home" OPENCLAW_STUB_DOCTOR_FAILS=yes
+  assert_equals "the start survived a failed migration" "0" "$RUN_STATUS"
+  assert_equals "the file the migration left behind" "600" "$(approvals_mode)"
   case_end
 }
 
@@ -100,7 +124,12 @@ OLDAPPROVALS
   run_entrypoint --home "$home"
   assert_equals "the run succeeded" "0" "$RUN_STATUS"
   assert_equals "openclaw.json" "600" "$(config_mode)"
-  assert_equals "exec-approvals.json" "600" "$(approvals_mode)"
+  # This asserted 600 on the approvals file too. On the upgrade path 008 now
+  # retires that file rather than tightening it, which is the better answer to
+  # the same worry: a credential-adjacent file an older image left world-readable
+  # is gone instead of merely locked. The case above covers the mode of one that
+  # a failed migration leaves behind.
+  assert_equals "exec-approvals.json was retired" "absent" "$(approvals_mode)"
   case_end
 }
 
@@ -242,7 +271,8 @@ should_leave_the_workspace_files_alone_when_it_tightens_the_secrets() {
 }
 
 should_write_the_config_mode_0600_when_it_starts
-should_write_the_approvals_mode_0600_when_it_starts
+should_write_no_approvals_file_when_it_starts
+should_tighten_a_legacy_approvals_file_when_the_migration_could_not_retire_it
 should_tighten_the_config_holding_every_channel_token_when_it_starts
 should_tighten_the_config_holding_the_gateway_token_when_the_bind_is_lan
 should_tighten_a_config_an_older_image_left_world_readable

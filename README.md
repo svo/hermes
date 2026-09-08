@@ -566,10 +566,31 @@ to your `docker run` before upgrading.
 
 ### The configuration is validated against the schema
 
-After the config is written and before the gateway starts, the entrypoint runs `openclaw config
-validate`. Roughly fifteen keys are written into strict schemas by hand; without this gate an
-upstream key rename turned a working image into one that bricked on the next restart with
-nothing useful in the log. A failure now costs one startup and names the key path:
+The container's main configuration block is written with `openclaw config patch`, which
+validates every key against the live schema as it writes. Objects merge recursively, arrays and
+scalars replace, and `null` deletes — so a key upstream no longer recognises fails at the line
+that wrote it, naming itself, and nothing reaches the file:
+
+```
+Error: the configuration this container tried to write was rejected.
+  openclaw config patch said:
+    Config validation failed: tools.loopDetection: Unrecognized key: "warningThreshold"
+
+  Nothing was written; the persisted configuration is unchanged.
+  Compare the key it names against: openclaw config schema
+```
+
+Those keys used to be hand-written into strict schemas by a read-modify-write that could not tell
+a renamed key from a good one, so an upstream rename reached a running container as a gateway
+that refused to load its own configuration. It also clobbered: a whole-object assignment deleted
+every sibling the container did not write, including entries upstream's own migrations seed into
+`agents.defaults.models`. A setting you tune by hand now survives a restart.
+
+After all of that, and before the gateway starts, the entrypoint still runs `openclaw config
+validate`. That gate is now the backstop rather than the only check — what is left for it is
+everything the patch does not cover: the two channel blocks and the gateway auth block still
+assemble their objects by hand, and the file can be edited on the volume between two starts. A
+failure there costs one startup and names the key path:
 
 ```
 Error: the configuration this container just wrote is not valid.
@@ -593,34 +614,127 @@ docker exec hermes openclaw config validate --json
 docker exec hermes openclaw config get commands.ownerAllowFrom
 ```
 
-### Exec approvals are yours after the first start
+### Exec approvals live in SQLite, not in a file
 
-`~/.openclaw/exec-approvals.json` is written only when it is absent. It used to be rewritten on
-every start, so an operator who tightened `defaults.security` had it reverted to `full` by the
-next restart — a restart quietly widening what the agent may run.
+The container used to write `~/.openclaw/exec-approvals.json` with `defaults.security: full`.
+It no longer writes it at all, because that file is a retired format — and a leftover one is
+worse than useless. Approvals live in `~/.openclaw/state/openclaw.sqlite#exec_approvals_config`,
+and a file carrying a non-empty policy is a legacy document upstream refuses to read past:
 
-The cost is that a change to the shipped default no longer reaches an existing container. To
-adopt one, delete the file and restart:
+```
+Legacy exec approvals exist at /root/.openclaw/exec-approvals.json.
+Run `openclaw doctor --fix` before using exec approvals.
+```
+
+That was the answer `openclaw exec-policy show` gave in every container this image ever started.
+The file written to configure exec approvals was blocking them.
+
+**Read this if you rely on exec being restricted.** While the legacy file is there the approvals
+subsystem refuses to report a policy at all; once it is gone, `openclaw approvals get` answers
+normally and the configured policy is in force. The container has always declared
+`tools.exec.security: full`, and `full` is the most permissive setting there is — so if the
+blocked state had been holding anything back, this change stops holding it back. Bringing the
+container's actual behaviour into line with the policy it has always declared is the point, but
+it is still a change on the day it lands. Check what you are about to get:
 
 ```bash
-docker exec hermes rm /root/.openclaw/exec-approvals.json && docker restart hermes
+docker exec hermes openclaw config get tools.exec.security
 ```
+
+If that is not the policy you want, set it — before or after upgrading, either works, because the
+container writes this key only when it finds none and never overwrites one.
+
+The policy is now set at `tools.exec.security`, which is a key the schema recognises and the key
+upstream sources the effective policy from when there are no stored overrides:
+
+```bash
+docker exec hermes openclaw config get tools.exec.security   # full
+docker exec hermes openclaw exec-policy show                 # Effective: security=full
+```
+
+On a container that never had the legacy file, `exec-policy show` reports
+`Approvals State: defaults (no stored overrides)` and sources the effective policy from that key.
+On one that was migrated it reports `Approvals State: stored`, because the import put the
+policy your old file carried into SQLite — which is the point of migrating rather than deleting,
+and it means the stored value wins over the key. `exec-policy show` is the command that tells you
+which of the two you have, and `openclaw approvals get` shows what is stored.
+
+**Upgrading is automatic and normally happens once.** A volume created by an older image still
+carries the file, so the first start after upgrading runs `openclaw doctor --fix` to import it
+into SQLite and retire it, then never again — the step is guarded on the file being there. It is a
+migration rather than a delete on purpose: an operator who tightened `defaults.security` keeps
+that setting, where deleting the file would silently widen it.
+
+If the file is still there afterwards the container starts anyway and says so, quoting what
+doctor reported. There are two reasons it can happen, and they need different answers. Doctor may
+have failed at something unrelated, in which case fixing that and restarting is enough. Or it may
+have kept the file deliberately, because SQLite already holds approvals the legacy document
+conflicts with:
+
+```
+Preserved canonical SQLite exec approvals and retained conflicting legacy JSON.
+```
+
+Only you can say which policy was meant. Read the file, then either delete it to keep the stored
+policy, or apply its setting to the key and delete it:
+
+```bash
+docker exec hermes cat /root/.openclaw/exec-approvals.json
+docker exec hermes openclaw config set tools.exec.security <value>
+docker exec hermes rm /root/.openclaw/exec-approvals.json
+docker restart hermes
+```
+
+Until it is gone, exec approvals stay blocked and the container repeats the message on every
+start — which is deliberate: a live problem that stopped being mentioned would be worse.
+
+`doctor --fix` is a maintenance pass over the whole configuration, not just the approvals import,
+which is why it runs only while that file is present and never on a container created after this
+change. If you would rather it did not run at all, do the migration yourself before upgrading —
+read the file, set the key, delete it — and the container will find nothing to do.
+
+To change the policy now, set the key rather than editing a file. `tools.exec.security` takes
+`deny`, `allowlist` or `full`; prompting is a separate key, `tools.exec.ask`, which takes `off`,
+`on-miss` or `always`:
+
+```bash
+docker exec hermes openclaw config set tools.exec.security allowlist
+docker exec hermes openclaw config set tools.exec.ask on-miss
+docker restart hermes
+```
+
+**The restart will not undo that.** The container supplies `full` only on the start that finds no
+policy at all, and every start after that leaves whatever it finds — the same promise the old
+write-if-absent guard on `exec-approvals.json` made, kept at the key the policy moved to. A start
+that changed nothing says so:
+
+```
+exec: policy left as it was found; this start did not change it.
+```
+
+`tools.exec.ask` is never written by the container, and everything else under `tools.exec` —
+`timeoutSeconds`, `grantExpiryDays`, `applyPatch` — survives a restart too, because the config is
+merged rather than replaced.
 
 ### Credentials on disk are mode 0600
 
 `openclaw.json` holds the Anthropic key, the Telegram bot token, both Slack tokens and — with a
 non-loopback bind — the gateway token. It used to be written at the default `0644` on a host
 bind mount, so every one of them was readable by any user on the host and by any other container
-sharing that volume. The entrypoint now tightens three paths on every start, not only the first,
+sharing that volume. The entrypoint now tightens these paths on every start, not only the first,
 so an existing volume is corrected on upgrade:
 
 ```bash
 docker exec hermes stat -c '%a' /root/.openclaw/openclaw.json       # 600
-docker exec hermes stat -c '%a' /root/.openclaw/exec-approvals.json # 600
 ```
 
-The third is `GOG_SERVICE_ACCOUNT_KEY`, tightened when the variable names a file — which is the
+The other is `GOG_SERVICE_ACCOUNT_KEY`, tightened when the variable names a file — which is the
 documented usage, and which for a Workspace deployment is a domain-wide delegated credential.
+
+A third path, `exec-approvals.json`, is still named by that step but is normally absent: the
+container stopped writing it (see above). It is tightened on the one path where it can still
+exist — a volume whose migration has not yet succeeded — because until it is retired it holds an
+exec policy on a bind mount the host can read.
 
 **This is a floor, not a fix, and it should not be read as one.** The files are owned by `root`,
 and `0600` only says *root can read them*. So it stops an unprivileged user on the host, and it

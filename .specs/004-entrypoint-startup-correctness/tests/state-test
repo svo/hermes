@@ -87,10 +87,21 @@ should_report_the_key_as_missing_rather_than_starting_when_a_restart_omits_it() 
 
 # --- B6: approvals are the operator's -------------------------------------
 
-should_preserve_an_edited_approvals_file_when_the_container_restarts() {
+# B6 was about a restart widening what the agent may run: the entrypoint
+# rewrote exec-approvals.json every start, so an operator's tightened
+# `security: allowlist` was reverted to `full`. 004 fixed that with a
+# write-if-absent guard.
+#
+# 008 removed the write entirely, having found that the file is a retired format
+# and that a leftover one with a non-empty policy *blocks* exec approvals rather
+# than configuring them. The three cases below were written against the guard
+# and are re-pointed at what replaced it, because B6's promise is unchanged and
+# is still the thing worth asserting: a restart must not quietly widen the
+# policy. It is now kept by migrating the operator's file into SQLite instead of
+# by declining to overwrite it.
+
+should_migrate_an_edited_approvals_file_when_the_container_restarts() {
   case_start "${FUNCNAME[0]}"
-  # An operator who tightens exec approvals had them reverted to `full` by the
-  # next restart — a restart quietly widening what the agent may run.
   local home approvals; home="$(new_home)"
   run_entrypoint --home "$home"
   approvals="${home}/.openclaw/exec-approvals.json"
@@ -98,31 +109,41 @@ should_preserve_an_edited_approvals_file_when_the_container_restarts() {
 
   run_entrypoint --home "$home"
   assert_equals "the restart succeeded" "0" "$RUN_STATUS"
-  assert_equals "the operator's setting survived" "allowlist" \
-    "$(jq -r '.defaults.security' "$approvals")"
+  if ! doctor_ran; then
+    fail "the legacy approvals file was left in place rather than migrated"
+  fi
+  # Retired, not reverted. The operator's `allowlist` went into SQLite; what
+  # must never happen is the file coming back saying `full`.
+  if [ -f "$approvals" ]; then
+    fail "exec-approvals.json survived the migration: $(cat "$approvals")"
+  fi
   case_end
 }
 
-should_create_the_approvals_file_when_it_is_absent() {
+should_write_no_approvals_file_when_it_is_absent() {
   case_start "${FUNCNAME[0]}"
-  # Write-if-absent still has to write when it is absent.
+  # The inversion of should_create_the_approvals_file_when_it_is_absent. Writing
+  # it is what put every container this script ever started into a state where
+  # `openclaw exec-policy show` refused to report a policy at all.
   run_entrypoint
-  assert_equals "created" "full" \
-    "$(jq -r '.defaults.security' "${RUN_HOME}/.openclaw/exec-approvals.json")"
+  if [ -e "${RUN_HOME}/.openclaw/exec-approvals.json" ]; then
+    fail "a fresh start wrote the retired exec-approvals.json"
+  fi
+  # The intent it used to carry, in the place it lives now.
+  assert_equals "the exec policy" "full" "$(config_get '.tools.exec.security')"
   case_end
 }
 
-should_not_recreate_an_approvals_file_the_operator_deleted() {
+should_not_run_the_migration_when_no_legacy_file_exists() {
   case_start "${FUNCNAME[0]}"
-  # Deleting it is how an operator adopts a changed shipped default, so it has
-  # to come back — the file is owned, not sacred.
-  local home approvals; home="$(new_home)"
+  # `doctor --fix` repairs far more than approvals, so it is guarded on the
+  # legacy file being present. A container created after 008 must never call it
+  # -- otherwise a broad repair runs on every start of every container for ever.
+  local home; home="$(new_home)"
   run_entrypoint --home "$home"
-  approvals="${home}/.openclaw/exec-approvals.json"
-  rm -f "$approvals"
+  if doctor_ran; then fail "doctor ran on a fresh volume with no legacy file"; fi
   run_entrypoint --home "$home"
-  assert_equals "recreated from the shipped default" "full" \
-    "$(jq -r '.defaults.security' "$approvals")"
+  if doctor_ran; then fail "doctor ran on a restart with no legacy file"; fi
   case_end
 }
 
@@ -152,9 +173,9 @@ should_keep_the_persisted_key_when_a_restart_omits_it
 should_not_touch_the_config_at_all_when_a_restart_omits_the_key
 should_leave_the_config_untouched_when_any_required_variable_is_omitted
 should_report_the_key_as_missing_rather_than_starting_when_a_restart_omits_it
-should_preserve_an_edited_approvals_file_when_the_container_restarts
-should_create_the_approvals_file_when_it_is_absent
-should_not_recreate_an_approvals_file_the_operator_deleted
+should_migrate_an_edited_approvals_file_when_the_container_restarts
+should_write_no_approvals_file_when_it_is_absent
+should_not_run_the_migration_when_no_legacy_file_exists
 should_skip_onboarding_when_a_config_already_exists
 should_keep_the_key_when_a_restart_supplies_it_again
 
