@@ -1,0 +1,485 @@
+#!/usr/bin/env bash
+#
+# Fake `openclaw`, standing in for the subcommands 008's cases drive. No
+# network, no credentials, no image.
+#
+# This is 008's stub with two changes, copied rather than shared: a change to
+# 008's copy must not silently change what these cases mean. Both changes exist
+# because this entrypoint now issues a SECOND `config patch` -- the channel
+# teardown -- and 008's stub was written when there was only ever one.
+#
+#   onboard          writes what onboarding leaves behind, honouring
+#                    --gateway-port and --gateway-bind
+#   gateway          records that it was reached, and with which --bind
+#   gateway health   the readiness probe 003's registrar polls
+#   config patch     the recursive merge upstream documents, plus a copy of the
+#                    document it was handed, plus the rotating openclaw.json.bak
+#                    backups the real setter leaves behind
+#   config get       one dotted path out of the config
+#   config validate  records that the phase 3 gate ran; never judges
+#   doctor           008's addition. The one-off approvals migration.
+#   automations ...  just enough that the registrar finishes and gets out of
+#                    the way
+#
+# Behaviour switches, all defaulting to the documented happy path:
+#
+#   OPENCLAW_STUB_ONBOARD_AUTH    token (default) / none / bare / password --
+#                                 what onboarding leaves in gateway.auth
+#   OPENCLAW_STUB_VALIDATE_ERROR  text -> `config validate` rejects with this
+#   OPENCLAW_STUB_PATCH_ERROR     text -> `config patch` rejects with this and
+#                                 writes nothing, the way a schema violation
+#                                 does. The entrypoint redacts that message
+#                                 before it reaches the log, so a case has to be
+#                                 able to make it quote a credential.
+#   OPENCLAW_STUB_PATCH_STDIN     file to record patch documents into, one per
+#                                 line, so a case can assert on the payload the
+#                                 entrypoint SENT rather than only on the file
+#                                 that came out. The two are different claims: a
+#                                 payload that omitted a key would still leave a
+#                                 correct file on a container that already had
+#                                 it, and a `null` deletion and an absent key
+#                                 look identical once the merge has run.
+#
+#                                 APPENDED rather than overwritten, which is the
+#                                 first of 009's two changes to 008's stub: this
+#                                 entrypoint now patches TWICE on a start that
+#                                 tears a channel down -- 008's configuration,
+#                                 then the teardown -- and overwriting would
+#                                 leave the suite unable to tell one from two.
+#   OPENCLAW_STUB_PATCH_ERROR_MATCH  substring -> PATCH_ERROR fires only for a
+#                                 payload containing it. 009's second change.
+#                                 Without it a case cannot break the teardown
+#                                 patch without also breaking the configuration
+#                                 patch that runs before it, and the entrypoint
+#                                 would die in phase 2 long before reaching the
+#                                 block under test.
+#   OPENCLAW_STUB_DOCTOR_FAILS    yes -> `doctor --fix` exits non-zero and
+#                                 leaves the legacy file alone. The entrypoint
+#                                 must warn and carry on rather than refuse to
+#                                 start.
+#   OPENCLAW_STUB_DOCTOR_KEEPS_FILE  yes -> doctor exits ZERO and keeps the
+#                                 file, the shape it takes when SQLite already
+#                                 holds approvals the legacy document conflicts
+#                                 with. A container reading the exit code would
+#                                 report a migration that did not happen.
+#   OPENCLAW_STUB_DOCTOR_ECHO     text -> doctor prints this, so a case can
+#                                 make it quote a credential back.
+#   OPENCLAW_STUB_DOCTOR_NOISY_EXIT  yes -> doctor migrates the approvals and
+#                                 then exits NON-ZERO on unrelated maintenance.
+#                                 A container reading the exit code would warn
+#                                 about a migration that worked.
+#
+# Every invocation is appended to OPENCLAW_STUB_ARGV_LOG in the bracketed shape
+# 005's stub-gog and 006's stub-openclaw both use.
+
+set -uo pipefail
+
+config="${HOME}/.openclaw/openclaw.json"
+markers="${OPENCLAW_STUB_MARKERS:-}"
+
+# One record, one write.
+#
+# This is not a micro-optimisation, it is the whole correctness of the log. Two
+# processes append to it concurrently: the foreground `exec openclaw gateway`,
+# and 003's briefing registrar probing `openclaw gateway health --port <n>` from
+# a background subshell. Written as a `{ printf; printf; ... } >> file` block
+# each line is its own write, so the two records interleave — and because both
+# calls log under the command name `gateway`, a reader then attributes the
+# registrar's arguments to the exec.
+#
+# That is not hypothetical. It was caught by running bind-test twenty times:
+# one run in twenty reported the gateway's `--bind` as `3000`, because the exec
+# wrote `ARG [--bind]` and the registrar's `ARG [3000]` landed between it and
+# `ARG [lan]`. A single write(2) with O_APPEND cannot split that way.
+log_invocation() {
+  if [ -z "${OPENCLAW_STUB_ARGV_LOG:-}" ]; then
+    return 0
+  fi
+  local arg record
+  printf -v record 'INVOCATION [%s] %d\n' "${1:-none}" "$#"
+  for arg in "$@"; do
+    record+="$(printf 'ARG [%s]' "$arg")"$'\n'
+  done
+  printf '%s' "$record" >> "$OPENCLAW_STUB_ARGV_LOG"
+}
+
+usage() {
+  printf 'stub-openclaw: unsupported invocation: %s\n' "$*" >&2
+  exit 64
+}
+
+log_invocation "$@"
+
+case "${1:-}" in
+  onboard)
+    mkdir -p "$(dirname "$config")"
+    if [ -n "$markers" ]; then
+      : > "${markers}/onboarded"
+    fi
+
+    # The flags are read rather than assumed. A stub that hardcoded the bind
+    # would pass whatever the entrypoint sent it, including nothing.
+    stub_port=3000
+    stub_bind=lan
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --gateway-port) stub_port="${2:-$stub_port}" ;;
+        --gateway-bind) stub_bind="${2:-$stub_bind}" ;;
+      esac
+      shift
+    done
+
+    STUB_CONFIG="$config" \
+    STUB_PORT="$stub_port" \
+    STUB_BIND="$stub_bind" \
+    STUB_AUTH="${OPENCLAW_STUB_ONBOARD_AUTH:-token}" node -e "
+      const fs = require('fs');
+      const config = {
+        gateway: {
+          mode: 'local',
+          port: Number(process.env.STUB_PORT),
+          bind: process.env.STUB_BIND
+        },
+        agents: { defaults: {} },
+        channels: {},
+        env: {}
+      };
+      if (process.env.STUB_AUTH === 'token') {
+        config.gateway.auth = {
+          mode: 'token',
+          token: 'onboarding-generated-token-not-a-secret'
+        };
+      } else if (process.env.STUB_AUTH === 'bare') {
+        config.gateway.auth = {
+          token: 'onboarding-generated-token-not-a-secret'
+        };
+      } else if (process.env.STUB_AUTH === 'password') {
+        config.gateway.auth = {
+          password: 'onboarding-generated-password-not-a-secret'
+        };
+      }
+      fs.writeFileSync(process.env.STUB_CONFIG, JSON.stringify(config, null, 2) + '\n');
+    "
+    exit $?
+    ;;
+
+  gateway)
+    case "${2:-}" in
+      health)
+        printf 'ok\n'
+        exit 0
+        ;;
+      *)
+        # `exec openclaw gateway` is the last line of the entrypoint, so this
+        # marker is how a case asserts a rejected configuration never got that
+        # far — and the argv log above is how it asserts what bind it was told.
+        if [ -n "$markers" ]; then
+          : > "${markers}/gateway-started"
+        fi
+        exit 0
+        ;;
+    esac
+    ;;
+
+  doctor)
+    # The approvals migration, and only that. The real command repairs a great
+    # deal more -- which is exactly why the entrypoint runs it only when a
+    # legacy exec-approvals.json is present, and why this stub refuses to model
+    # a call that is not asking for a fix.
+    case " $* " in
+      *" --fix "*) ;;
+      *) usage "$@" ;;
+    esac
+    if [ -n "$markers" ]; then
+      : > "${markers}/doctor-ran"
+    fi
+    if [ "${OPENCLAW_STUB_DOCTOR_FAILS:-no}" = 'yes' ]; then
+      printf 'stub-openclaw: doctor could not repair the state directory\n' >&2
+      exit 1
+    fi
+
+    # The two shapes that make the exit code the wrong thing to read, both seen
+    # against the real command:
+    #
+    #   KEEPS_FILE   doctor succeeds overall but deliberately retains the legacy
+    #                document, because SQLite already holds approvals it would
+    #                conflict with. Exit 0, nothing migrated.
+    #   NOISY_EXIT   doctor migrates the approvals and then fails on something
+    #                unrelated -- a plugin whose tool schema will not load is
+    #                enough. Exit 1, migration done.
+    if [ -n "${OPENCLAW_STUB_DOCTOR_ECHO:-}" ]; then
+      printf '%s\n' "$OPENCLAW_STUB_DOCTOR_ECHO"
+    fi
+    if [ "${OPENCLAW_STUB_DOCTOR_KEEPS_FILE:-no}" = 'yes' ]; then
+      printf 'Preserved canonical SQLite exec approvals and retained conflicting legacy JSON.\n'
+      exit 0
+    fi
+    if [ "${OPENCLAW_STUB_DOCTOR_NOISY_EXIT:-no}" = 'yes' ]; then
+      rm -f "${HOME}/.openclaw/exec-approvals.json"
+      printf 'Imported legacy exec approvals into shared SQLite state.\n'
+      printf 'Doctor could not complete maintenance.\n' >&2
+      exit 1
+    fi
+    # What the real one does with a legacy file carrying a policy: import it
+    # into SQLite, record the migration, and retire the file. The import has no
+    # observable side effect here beyond the file going away, which is the part
+    # the entrypoint depends on -- a file left behind means the next start tries
+    # again.
+    rm -f "${HOME}/.openclaw/exec-approvals.json"
+    printf 'Imported legacy exec approvals into shared SQLite state.\n'
+    exit 0
+    ;;
+
+  automations | cron)
+    # 003's registrar only has to finish quietly here. Reporting the briefing
+    # as already present makes it log one line and exit.
+    case "${2:-}" in
+      list) printf 'job-0001  morning-briefing  0 8 * * *\n'; exit 0 ;;
+      *) usage "$@" ;;
+    esac
+    ;;
+
+  config)
+    case "${2:-}" in
+      set)
+        # Write-if-absent, which is the only shape the entrypoint uses. 008 sets
+        # tools.exec.security this way so that a restart cannot revert an
+        # operator's tightened exec policy -- 004's finding B6, which used to be
+        # held by the `[ ! -f ]` guard on exec-approvals.json.
+        #
+        # Strict about the flag for the same reason 008's `config patch` is: a
+        # stub that ignored --expect-current-absent would perform an
+        # unconditional write and turn the case that pins this green.
+        stub_path="${3:-}"
+        stub_value="${4:-}"
+        if [ -z "$stub_path" ] || [ -z "$stub_value" ]; then usage "$@"; fi
+        shift 4
+        stub_expect_absent='no'
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --expect-current-absent) stub_expect_absent='yes' ;;
+            *) usage "config set $*" ;;
+          esac
+          shift
+        done
+        [ "$stub_expect_absent" = 'yes' ] || usage 'config set (without --expect-current-absent)'
+
+        STUB_CONFIG="$config" STUB_PATH="$stub_path" STUB_VALUE="$stub_value" node -e "
+          const fs = require('fs');
+          const configPath = process.env.STUB_CONFIG;
+          let config = {};
+          try {
+            config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+          } catch {}
+
+          const parts = process.env.STUB_PATH.split('.');
+          let node = config;
+          for (const key of parts.slice(0, -1)) {
+            if (node[key] === null || typeof node[key] !== 'object') node[key] = {};
+            node = node[key];
+          }
+          const leaf = parts[parts.length - 1];
+          if (Object.prototype.hasOwnProperty.call(node, leaf)) {
+            // The refusal upstream gives, and the exit code the entrypoint reads.
+            console.error('conditional config set expectation did not match the ' +
+              'authored config, so nothing was changed');
+            process.exit(1);
+          }
+          node[leaf] = process.env.STUB_VALUE;
+          fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+        "
+        exit $?
+        ;;
+
+      patch)
+        # 008 routes the main config block through `openclaw config patch`
+        # rather than letting the entrypoint open openclaw.json itself. The
+        # merge is modelled here; the verdict is not.
+        #
+        # Upstream's contract, from `openclaw config patch --help`: objects
+        # merge recursively, arrays and scalars replace, and null deletes a
+        # path. The entrypoint emits strict JSON, which is the JSON5 subset the
+        # real command accepts, so JSON.parse is enough and no JSON5 parser is
+        # needed here.
+        #
+        # It validates nothing on purpose. A stub with a schema opinion would be
+        # a third transcription to keep in step with upstream; 006's
+        # config-schema-check runs the REAL validator over the file this
+        # produces, which is the check that decides whether the payload is
+        # legal. This decides only what the file looks like.
+        #
+        #   OPENCLAW_STUB_PATCH_ERROR  text -> `config patch` rejects with this
+        #                              message and writes nothing, the way a
+        #                              schema violation does. The entrypoint
+        #                              redacts that message before it reaches
+        #                              the log, so a case has to be able to make
+        #                              it quote a credential.
+        # Strict about its flags, and that is load-bearing rather than tidy.
+        # A stub that shrugged at an unrecognised flag let two real regressions
+        # through this suite's mutation check: `--dry-run` writes nothing at
+        # all, and `--replace-path agents.defaults.models` restores the
+        # whole-object clobber 008 exists to remove. Both produced a green run
+        # against a permissive stub, because the merge it performed was its own
+        # rather than the one it was asked for.
+        shift 2
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --stdin) ;;
+            *) usage "config patch $*" ;;
+          esac
+          shift
+        done
+        STUB_CONFIG="$config" \
+        STUB_PATCH_ERROR="${OPENCLAW_STUB_PATCH_ERROR:-}" \
+        STUB_PATCH_ERROR_MATCH="${OPENCLAW_STUB_PATCH_ERROR_MATCH:-}" \
+        STUB_PATCH_STDIN="${OPENCLAW_STUB_PATCH_STDIN:-}" node -e "
+          const fs = require('fs');
+          const configPath = process.env.STUB_CONFIG;
+
+          const raw = fs.readFileSync(0, 'utf8');
+          // Kept before it is parsed, so a case examining a malformed payload
+          // still has the bytes that caused the problem -- and APPENDED, one
+          // document per line, because a start that tears a channel down
+          // patches twice and the suite has to be able to count them.
+          if (process.env.STUB_PATCH_STDIN) {
+            fs.appendFileSync(
+              process.env.STUB_PATCH_STDIN,
+              raw.replace(/\n/g, ' ') + '\n'
+            );
+          }
+
+          // The rejection a schema violation produces: a message on stderr, a
+          // non-zero exit, and nothing written.
+          //
+          // Read here rather than in bash for two reasons. The document is
+          // recorded first, so a case can still see what was sent by a patch
+          // that was refused; and the refusal can be aimed, so a case can break
+          // the teardown patch without also breaking the configuration patch
+          // that runs before it -- which would kill the start in phase 2, long
+          // before the block under test.
+          if (process.env.STUB_PATCH_ERROR) {
+            const match = process.env.STUB_PATCH_ERROR_MATCH;
+            if (!match || raw.indexOf(match) !== -1) {
+              console.error(process.env.STUB_PATCH_ERROR);
+              process.exit(1);
+            }
+          }
+
+          let patch;
+          try {
+            patch = JSON.parse(raw);
+          } catch (error) {
+            console.error('stub-openclaw: config patch got a malformed document: ' +
+              error.message);
+            process.exit(1);
+          }
+          if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+            console.error('stub-openclaw: config patch expects a JSON object');
+            process.exit(1);
+          }
+
+          let config = {};
+          let previous = null;
+          try {
+            previous = fs.readFileSync(configPath, 'utf8');
+            config = JSON.parse(previous);
+          } catch {}
+
+          // The backups the real setter keeps, modelled because 009 depends on
+          // them not existing afterwards.
+          //
+          // openclaw config patch copies the old configuration to
+          // openclaw.json.bak before writing the new one, and rotates five
+          // generations -- .bak through .bak.4. Probed against the pinned CLI.
+          //
+          // No backticks in this comment, and that is not a style choice: this
+          // whole program is a double-quoted bash string, so a backtick here is
+          // command substitution and bash would run whatever sat between them.
+          //
+          // A stub that skipped this would be the convenient kind: 009's
+          // teardown sweeps those files because they hold a credential the
+          // operator revoked, and without them here the case that pins the
+          // sweep passes whether the sweep is there or not. It was written that
+          // way first, and both mutations for the sweep survived.
+          if (previous !== null) {
+            for (let generation = 3; generation >= 0; generation--) {
+              const from = generation === 0 ? configPath + '.bak' :
+                configPath + '.bak.' + generation;
+              const to = configPath + '.bak.' + (generation + 1);
+              try {
+                fs.copyFileSync(from, to);
+              } catch {}
+            }
+            fs.writeFileSync(configPath + '.bak', previous);
+          }
+
+          // null deletes; a plain object merges into a plain object; anything
+          // else — array, scalar, or an object landing on a non-object —
+          // replaces. That is upstream's rule, restated.
+          const isPlainObject = (value) =>
+            value !== null && typeof value === 'object' && !Array.isArray(value);
+
+          const merge = (target, source) => {
+            for (const [key, value] of Object.entries(source)) {
+              if (value === null) {
+                delete target[key];
+              } else if (isPlainObject(value) && isPlainObject(target[key])) {
+                merge(target[key], value);
+              } else if (isPlainObject(value)) {
+                target[key] = merge({}, value);
+              } else {
+                target[key] = value;
+              }
+            }
+            return target;
+          };
+
+          merge(config, patch);
+          fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+        "
+        exit $?
+        ;;
+
+      get)
+        [ -n "${3:-}" ] || usage "$@"
+        STUB_CONFIG="$config" STUB_QUERY="$3" node -e "
+          const fs = require('fs');
+          const config = JSON.parse(fs.readFileSync(process.env.STUB_CONFIG, 'utf8'));
+          const value = process.env.STUB_QUERY.split('.').reduce(
+            (node, key) => (node === undefined || node === null ? undefined : node[key]),
+            config
+          );
+          if (value === undefined) process.exit(1);
+          console.log(typeof value === 'string' ? value : JSON.stringify(value));
+        "
+        exit $?
+        ;;
+
+      validate)
+        # No schema opinion of its own. 004's stub carries a transcription and
+        # 006's check runs the real validator; a third opinion here would only
+        # be a third thing to keep in step with upstream.
+        #
+        # It can still be told to fail, because what the gate does with a
+        # failure -- redact the message and refuse to start -- is 007's problem
+        # the moment 007 puts a fifth credential into the file being validated.
+        if [ -n "$markers" ]; then
+          : > "${markers}/config-validated"
+        fi
+        if [ -n "${OPENCLAW_STUB_VALIDATE_ERROR:-}" ]; then
+          printf '%s\n' "$OPENCLAW_STUB_VALIDATE_ERROR" >&2
+          exit 1
+        fi
+        exit 0
+        ;;
+
+      *)
+        usage "$@"
+        ;;
+    esac
+    ;;
+
+  *)
+    usage "$@"
+    ;;
+esac

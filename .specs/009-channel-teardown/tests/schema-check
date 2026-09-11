@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+#
+# Does a torn-down channel block survive contact with the real schema?
+#
+#   .specs/009-channel-teardown/tests/schema-check
+#
+# This is the one question in this spec that a stub cannot answer, and it is the
+# question the whole design rests on. `teardown-test` proves the entrypoint
+# removes the credential and disables the channel; it cannot prove the result is
+# a configuration the gateway will still load. If `botToken` turned out to be a
+# required key, every case in that suite would be green over a container that
+# refuses to start — an operator would remove a token and get a brick, which is
+# a worse failure than the one 009 exists to fix.
+#
+# `PLAN.md` § The probe, first records the answer against `openclaw@2026.9.2`:
+# neither channel names a credential in its `required` list, and the stripped
+# block validates. This file is that probe, kept, so that an upstream release
+# which makes a credential required goes red here instead of in a running
+# container.
+#
+# It follows 006's `config-schema-check` in shape: the real `entrypoint.sh` runs
+# against stubs, and the file it produces is handed to a REAL
+# `openclaw config validate`. Without one on PATH the cases skip and say so —
+# silence would be indistinguishable from a pass, which is the failure mode this
+# repository keeps finding.
+
+set -uo pipefail
+
+# Resolved before the harness is sourced, and used from outside `run_entrypoint`
+# on purpose: the harness shadows `openclaw` with a stub for the entrypoint's own
+# PATH, and this is the one check that must reach the real thing.
+real_openclaw="$(command -v openclaw || true)"
+
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+readonly TELEGRAM_ENV=(
+  'TELEGRAM_BOT_TOKEN=8123456:AAF-telegram-token-marker'
+  'TELEGRAM_ALLOW_FROM=100000001,100000002'
+)
+readonly SLACK_ENV=(
+  SLACK_BOT_TOKEN=xoxb-slack-bot-token-marker
+  SLACK_APP_TOKEN=xapp-slack-app-token-marker
+  SLACK_ALLOW_FROM=U0STUBUSER1
+  SLACK_ALLOW_CHANNELS=C0STUBCHAN1
+)
+
+# `config validate` reads $HOME/.openclaw/openclaw.json, so the generated file is
+# copied into a home of its own rather than validated in place — the validator
+# may rewrite or migrate what it reads, and a case that ran after it would be
+# judging a different file.
+#
+# OPENCLAW_* are cleared for 006's reason: they redirect the config path and the
+# state directory, so a developer with one exported would have the validator pass
+# judgement on something else entirely.
+validate_config() {
+  local source_config="$1" candidate
+  candidate="$(mktemp -d "${TMP_ROOT}/validate.XXXXXX")"
+  mkdir -p "${candidate}/.openclaw"
+  cp "$source_config" "${candidate}/.openclaw/openclaw.json"
+  env -u OPENCLAW_CONFIG_PATH -u OPENCLAW_STATE_DIR -u OPENCLAW_PROFILE \
+    -u OPENCLAW_CONTAINER \
+    HOME="$candidate" "$real_openclaw" config validate 2>&1
+}
+
+# Leaves RUN_CONFIG pointing at a config both channels were configured in and
+# then torn out of.
+tear_both_down() {
+  local home
+  home="$(new_home)"
+  run_entrypoint --home "$home" "${TELEGRAM_ENV[@]}" "${SLACK_ENV[@]}"
+  run_entrypoint --home "$home"
+}
+
+should_accept_a_torn_down_config_when_the_validator_is_available() {
+  case_start "${FUNCNAME[0]}"
+  local output status=0
+  tear_both_down
+  assert_equals "the teardown ran" "false" "$(config_get channels.telegram.enabled)"
+
+  output="$(validate_config "$RUN_CONFIG")" || status=$?
+  if [ "$status" -ne 0 ]; then
+    # Printed verbatim: every credential in this sandbox is synthetic, and in
+    # this case they have been deleted anyway. The container redacts the same
+    # message, which is a different situation and a different rule.
+    fail "openclaw config validate rejected a config with both channels torn down"
+    fail "$output"
+  fi
+  case_end
+}
+
+should_accept_a_half_torn_down_config_when_the_validator_is_available() {
+  case_start "${FUNCNAME[0]}"
+  # One channel stripped while the other keeps its credentials. This is the
+  # shape a real deployment reaches — revoking Telegram and keeping Slack —
+  # and it is a different document from the one above.
+  local home output status=0
+  home="$(new_home)"
+  run_entrypoint --home "$home" "${TELEGRAM_ENV[@]}" "${SLACK_ENV[@]}"
+  run_entrypoint --home "$home" "${SLACK_ENV[@]}"
+  assert_equals "telegram went" "false" "$(config_get channels.telegram.enabled)"
+  assert_equals "slack stayed" "true" "$(config_get channels.slack.enabled)"
+
+  output="$(validate_config "$RUN_CONFIG")" || status=$?
+  if [ "$status" -ne 0 ]; then
+    fail "openclaw config validate rejected a config with one channel torn down"
+    fail "$output"
+  fi
+  case_end
+}
+
+# The red half. A validator that only ever returns 0 is indistinguishable from
+# one that is not running, and this repository has already shipped a gate with
+# that property.
+#
+# The unrecognised key is injected INSIDE `channels.telegram` rather than at the
+# root, which is 006's choice, because what has to be shown here is that the
+# validator is reading the part of the document this spec edits. A root-level
+# probe would go red identically if `channels` were skipped entirely.
+should_reject_an_unrecognised_channel_key_when_the_validator_is_available() {
+  case_start "${FUNCNAME[0]}"
+  local corrupt output status=0
+  local probe_key='hermesTeardownProbeKey'
+  tear_both_down
+  corrupt="$(mktemp "${TMP_ROOT}/corrupt.XXXXXX")"
+  CONFIG_PATH="$RUN_CONFIG" CORRUPT_PATH="$corrupt" PROBE_KEY="$probe_key" node -e '
+    const fs = require("fs");
+    const config = JSON.parse(fs.readFileSync(process.env.CONFIG_PATH, "utf8"));
+    config.channels.telegram[process.env.PROBE_KEY] = "injected by schema-check";
+    fs.writeFileSync(process.env.CORRUPT_PATH, JSON.stringify(config, null, 2) + "\n");
+  '
+
+  output="$(validate_config "$corrupt")" || status=$?
+  if [ "$status" -eq 0 ]; then
+    fail "openclaw config validate accepted an unrecognised key inside a channel block"
+    fail "$output"
+  else
+    assert_contains "the validator names the offending key" "$output" "$probe_key"
+  fi
+  case_end
+}
+
+if [ -n "$real_openclaw" ]; then
+  should_accept_a_torn_down_config_when_the_validator_is_available
+  should_accept_a_half_torn_down_config_when_the_validator_is_available
+  should_reject_an_unrecognised_channel_key_when_the_validator_is_available
+else
+  # The local-developer path. The builder image installs the CLI through
+  # roles/openclaw-cli, so CI reaches the branch above. Each half is named
+  # separately, because "a torn-down config is accepted" and "an invalid one is
+  # refused" are separate promises and neither was kept here.
+  skip_case "should_accept_a_torn_down_config_when_the_validator_is_available" \
+    "openclaw is not on PATH; a torn-down config was not validated"
+  skip_case "should_accept_a_half_torn_down_config_when_the_validator_is_available" \
+    "openclaw is not on PATH; a half-torn-down config was not validated"
+  skip_case "should_reject_an_unrecognised_channel_key_when_the_validator_is_available" \
+    "openclaw is not on PATH; the validator was not shown rejecting anything"
+fi
+
+report_totals "schema-check"

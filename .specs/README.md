@@ -2,8 +2,8 @@
 
 Nine specifications. Seven derive from the adversarial review of the OpenClaw configuration;
 008 and 009 were deferred out of 004 as its open questions were answered, and carry their
-findings with them. Each directory holds a `SPEC.md` (what and why) and, once it is planned, a
-`PLAN.md` (how), following the `/specify` → `/plan` workflow.
+findings with them. Each directory holds a `SPEC.md` (what and why) and a `PLAN.md` (how),
+following the `/specify` → `/plan` workflow. All nine are planned and landed.
 
 ## Template adaptation
 
@@ -46,8 +46,6 @@ failures come before the systemic fix.
 | 007 | [gateway-supply-chain-hardening](007-gateway-supply-chain-hardening/SPEC.md) | A3, D1, D2, D5 | Posture and stability |
 | 008 | [config-via-cli](008-config-via-cli/SPEC.md) | D2, D3–D6 | Dissolves the hand-written-key class 004 could only gate |
 | 009 | [channel-teardown](009-channel-teardown/SPEC.md) | A2g, B3d | Removing a token should remove the channel |
-
-**009 is not planned yet** — `SPEC.md` only.
 
 **008's `verify-locally` check has been run**, and it decided the shape of the plan. Two of its
 five findings changed verdict: D4 is falsified (`tools.exec.security` *is* in the schema, enum
@@ -97,6 +95,13 @@ first `node -e` block with a payload builder and a piped setter.
 
 007 and 008 are the deliberate exceptions to "no two specs modify the same lines". Each crosses
 into 004 twice.
+
+**009 crosses into nothing.** It is one new block between two existing ones, and neither 002's
+Slack region nor the Telegram block nor any of 004's phases changed a line — which is what the
+spec meant by "one mechanism should cover both". Its suite is 008's harness and stub with two
+changes, both forced by the same fact: the entrypoint now issues a *second* `config patch`, so
+the stub records patch documents one per line instead of overwriting, and its rejection can be
+aimed at one of them. 008's own suite is unaffected and was run either side.
 
 The first is sanctioned by its own plan: the bind/token rule lives inside 004's phase 1
 validation block, because `007/PLAN.md` task 3 says to register it there rather than add a second
@@ -157,7 +162,7 @@ one covers the mode of a legacy file a failed migration leaves behind. 007's stu
 | `hermes-check` | `sanitize_field()` helper and the emit sites | **001** |
 | `hermes-check` | VIP matching, counters, jq guards, date parsing | **005** |
 | `entrypoint.sh` | The first `node -e` block, now a payload builder piped into `openclaw config patch`, and the `tools.exec.security` write-if-absent immediately below it; and, inside 004's regions, the `exec-approvals.json` guard and the position of `redact_secrets` | **008** |
-| `entrypoint.sh` | A channel-teardown block, after both channel blocks and before the phase 3 gate — the same stretch 007's gateway and permissions blocks now occupy, so land it above them: teardown has to run before the permissions step, not after it | **009** |
+| `entrypoint.sh` | The channel-teardown block between the Slack block and 007's gateway bind/auth block — after both channel blocks, because they write the file this one reads, and above 007's, because the permissions sweep has to stay downstream of every write | **009** |
 
 ## Evidence and confidence
 

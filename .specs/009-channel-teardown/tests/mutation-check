@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+#
+# Sensitivity check. Not part of `run`: it is slow, and it is a check on the
+# cases rather than on the code.
+#
+# Each mutation changes exactly one behaviour in a copy of `entrypoint.sh` and
+# asserts that at least one case notices. A mutation nothing catches is a hole
+# in the suite.
+#
+#   .specs/009-channel-teardown/tests/mutation-check [name-substring]
+#
+# With an argument, only mutations whose name contains it are run.
+#
+# Every anchor is asserted to occur exactly once in the whole file before it is
+# applied, and a bad anchor is reported as a bad anchor rather than as a caught
+# or uncaught mutation — the mistake 002 made, where two mutations anchored on a
+# string that also occurred in a neighbouring block and so read as clean.
+
+# The anchors below are literal fragments of the file under test, so every $ in
+# them is meant to stay a $. Single quotes are the point.
+# shellcheck disable=SC2016
+
+set -uo pipefail
+
+tests_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${tests_dir}/../../.." && pwd)"
+entrypoint="${repo_root}/infrastructure/ansible/roles/openclaw/files/entrypoint.sh"
+
+only="${1:-}"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+missed=()
+skipped=0
+
+selected() {
+  if [ -z "$only" ]; then
+    return 0
+  fi
+  case "$1" in
+    *"$only"*) return 0 ;;
+    *) skipped=$((skipped + 1)); return 1 ;;
+  esac
+}
+
+# apply <source> <destination> <anchor> <replacement>
+#
+# The anchor is a fixed string, matched against the whole file so that it may
+# span lines; the replacement takes its place. Both are passed through the
+# environment, never interpolated into a pattern.
+apply() {
+  MUT_ANCHOR="$3" MUT_REPLACEMENT="$4" python3 -c '
+import os, sys
+src, dst = sys.argv[1], sys.argv[2]
+anchor = os.environ["MUT_ANCHOR"]
+replacement = os.environ["MUT_REPLACEMENT"]
+s = open(src).read()
+hits = s.count(anchor)
+if hits != 1:
+    sys.stderr.write("hits=%d\n" % hits)
+    sys.exit(3)
+open(dst, "w").write(s.replace(anchor, replacement, 1))
+' "$1" "$2"
+}
+
+verdict() {
+  local name="$1" caught="$2"
+  if [ -n "$caught" ]; then
+    printf '%-58s caught by %s\n' "$name" "$caught"
+  else
+    printf '%-58s *** NOT CAUGHT ***\n' "$name" >&2
+    missed+=("$name")
+  fi
+}
+
+failing_cases() {
+  printf '%s\n' "$1" | grep '^FAIL ' | sed 's/^FAIL //' | paste -sd, -
+}
+
+# mutate <name> <anchor> <replacement>
+mutate() {
+  local name="$1" mutant="${work}/entrypoint.sh" out caught
+
+  selected "$name" || return 0
+
+  if ! apply "$entrypoint" "$mutant" "$2" "$3"; then
+    printf 'ANCHOR %-51s did not match exactly once — not applied\n' "$name" >&2
+    missed+=("$name (bad anchor)")
+    return
+  fi
+
+  # A mutant that no longer parses proves nothing about the cases.
+  if ! bash -n "$mutant" 2>/dev/null; then
+    printf 'SYNTAX %-51s the mutant does not parse — not applied\n' "$name" >&2
+    missed+=("$name (bad mutant)")
+    return
+  fi
+
+  # teardown-test first: it is the suite that runs everywhere. schema-check only
+  # runs while nothing has caught the mutation yet, and only says anything when a
+  # real `openclaw` is on PATH — so a mutation caught only there is reported as
+  # uncaught on a machine without one, which is the honest answer.
+  out="$(ENTRYPOINT="$mutant" bash "${tests_dir}/teardown-test" 2>&1)"
+  caught="$(failing_cases "$out")"
+  if [ -z "$caught" ]; then
+    out="$(ENTRYPOINT="$mutant" bash "${tests_dir}/schema-check" 2>&1)"
+    caught="$(failing_cases "$out")"
+  fi
+
+  verdict "$name" "$caught"
+}
+
+# --- the teardown happens at all -------------------------------------------
+
+# The whole block, switched off. This is the state of the file before 009, and
+# it is the mutation the red baseline in README.md is the long form of.
+mutate 'no channel is ever torn down' \
+  'if [ ${#channel_teardown[@]} -gt 0 ]; then' \
+  'if false; then'
+
+mutate 'the planner reads a file that is not the config' \
+  "        fs.readFileSync(process.env.HOME + '/.openclaw/openclaw.json', 'utf8')" \
+  "        fs.readFileSync(process.env.HOME + '/.openclaw/not-the-config.json', 'utf8')"
+
+# --- what the teardown takes away ------------------------------------------
+
+# The half of the fix that is not the disable. A channel that is disabled while
+# its token stays on the volume is the finding restated, not fixed: the operator
+# still has a credential in a file they believe they emptied.
+mutate 'telegram is disabled but its token is left on the volume' \
+  '"telegram":{"enabled":false,"botToken":null}' \
+  '"telegram":{"enabled":false}'
+
+mutate 'slack is disabled but its tokens are left on the volume' \
+  '"slack":{"enabled":false,"botToken":null,"appToken":null}' \
+  '"slack":{"enabled":false}'
+
+# The asymmetry SPEC § Overview says neither 002 nor 004 could fix half of, in
+# its most plausible form: Slack tidied up as if it were Telegram, leaving an
+# app-level token with connections:write behind.
+mutate 'slack keeps its app token' \
+  '"slack":{"enabled":false,"botToken":null,"appToken":null}' \
+  '"slack":{"enabled":false,"botToken":null}'
+
+# The other half. The token goes and the channel stays on, which is a channel
+# that cannot authenticate rather than a channel that was removed.
+mutate 'the token is taken but the channel stays enabled' \
+  '"telegram":{"enabled":false,"botToken":null}' \
+  '"telegram":{"enabled":true,"botToken":null}'
+
+# Deleting the block rather than disabling it — SPEC Open Question 1's other
+# answer, which loses the allowlist an operator has to re-supply.
+mutate 'the whole channel block is deleted rather than disabled' \
+  '"telegram":{"enabled":false,"botToken":null}' \
+  '"telegram":null'
+
+# --- the three clauses of the guard ----------------------------------------
+
+# Clause 1. Without it a channel is torn down on the very start that configured
+# it, which is a container that can never have a working channel.
+mutate 'a channel is torn down while its token is still set' \
+  '      if (process.env[channel.variable]) continue;' \
+  '      if (false) continue;'
+
+# Clause 1, confused rather than removed: Slack gated on Telegram's variable, so
+# both channels go whenever either loses its token. This is why criterion 3 is
+# asserted in both directions.
+mutate 'both channels are gated on the telegram token' \
+  '      if (process.env[channel.variable]) continue;' \
+  '      if (process.env.TELEGRAM_BOT_TOKEN) continue;'
+
+# Clause 2, removed rather than softened.
+#
+# The first version of this mutation replaced the clause with
+# `channels[name] || {}`, and once clause 3 was narrowed to "still holds one of
+# our credentials" that mutant became CORRECT: an empty object holds no
+# credential, so it is skipped, and the mutation stopped proving anything. It
+# survived a full run and is replaced here rather than left looking green.
+#
+# Dropping the guard outright is the real regression. `hasOwnProperty.call`
+# raises a TypeError on undefined, which is what `channels.telegram` is on every
+# container that configures only Slack — so the planner aborts and the start is
+# refused, on the most ordinary configuration this image has.
+mutate 'the guard inspects a channel that is not in the config' \
+  '      const block = channels[name];
+      if (block === null || typeof block !== '"'"'object'"'"' || Array.isArray(block)) continue;' \
+  '      const block = channels[name];'
+
+# Clause 3. `config patch` reports two updates for a no-op re-patch and exits
+# zero, so without this the teardown re-runs and re-announces itself on every
+# start for the rest of the volume's life.
+mutate 'the teardown repeats on every restart' \
+  '      if (!holdsCredential) continue;' \
+  '      if (false) continue;'
+
+# Clause 3, written the way it is easiest to write it wrong. "enabled is not
+# false" misses the block an operator disabled by hand while leaving the token
+# in it — half a teardown, missing the half that matters.
+mutate 'a hand-disabled channel keeps its token' \
+  '      if (!holdsCredential) continue;' \
+  '      if (block.enabled === false) continue;'
+
+# Clause 3 as the FIRST draft of this block had it: "still enabled, or still
+# holding a credential". It reads reasonably and it tears down channels that are
+# not this container's — an operator who configured Telegram themselves with
+# `tokenFile` gets their working channel disabled, and is told a token was
+# removed that this container never touched.
+mutate 'a channel this container never configured is torn down' \
+  '      if (!holdsCredential) continue;' \
+  '      if (block.enabled === false && !holdsCredential) continue;'
+
+# --- the setter is the route -----------------------------------------------
+
+# The regression 008 exists to prevent, arriving at a new address: the config
+# comes out right and nothing validated the write.
+# The payload is handed over in the environment on purpose. The first draft of
+# this mutation read process.env.PAYLOAD without setting it, so the mutant threw
+# on JSON.parse(undefined) and was "caught" for having crashed rather than for
+# having bypassed the setter — a mutation that proves nothing about the cases.
+mutate 'the teardown is written straight to the file' \
+  '    printf '"'"'%s'"'"' "$channel_teardown_payload" | openclaw config patch --stdin 2>&1' \
+  '    PAYLOAD="$channel_teardown_payload" node -e "const fs=require('"'"'fs'"'"');const p=process.env.HOME+'"'"'/.openclaw/openclaw.json'"'"';const c=JSON.parse(fs.readFileSync(p,'"'"'utf8'"'"'));for(const [n,v] of Object.entries(JSON.parse(process.env.PAYLOAD).channels)){c.channels[n]=Object.assign(c.channels[n]||{},v);for(const k of Object.keys(v))if(v[k]===null)delete c.channels[n][k];}fs.writeFileSync(p,JSON.stringify(c,null,2)+'"'"'\\n'"'"')" 2>&1'
+
+mutate 'the teardown is only ever a dry run' \
+  'openclaw config patch --stdin 2>&1' \
+  'openclaw config patch --stdin --dry-run 2>&1'
+
+# --- a rejected teardown ---------------------------------------------------
+
+# Failing open. The channel is still enabled, the token is still on the volume,
+# and the container carries on answering on a channel the operator revoked.
+mutate 'a rejected teardown does not stop the start' \
+  "      echo '  Nothing was written, so the channel is still enabled and its token is'
+      echo '  still on the volume. Refusing to start rather than keep answering on a'
+      echo '  channel you have revoked.'
+    } >&2
+    exit 1" \
+  "      echo '  Nothing was written, so the channel is still enabled and its token is'
+      echo '  still on the volume. Refusing to start rather than keep answering on a'
+      echo '  channel you have revoked.'
+    } >&2"
+
+mutate 'the teardown patch exit status is ignored' \
+  '  if ! channel_teardown_output="$(
+    printf '"'"'%s'"'"' "$channel_teardown_payload" | openclaw config patch --stdin 2>&1
+  )"; then' \
+  '  channel_teardown_output="$(
+    printf '"'"'%s'"'"' "$channel_teardown_payload" | openclaw config patch --stdin 2>&1
+  )" || true
+  if false; then'
+
+mutate 'a rejected teardown is printed without redacting it' \
+  '      redact_secrets "$channel_teardown_output" | sed '"'"'s/^/    /'"'"'' \
+  '      printf '"'"'%s\n'"'"' "$channel_teardown_output" | sed '"'"'s/^/    /'"'"''
+
+# --- the copies the setter leaves behind -----------------------------------
+
+# The finding an adversarial review of this change turned up, and the reason
+# criterion 2 is asserted against the VOLUME rather than against one file.
+# `config patch` copies the old config to openclaw.json.bak before writing, and
+# rotates five generations. Without the sweep, openclaw.json is clean and the
+# revoked token is in the file next to it.
+mutate 'the setter backups keep the revoked token' \
+  '  rm -f "$HOME"/.openclaw/openclaw.json.bak*' \
+  '  :'
+
+# Only the current generation swept, which is the fix somebody would write
+# having seen .bak and not .bak.1 through .bak.4.
+mutate 'only the newest backup is swept' \
+  '  rm -f "$HOME"/.openclaw/openclaw.json.bak*' \
+  '  rm -f "$HOME"/.openclaw/openclaw.json.bak'
+
+# --- what the operator is told ---------------------------------------------
+
+# The criterion exists because the operator should not have to diff a config
+# file to find out. A silent teardown is the finding with the config half fixed.
+mutate 'the teardown is silent' \
+  "  for channel_teardown_name in \"\${channel_teardown[@]}\"; do
+    printf 'channels: %s disabled and its token removed (%s_BOT_TOKEN is not set).\\n' \\
+      \"\$channel_teardown_name\" \"\${channel_teardown_name^^}\"
+  done" \
+  '  :'
+
+mutate 'the line does not say which variable is missing' \
+  "    printf 'channels: %s disabled and its token removed (%s_BOT_TOKEN is not set).\\n' \\
+      \"\$channel_teardown_name\" \"\${channel_teardown_name^^}\"" \
+  "    printf 'channels: %s disabled and its token removed (%s).\\n' \\
+      \"\$channel_teardown_name\" \"\${channel_teardown_name^^}\""
+
+mutate 'the line names a channel that was not torn down' \
+  "    printf 'channels: %s disabled and its token removed (%s_BOT_TOKEN is not set).\\n' \\
+      \"\$channel_teardown_name\" \"\${channel_teardown_name^^}\"" \
+  "    printf 'channels: telegram disabled and its token removed (%s_BOT_TOKEN is not set).\\n' \\
+      \"\${channel_teardown_name^^}\""
+
+# The mistake 008 found in its own approvals block, at a new address: announcing
+# the outcome before the thing that decides it. The line then survives a patch
+# that was refused, and the operator is told a token was removed that is still
+# on the volume.
+mutate 'the teardown is announced before it happens' \
+  '  # Redacted like everything else in phase 2, with one honest caveat: the filter' \
+  '  for channel_teardown_name in "${channel_teardown[@]}"; do
+    printf '"'"'channels: %s disabled and its token removed (%s_BOT_TOKEN is not set).\n'"'"' \
+      "$channel_teardown_name" "${channel_teardown_name^^}"
+  done
+
+  # Redacted like everything else in phase 2, with one honest caveat: the filter'
+
+printf '\n'
+if [ "$skipped" -gt 0 ]; then
+  printf '%d mutation(s) skipped by the filter.\n' "$skipped"
+fi
+if [ ${#missed[@]} -eq 0 ]; then
+  printf 'Every mutation was caught.\n'
+  exit 0
+fi
+printf '%d mutation(s) survived or could not be applied:\n' "${#missed[@]}" >&2
+printf '  %s\n' "${missed[@]}" >&2
+exit 1

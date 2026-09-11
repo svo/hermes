@@ -1,0 +1,624 @@
+#!/usr/bin/env bash
+#
+# What happens to a channel when its token stops being supplied.
+#
+#   .specs/009-channel-teardown/tests/teardown-test
+#
+# Findings A2g and B3d, and all six of SPEC.md's acceptance criteria.
+#
+# Configuring a channel was additive and removing one was not: `entrypoint.sh`
+# wrote `channels.telegram` when TELEGRAM_BOT_TOKEN was set and `channels.slack`
+# when SLACK_BOT_TOKEN was set, and did nothing at all when they were absent. So
+# an operator who took a token out of their `docker run` got a container that
+# still had the channel enabled, still holding the token, and still answering —
+# and the token stayed on the volume after they believed they had removed it.
+#
+# Almost every case here is TWO starts over ONE home, because that is the only
+# shape in which the behaviour exists. A container has to be configured with a
+# token before a start without one means anything, and a single start can never
+# tell you which way it went. `run_entrypoint --home` is 008's, and it is what
+# makes this suite possible.
+
+set -uo pipefail
+
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+# Distinct enough to grep the whole config for, which is what criterion 2 asks.
+readonly TELEGRAM_TOKEN='8123456:AAF-telegram-token-marker'
+readonly SLACK_BOT='xoxb-slack-bot-token-marker'
+readonly SLACK_APP='xapp-slack-app-token-marker'
+
+readonly TELEGRAM_ENV=(
+  "TELEGRAM_BOT_TOKEN=${TELEGRAM_TOKEN}"
+  'TELEGRAM_ALLOW_FROM=100000001,100000002'
+)
+readonly SLACK_ENV=(
+  "SLACK_BOT_TOKEN=${SLACK_BOT}"
+  "SLACK_APP_TOKEN=${SLACK_APP}"
+  SLACK_ALLOW_FROM=U0STUBUSER1
+  SLACK_ALLOW_CHANNELS=C0STUBCHAN1
+)
+
+# A start with both channels configured leaves a volume in the state every case
+# below starts from. Returns the home so the restart can be aimed at it.
+configure_both() {
+  local home
+  home="$(new_home)"
+  run_entrypoint --home "$home" "${TELEGRAM_ENV[@]}" "${SLACK_ENV[@]}"
+  printf '%s\n' "$home"
+}
+
+# --- criterion 1: the channel is disabled ----------------------------------
+
+should_disable_telegram_when_its_token_is_removed() {
+  case_start "${FUNCNAME[0]}"
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home" "${TELEGRAM_ENV[@]}"
+  assert_equals "the first start configured it" "true" \
+    "$(config_get channels.telegram.enabled)"
+
+  run_entrypoint --home "$home"
+  assert_equals "the restart succeeded" "0" "$RUN_STATUS"
+  assert_equals "telegram is disabled" "false" "$(config_get channels.telegram.enabled)"
+  case_end
+}
+
+should_disable_slack_when_its_token_is_removed() {
+  case_start "${FUNCNAME[0]}"
+  # The same behaviour for the other channel. Both halves are asserted because
+  # the whole reason this is one spec rather than two is that fixing one channel
+  # would have left the other asymmetric.
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home" "${SLACK_ENV[@]}"
+  assert_equals "the first start configured it" "true" \
+    "$(config_get channels.slack.enabled)"
+
+  run_entrypoint --home "$home"
+  assert_equals "the restart succeeded" "0" "$RUN_STATUS"
+  assert_equals "slack is disabled" "false" "$(config_get channels.slack.enabled)"
+  case_end
+}
+
+# --- criterion 2: the token is gone from the file --------------------------
+
+should_remove_the_telegram_token_when_the_channel_is_torn_down() {
+  case_start "${FUNCNAME[0]}"
+  # Asserted against the whole file, not against the path it was written to.
+  # The criterion says the token is no longer present ANYWHERE in openclaw.json,
+  # and a path lookup would pass while a copy sat under some other key — which
+  # is the exact shape of the leftover this spec exists to remove.
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home" "${TELEGRAM_ENV[@]}"
+  assert_contains "the token was there to begin with" "$(config_text)" "$TELEGRAM_TOKEN"
+
+  run_entrypoint --home "$home"
+  assert_not_contains "the telegram token" "$(config_text)" "$TELEGRAM_TOKEN"
+  assert_equals "and the key itself is gone" "absent" \
+    "$(config_get channels.telegram.botToken)"
+  case_end
+}
+
+should_remove_both_slack_tokens_when_the_channel_is_torn_down() {
+  case_start "${FUNCNAME[0]}"
+  # Slack has TWO credentials, and this is the half of the criterion a
+  # Telegram-shaped fix would miss. A teardown that nulled only `botToken` would
+  # leave an app-level token with connections:write on the volume and pass every
+  # assertion written for the other channel.
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home" "${SLACK_ENV[@]}"
+  assert_contains "the bot token was there" "$(config_text)" "$SLACK_BOT"
+  assert_contains "the app token was there" "$(config_text)" "$SLACK_APP"
+
+  run_entrypoint --home "$home"
+  assert_not_contains "the slack bot token" "$(config_text)" "$SLACK_BOT"
+  assert_not_contains "the slack app token" "$(config_text)" "$SLACK_APP"
+  case_end
+}
+
+should_ask_for_the_token_to_be_deleted_rather_than_omitted() {
+  case_start "${FUNCNAME[0]}"
+  # The payload, not the file. Once the merge has run a key the teardown asked
+  # to DELETE and a key it simply never mentioned are indistinguishable, so a
+  # suite that only read the config could not tell a teardown from a container
+  # that never had the key. `null` is the deletion; `absent` is the silence.
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home" "${SLACK_ENV[@]}"
+  run_entrypoint --home "$home"
+  assert_equals "the teardown patch is the second one" "2" "$(patch_count)"
+  assert_equals "slack is disabled in the payload" "false" \
+    "$(patch_get channels.slack.enabled)"
+  assert_equals "botToken is deleted, not omitted" "null" \
+    "$(patch_get channels.slack.botToken)"
+  assert_equals "appToken is deleted, not omitted" "null" \
+    "$(patch_get channels.slack.appToken)"
+  case_end
+}
+
+should_leave_no_copy_of_the_token_on_the_volume_when_a_channel_is_torn_down() {
+  case_start "${FUNCNAME[0]}"
+  # Criterion 2 is written about openclaw.json; the user story behind it is
+  # about the volume — "a copy of the volume does not carry a credential I
+  # thought was gone".
+  #
+  # Those are different claims, and `openclaw config patch` is what makes them
+  # different: it copies the old configuration to openclaw.json.bak before
+  # writing the new one, and rotates five generations of it. So the setter that
+  # removes the token from the config writes it into a file beside the config in
+  # the same breath. This case is the volume-wide version of the criterion, and
+  # it is the one that would have caught it.
+  local home; home="$(configure_both)"
+  run_entrypoint --home "$home"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "nothing on the volume holds the telegram token" "" \
+    "$(home_files_holding "$TELEGRAM_TOKEN")"
+  assert_equals "nor the slack bot token" "" "$(home_files_holding "$SLACK_BOT")"
+  assert_equals "nor the slack app token" "" "$(home_files_holding "$SLACK_APP")"
+  case_end
+}
+
+should_leave_the_surviving_channel_token_on_the_volume_when_one_is_torn_down() {
+  case_start "${FUNCNAME[0]}"
+  # The sweep removes backups, not credentials in general. A channel that is
+  # still configured must still have its token in the live config afterwards —
+  # otherwise the teardown would have taken the working channel down with it.
+  local home; home="$(configure_both)"
+  run_entrypoint --home "$home" "${SLACK_ENV[@]}"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_contains "slack still has its token" "$(config_text)" "$SLACK_BOT"
+  assert_equals "and telegram's is gone from the volume" "" \
+    "$(home_files_holding "$TELEGRAM_TOKEN")"
+  case_end
+}
+
+# --- whose channel block is it anyway --------------------------------------
+
+should_leave_the_channel_alone_when_this_container_never_wrote_its_credential() {
+  case_start "${FUNCNAME[0]}"
+  # A channel block in this file is not necessarily this container's. An
+  # operator may configure Telegram themselves with `tokenFile` — a key this
+  # container never writes and never reads — and never set TELEGRAM_BOT_TOKEN at
+  # all.
+  #
+  # A guard that fired on "configured, and no environment variable" would
+  # disable their working channel and announce that it had removed a token it
+  # had not touched. The third clause asks whether the block still holds one of
+  # OUR credentials, which is what makes the teardown a teardown of this
+  # container's own configuration rather than of whatever it finds.
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home" "${SLACK_ENV[@]}"
+  seed_config "$home" '{ "channels": { "telegram": {
+    "enabled": true, "dmPolicy": "allowlist", "allowFrom": ["9"],
+    "tokenFile": "/run/secrets/telegram-token" } } }'
+
+  run_entrypoint --home "$home" "${SLACK_ENV[@]}"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "the operator's channel is still enabled" "true" \
+    "$(config_get channels.telegram.enabled)"
+  assert_equals "and still points at their token file" "/run/secrets/telegram-token" \
+    "$(config_get channels.telegram.tokenFile)"
+  assert_not_contains "and nothing was announced about it" "$RUN_ALL" \
+    "channels: telegram disabled"
+  case_end
+}
+
+should_leave_credentials_it_did_not_write_when_a_channel_is_torn_down() {
+  case_start "${FUNCNAME[0]}"
+  # The other half of the same rule. `userToken`, `signingSecret` and
+  # `tokenFile` are the operator's keys: this container never writes one, so
+  # deleting one is not teardown, it is deleting somebody else's configuration.
+  # The payload names exactly the keys this container puts there.
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home" "${SLACK_ENV[@]}"
+  seed_config "$home" '{ "channels": { "slack": {
+    "userToken": "xoxp-operator-user-token", "signingSecret": "operator-signing-secret"
+  } } }'
+
+  run_entrypoint --home "$home"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "slack was torn down" "false" "$(config_get channels.slack.enabled)"
+  assert_not_contains "our bot token went" "$(config_text)" "$SLACK_BOT"
+  assert_equals "the operator's user token stayed" "xoxp-operator-user-token" \
+    "$(config_get channels.slack.userToken)"
+  assert_equals "and their signing secret" "operator-signing-secret" \
+    "$(config_get channels.slack.signingSecret)"
+  case_end
+}
+
+# --- criterion 3: the other channel is untouched ---------------------------
+
+should_leave_slack_alone_when_only_telegram_loses_its_token() {
+  case_start "${FUNCNAME[0]}"
+  local home; home="$(configure_both)"
+  run_entrypoint --home "$home" "${SLACK_ENV[@]}"
+  assert_equals "the restart succeeded" "0" "$RUN_STATUS"
+  assert_equals "telegram went" "false" "$(config_get channels.telegram.enabled)"
+  assert_equals "slack stayed" "true" "$(config_get channels.slack.enabled)"
+  assert_equals "and kept its token" "$SLACK_BOT" "$(config_get channels.slack.botToken)"
+  assert_equals "and its app token" "$SLACK_APP" "$(config_get channels.slack.appToken)"
+  assert_equals "and its allowlist" '["U0STUBUSER1"]' "$(config_get channels.slack.allowFrom)"
+  case_end
+}
+
+should_leave_telegram_alone_when_only_slack_loses_its_token() {
+  case_start "${FUNCNAME[0]}"
+  # Run in both directions on purpose: a teardown that named the wrong channel,
+  # or that tore down every channel whenever any one of them lost its token,
+  # would pass one of these two cases and fail the other.
+  local home; home="$(configure_both)"
+  run_entrypoint --home "$home" "${TELEGRAM_ENV[@]}"
+  assert_equals "the restart succeeded" "0" "$RUN_STATUS"
+  assert_equals "slack went" "false" "$(config_get channels.slack.enabled)"
+  assert_equals "telegram stayed" "true" "$(config_get channels.telegram.enabled)"
+  assert_equals "and kept its token" "$TELEGRAM_TOKEN" \
+    "$(config_get channels.telegram.botToken)"
+  assert_equals "and its allowlist" '["100000001","100000002"]' \
+    "$(config_get channels.telegram.allowFrom)"
+  case_end
+}
+
+should_tear_both_down_when_both_tokens_are_removed() {
+  case_start "${FUNCNAME[0]}"
+  local home; home="$(configure_both)"
+  run_entrypoint --home "$home"
+  assert_equals "the restart succeeded" "0" "$RUN_STATUS"
+  assert_equals "telegram is disabled" "false" "$(config_get channels.telegram.enabled)"
+  assert_equals "slack is disabled" "false" "$(config_get channels.slack.enabled)"
+  assert_not_contains "no telegram token" "$(config_text)" "$TELEGRAM_TOKEN"
+  assert_not_contains "no slack bot token" "$(config_text)" "$SLACK_BOT"
+  assert_not_contains "no slack app token" "$(config_text)" "$SLACK_APP"
+  # One patch, not two. If both channels are going they should both go or
+  # neither should, and a rejected patch writes nothing — so a single write is
+  # also the whole of the rollback story.
+  assert_equals "one teardown patch for both" "2" "$(patch_count)"
+  case_end
+}
+
+# --- criterion 4: nothing is torn down while the token is set --------------
+
+should_tear_nothing_down_when_the_token_is_still_set() {
+  case_start "${FUNCNAME[0]}"
+  local home; home="$(configure_both)"
+  run_entrypoint --home "$home" "${TELEGRAM_ENV[@]}" "${SLACK_ENV[@]}"
+  assert_equals "the restart succeeded" "0" "$RUN_STATUS"
+  assert_equals "telegram is still enabled" "true" "$(config_get channels.telegram.enabled)"
+  assert_equals "slack is still enabled" "true" "$(config_get channels.slack.enabled)"
+  assert_equals "no teardown patch was sent" "1" "$(patch_count)"
+  case_end
+}
+
+should_say_nothing_when_nothing_is_torn_down() {
+  case_start "${FUNCNAME[0]}"
+  # A start that changes nothing should say nothing. The teardown line is how an
+  # operator learns a channel went away, so one printed on a start that took
+  # nothing away is worse than no line at all.
+  local home; home="$(configure_both)"
+  run_entrypoint --home "$home" "${TELEGRAM_ENV[@]}" "${SLACK_ENV[@]}"
+  assert_not_contains "no teardown was announced" "$RUN_ALL" "channels: "
+  case_end
+}
+
+# --- criterion 5: no empty block on a channel that was never configured ----
+
+should_write_no_telegram_block_when_telegram_was_never_configured() {
+  case_start "${FUNCNAME[0]}"
+  # The case the probe proved can fail silently. An unguarded teardown patch
+  # CREATES the block it meant to disable: against a container that never
+  # configured Telegram, { enabled: false, botToken: null } leaves
+  # {"telegram":{"enabled":false}} behind — and `openclaw config validate`
+  # accepts it, so nothing downstream would ever catch it.
+  run_entrypoint "${SLACK_ENV[@]}"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "no telegram block" "absent" "$(config_get channels.telegram)"
+  assert_equals "no teardown patch was sent" "1" "$(patch_count)"
+  case_end
+}
+
+should_write_no_slack_block_when_slack_was_never_configured() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint "${TELEGRAM_ENV[@]}"
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "no slack block" "absent" "$(config_get channels.slack)"
+  assert_equals "no teardown patch was sent" "1" "$(patch_count)"
+  case_end
+}
+
+should_write_no_channel_block_when_no_channel_was_ever_configured() {
+  case_start "${FUNCNAME[0]}"
+  # A container with no chat channel at all is a legitimate configuration —
+  # nothing in phase 1 demands one. It must come out the other side with the
+  # empty `channels` object onboarding left, and nothing added to it.
+  run_entrypoint
+  assert_equals "the run succeeded" "0" "$RUN_STATUS"
+  assert_equals "channels is still empty" "{}" "$(config_get channels)"
+  case_end
+}
+
+# --- criterion 6: the operator is told ------------------------------------
+
+should_say_which_channel_it_disabled_when_telegram_is_torn_down() {
+  case_start "${FUNCNAME[0]}"
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home" "${TELEGRAM_ENV[@]}"
+  run_entrypoint --home "$home"
+  assert_contains "it names the channel" "$RUN_ALL" "channels: telegram disabled"
+  assert_contains "and the variable that is no longer set" "$RUN_ALL" \
+    "TELEGRAM_BOT_TOKEN is not set"
+  case_end
+}
+
+should_say_which_channel_it_disabled_when_slack_is_torn_down() {
+  case_start "${FUNCNAME[0]}"
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home" "${SLACK_ENV[@]}"
+  run_entrypoint --home "$home"
+  assert_contains "it names the channel" "$RUN_ALL" "channels: slack disabled"
+  assert_contains "and the variable that is no longer set" "$RUN_ALL" \
+    "SLACK_BOT_TOKEN is not set"
+  case_end
+}
+
+should_name_only_the_torn_down_channel_when_one_of_two_goes() {
+  case_start "${FUNCNAME[0]}"
+  # The line is what an operator reads instead of diffing a config file, so it
+  # naming a channel that is still answering would be worse than saying nothing.
+  local home; home="$(configure_both)"
+  run_entrypoint --home "$home" "${SLACK_ENV[@]}"
+  assert_contains "telegram is named" "$RUN_ALL" "channels: telegram disabled"
+  assert_not_contains "slack is not" "$RUN_ALL" "channels: slack disabled"
+  case_end
+}
+
+should_not_log_the_token_when_a_channel_is_torn_down() {
+  case_start "${FUNCNAME[0]}"
+  # 002 established that a token never reaches the log, and a block whose whole
+  # subject is a token is the one most likely to break that rule. The line names
+  # the VARIABLE, never its value.
+  local home; home="$(configure_both)"
+  run_entrypoint --home "$home"
+  assert_not_contains "the telegram token" "$RUN_ALL" "$TELEGRAM_TOKEN"
+  assert_not_contains "the slack bot token" "$RUN_ALL" "$SLACK_BOT"
+  assert_not_contains "the slack app token" "$RUN_ALL" "$SLACK_APP"
+  case_end
+}
+
+# --- the teardown happens once, not on every start -------------------------
+
+should_tear_down_once_when_the_container_restarts_again() {
+  case_start "${FUNCNAME[0]}"
+  # Three starts: configured, torn down, and started again.
+  #
+  # `config patch` cannot make this a one-off. It counts the paths in the
+  # payload rather than the paths that changed, so re-applying a finished
+  # teardown answers `Applied 2 config update(s)` and exits zero, for ever. The
+  # guard in the entrypoint is the only thing that stops it — and the config
+  # cannot show you the difference, because a volume torn down last start looks
+  # exactly like one being torn down now. Counting the patches can.
+  local home; home="$(configure_both)"
+  run_entrypoint --home "$home"
+  assert_equals "the second start tore down" "2" "$(patch_count)"
+
+  run_entrypoint --home "$home"
+  assert_equals "the third start succeeded" "0" "$RUN_STATUS"
+  assert_equals "and tore nothing down" "1" "$(patch_count)"
+  assert_not_contains "and said nothing about it" "$RUN_ALL" "channels: "
+  case_end
+}
+
+should_strip_the_token_when_the_operator_disabled_the_channel_by_hand() {
+  case_start "${FUNCNAME[0]}"
+  # The guard asks "still enabled OR still holding a credential", not "enabled is
+  # not false". An operator who set enabled:false by hand and left the token in
+  # the file has done half a teardown; the half that matters is the other one.
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home" "${TELEGRAM_ENV[@]}"
+  seed_config "$home" '{ "channels": { "telegram": { "enabled": false } } }'
+  assert_contains "the token is still on the volume" "$(cat "${home}/.openclaw/openclaw.json")" \
+    "$TELEGRAM_TOKEN"
+
+  run_entrypoint --home "$home"
+  assert_equals "the restart succeeded" "0" "$RUN_STATUS"
+  assert_not_contains "the token is gone" "$(config_text)" "$TELEGRAM_TOKEN"
+  case_end
+}
+
+# --- what disabling buys that deleting would not ---------------------------
+
+should_keep_the_allowlist_when_a_channel_is_torn_down() {
+  case_start "${FUNCNAME[0]}"
+  # SPEC Open Question 1, answered as *disable*. Deleting the block would take
+  # the allowlist with it, so re-adding a token would also mean re-supplying
+  # TELEGRAM_ALLOW_FROM. Keeping it is what makes recovery from a `docker run`
+  # that forgot a `-e` just putting the `-e` back.
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home" "${TELEGRAM_ENV[@]}"
+  run_entrypoint --home "$home"
+  assert_equals "the allowlist survived" '["100000001","100000002"]' \
+    "$(config_get channels.telegram.allowFrom)"
+  assert_equals "and so did the dm policy" "allowlist" \
+    "$(config_get channels.telegram.dmPolicy)"
+  case_end
+}
+
+should_keep_the_slack_channel_allowlist_when_the_channel_is_torn_down() {
+  case_start "${FUNCNAME[0]}"
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home" "${SLACK_ENV[@]}"
+  run_entrypoint --home "$home"
+  assert_equals "the dm allowlist survived" '["U0STUBUSER1"]' \
+    "$(config_get channels.slack.allowFrom)"
+  assert_equals "the group policy survived" "allowlist" \
+    "$(config_get channels.slack.groupPolicy)"
+  assert_equals "and the channel allowlist" '{"enabled":true,"requireMention":true}' \
+    "$(config_get 'channels.slack.channels[C0STUBCHAN1]')"
+  case_end
+}
+
+should_configure_the_channel_again_when_the_token_comes_back() {
+  case_start "${FUNCNAME[0]}"
+  # The recovery path the answer to Open Question 1 is chosen for: put the `-e`
+  # back and the channel is exactly what it was, with no second variable to
+  # re-supply.
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home" "${TELEGRAM_ENV[@]}"
+  run_entrypoint --home "$home"
+  assert_equals "it went away" "false" "$(config_get channels.telegram.enabled)"
+
+  run_entrypoint --home "$home" "${TELEGRAM_ENV[@]}"
+  assert_equals "the restart succeeded" "0" "$RUN_STATUS"
+  assert_equals "it came back" "true" "$(config_get channels.telegram.enabled)"
+  assert_equals "with its token" "$TELEGRAM_TOKEN" "$(config_get channels.telegram.botToken)"
+  case_end
+}
+
+# --- the container still starts -------------------------------------------
+
+should_reach_the_gateway_when_a_channel_is_torn_down() {
+  case_start "${FUNCNAME[0]}"
+  # A teardown that left a config the validator refuses would be a worse bug
+  # than the one being fixed — the operator would have removed a token and got a
+  # container that will not start. The probe says a channel block is legal
+  # without its credential on openclaw@2026.9.2; this is the case that goes red
+  # if that ever stops being true.
+  local home; home="$(configure_both)"
+  run_entrypoint --home "$home"
+  assert_equals "the restart succeeded" "0" "$RUN_STATUS"
+  if ! gateway_started; then fail "a teardown stopped the gateway starting"; fi
+  if [ ! -f "${RUN_DIR}/config-validated" ]; then
+    fail "the phase 3 gate did not run over the torn-down config"
+  fi
+  case_end
+}
+
+# --- a rejected teardown fails closed --------------------------------------
+
+should_refuse_to_start_when_the_teardown_is_rejected() {
+  case_start "${FUNCNAME[0]}"
+  # The one place in this block where failing closed is unambiguous. A teardown
+  # that was refused means the channel is still enabled and the token is still
+  # on the volume: a container that started anyway would keep answering on a
+  # channel the operator believes they have revoked.
+  #
+  # The rejection is aimed at the teardown payload — matching on `"enabled"` and
+  # a null, which 008's configuration patch does not carry — so that the start
+  # actually reaches this block instead of dying in phase 2.
+  local home; home="$(configure_both)"
+  run_entrypoint --home "$home" \
+    OPENCLAW_STUB_PATCH_ERROR_MATCH='"botToken":null' \
+    OPENCLAW_STUB_PATCH_ERROR='Config validation failed: channels.telegram: Unrecognized key: "nope"'
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  if gateway_started; then fail "a container whose teardown failed still started"; fi
+  assert_contains "it says what was rejected" "$RUN_ERR" \
+    "a channel lost its token and the teardown was rejected"
+  assert_contains "and what that means" "$RUN_ERR" "still on the volume"
+  case_end
+}
+
+should_not_claim_a_teardown_when_the_patch_is_rejected() {
+  case_start "${FUNCNAME[0]}"
+  # The teardown line is printed AFTER the write, and this is the case that says
+  # why it has to be. Announced first, it survives a patch that was refused: the
+  # operator reads that a channel was disabled and its token removed, while both
+  # are still exactly as they were. That is worse than saying nothing, because it
+  # is the line they would have checked.
+  #
+  # 008 found the same shape in its own approvals block, where the exit code was
+  # reported instead of the outcome. This mutation was NOT caught by the first
+  # draft of this suite, which asserted the failure and forgot the silence.
+  local home; home="$(configure_both)"
+  run_entrypoint --home "$home" \
+    OPENCLAW_STUB_PATCH_ERROR_MATCH='"botToken":null' \
+    OPENCLAW_STUB_PATCH_ERROR='Config validation failed: channels.telegram: Unrecognized key: "nope"'
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_not_contains "it does not claim telegram went" "$RUN_ALL" \
+    "channels: telegram disabled"
+  assert_not_contains "nor slack" "$RUN_ALL" "channels: slack disabled"
+  # And the config says the same thing: nothing was written, so the channel is
+  # still enabled and still holding the token the line would have claimed was
+  # gone.
+  assert_equals "telegram is still enabled" "true" "$(config_get channels.telegram.enabled)"
+  assert_contains "and still holds its token" "$(config_text)" "$TELEGRAM_TOKEN"
+  case_end
+}
+
+should_not_log_a_credential_when_the_teardown_is_rejected() {
+  case_start "${FUNCNAME[0]}"
+  # The rejection quotes the payload back, and the payload is passed through the
+  # same filter as every other command in phase 2. The token being REMOVED is
+  # the one credential that filter cannot mask — it matches on the environment,
+  # and the premise of a teardown is that the variable is gone — which is
+  # exactly why the payload carries no credential at all. The channel that still
+  # has its tokens is the one this case can prove.
+  local home; home="$(configure_both)"
+  run_entrypoint --home "$home" "${SLACK_ENV[@]}" \
+    OPENCLAW_STUB_PATCH_ERROR_MATCH='"botToken":null' \
+    OPENCLAW_STUB_PATCH_ERROR="Config validation failed near ${SLACK_BOT} and ${SLACK_APP}"
+  assert_equals "exit status" "1" "$RUN_STATUS"
+  assert_not_contains "the slack bot token" "$RUN_ALL" "$SLACK_BOT"
+  assert_not_contains "the slack app token" "$RUN_ALL" "$SLACK_APP"
+  assert_contains "and the redaction is visible" "$RUN_ALL" "[redacted]"
+  case_end
+}
+
+should_send_no_credential_in_the_teardown_payload() {
+  case_start "${FUNCNAME[0]}"
+  # The mitigation the case above depends on, asserted directly rather than
+  # inferred: the document handed to the setter is `false` and `null` and
+  # nothing else, so there is no credential in it for a rejection to quote.
+  local home; home="$(configure_both)"
+  run_entrypoint --home "$home"
+  assert_not_contains "no telegram token in the payload" "$RUN_PATCH_STDIN" "$TELEGRAM_TOKEN"
+  assert_not_contains "no slack bot token in the payload" "$RUN_PATCH_STDIN" "$SLACK_BOT"
+  assert_not_contains "no slack app token in the payload" "$RUN_PATCH_STDIN" "$SLACK_APP"
+  case_end
+}
+
+# --- the teardown goes through the setter ----------------------------------
+
+should_tear_down_through_the_setter_when_a_channel_goes() {
+  case_start "${FUNCNAME[0]}"
+  # The same claim 008 makes about its own block, for the same reason: a
+  # `node -e` that opened openclaw.json and edited it would satisfy every value
+  # assertion above while writing an unvalidated key straight past the schema.
+  # This is the case that would notice.
+  local home; home="$(configure_both)"
+  run_entrypoint --home "$home"
+  assert_equals "the setter was used twice" "2" "$(patch_count)"
+  assert_equals "and on stdin" "yes" "$(argv_has_arg config --stdin)"
+  case_end
+}
+
+should_disable_telegram_when_its_token_is_removed
+should_disable_slack_when_its_token_is_removed
+should_remove_the_telegram_token_when_the_channel_is_torn_down
+should_remove_both_slack_tokens_when_the_channel_is_torn_down
+should_ask_for_the_token_to_be_deleted_rather_than_omitted
+should_leave_no_copy_of_the_token_on_the_volume_when_a_channel_is_torn_down
+should_leave_the_surviving_channel_token_on_the_volume_when_one_is_torn_down
+should_leave_the_channel_alone_when_this_container_never_wrote_its_credential
+should_leave_credentials_it_did_not_write_when_a_channel_is_torn_down
+should_leave_slack_alone_when_only_telegram_loses_its_token
+should_leave_telegram_alone_when_only_slack_loses_its_token
+should_tear_both_down_when_both_tokens_are_removed
+should_tear_nothing_down_when_the_token_is_still_set
+should_say_nothing_when_nothing_is_torn_down
+should_write_no_telegram_block_when_telegram_was_never_configured
+should_write_no_slack_block_when_slack_was_never_configured
+should_write_no_channel_block_when_no_channel_was_ever_configured
+should_say_which_channel_it_disabled_when_telegram_is_torn_down
+should_say_which_channel_it_disabled_when_slack_is_torn_down
+should_name_only_the_torn_down_channel_when_one_of_two_goes
+should_not_log_the_token_when_a_channel_is_torn_down
+should_tear_down_once_when_the_container_restarts_again
+should_strip_the_token_when_the_operator_disabled_the_channel_by_hand
+should_keep_the_allowlist_when_a_channel_is_torn_down
+should_keep_the_slack_channel_allowlist_when_the_channel_is_torn_down
+should_configure_the_channel_again_when_the_token_comes_back
+should_reach_the_gateway_when_a_channel_is_torn_down
+should_refuse_to_start_when_the_teardown_is_rejected
+should_not_claim_a_teardown_when_the_patch_is_rejected
+should_not_log_a_credential_when_the_teardown_is_rejected
+should_send_no_credential_in_the_teardown_payload
+should_tear_down_through_the_setter_when_a_channel_goes
+
+report_totals "teardown-test"

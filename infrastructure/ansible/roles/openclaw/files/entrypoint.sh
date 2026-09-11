@@ -974,6 +974,244 @@ if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Channel teardown. Removing a token removes the channel.
+#
+# Configuring a channel was additive and removing one was not. The two blocks
+# above write `channels.telegram` when TELEGRAM_BOT_TOKEN is set and
+# `channels.slack` when SLACK_BOT_TOKEN is set, and did nothing at all when they
+# were absent. The config is persisted, so an operator who took a token out of
+# their `docker run` got a container that still had the channel enabled, still
+# holding the token, and still answering.
+#
+# The token is the part that mattered. It stayed in openclaw.json on the volume
+# after the operator believed they had removed it, so revoking access to the
+# assistant meant knowing to edit a file the container claims to own.
+#
+# One block covers both channels on purpose. Fixing Slack alone would have left
+# Telegram asymmetric, which is why neither 002 nor 004 fixed half of it.
+#
+# Disabled rather than deleted, and the acceptance criteria say which: the
+# channel is *disabled*, the *token* is gone, and the log line names the channel
+# that was *disabled*. Deleting the block would satisfy the middle one by
+# accident and take the allowlist with it, so re-adding a token would mean
+# re-supplying TELEGRAM_ALLOW_FROM or SLACK_ALLOW_FROM as well. Disabling keeps
+# the allowlist, so recovering from a `docker run` that forgot a `-e` is putting
+# the `-e` back.
+#
+# Placed here, between the channel blocks and 007's gateway block, because both
+# ends are load-bearing. The blocks above write the file directly, so a teardown
+# that read the config before them would be judging a stale one; and the
+# permissions sweep below has to be downstream of every write, including this
+# one.
+#
+# There is no opt-out variable. This image's model is that the config is a
+# function of the environment -- 007 rewrites gateway.bind on every start for
+# exactly the same reason -- and an opt-out would have to default to on to mean
+# anything, so it would protect nobody the first time somebody was surprised by
+# this. What removes the surprise is the line at the bottom of this block.
+# ---------------------------------------------------------------------------
+
+# Which configured channels this start has lost the token for.
+#
+# Reads the *authored* openclaw.json rather than asking `openclaw config get`,
+# and that is a correctness point rather than a preference: `config get` returns
+# the config with runtime defaults merged in -- it answers `groupPolicy` for a
+# Telegram block that never authored one -- so a guard built on it would see
+# defaults where it needs to see what is actually persisted. What the criteria
+# are about is the file on the volume, which is also what a copy of the volume
+# carries.
+#
+# It writes nothing and decides nothing else. Its whole output is zero, one or
+# two channel names.
+channel_teardown_plan() {
+  node -e "
+    const fs = require('fs');
+
+    let config;
+    try {
+      config = JSON.parse(
+        fs.readFileSync(process.env.HOME + '/.openclaw/openclaw.json', 'utf8')
+      );
+    } catch {
+      // No config yet, or one nothing can parse. Either way there is no
+      // configured channel to take away, which is correct on a first-ever start
+      // and safe everywhere else -- phase 3's gate is what judges a file that
+      // will not parse, and it is downstream of here.
+      process.exit(0);
+    }
+
+    const channels =
+      config !== null && typeof config === 'object' &&
+      config.channels !== null && typeof config.channels === 'object'
+        ? config.channels
+        : {};
+
+    // The credential keys THIS container writes, per channel. Slack has two,
+    // and that is the half of 'the token is no longer present' a
+    // Telegram-shaped fix would miss.
+    //
+    // An operator's own userToken, signingSecret or tokenFile is deliberately
+    // not on this list. This container never wrote one, and deleting a key it
+    // does not own is not teardown.
+    const written = {
+      telegram: { variable: 'TELEGRAM_BOT_TOKEN', credentials: ['botToken'] },
+      slack: { variable: 'SLACK_BOT_TOKEN', credentials: ['botToken', 'appToken'] }
+    };
+
+    for (const [name, channel] of Object.entries(written)) {
+      // 1. The token is gone from this start's environment. With it still set,
+      //    the block above wrote the channel a moment ago and there is nothing
+      //    to undo.
+      if (process.env[channel.variable]) continue;
+
+      // 2. The channel is actually in the persisted config, and is an object.
+      //
+      //    This is the criterion-5 clause, and it earns its place twice. An
+      //    absent channel is the common case -- most containers configure one
+      //    of these two and not the other -- and an unguarded teardown does not
+      //    skip it, it CREATES it: a payload of { enabled: false, botToken:
+      //    null } against a container that never configured Telegram leaves
+      //    {\"telegram\":{\"enabled\":false}} behind, and \`openclaw config
+      //    validate\` accepts that, so nothing downstream would ever catch it.
+      //
+      //    It is also what keeps clause 3 from throwing. \`hasOwnProperty.call\`
+      //    raises a TypeError on undefined and on null, so reaching it with an
+      //    absent channel would abort the planner and refuse the start -- the
+      //    right direction to fail in, but a terrible reason to fail.
+      const block = channels[name];
+      if (block === null || typeof block !== 'object' || Array.isArray(block)) continue;
+
+      // 3. The block still holds one of OUR credentials. This is the
+      //    idempotence guard and the ownership guard in one clause, and it is
+      //    both of those on purpose.
+      //
+      //    Idempotence, because \`config patch\` cannot provide it: it counts
+      //    the paths in the payload rather than the paths that changed, so
+      //    re-applying a finished teardown answers 'Applied 2 config update(s)'
+      //    and exits zero, for ever. Once the credential is gone there is
+      //    nothing left to take away, and every later start leaves the block
+      //    exactly as it found it.
+      //
+      //    Ownership, because a channel block in this file is not necessarily
+      //    this container's. An operator may configure Telegram themselves with
+      //    \`tokenFile\`, a key this container never writes and never reads. A
+      //    guard that fired on 'configured, and no environment variable' would
+      //    disable their working channel and announce that it had removed a
+      //    token it had not touched -- which is a teardown of something nobody
+      //    asked to tear down, reported as a fact that is not true.
+      //
+      //    \`enabled\` is deliberately not consulted. A block an operator
+      //    disabled by hand while leaving the token in it has had half a
+      //    teardown, and the half that matters is the other one.
+      const holdsCredential = channel.credentials.some((key) =>
+        Object.prototype.hasOwnProperty.call(block, key));
+      if (!holdsCredential) continue;
+
+      process.stdout.write(name + '\n');
+    }
+  "
+}
+
+# A planner that cannot answer is not a planner that found nothing. Failing
+# closed here rather than starting a container that may still be holding a
+# revoked credential.
+if ! channel_teardown_names="$(channel_teardown_plan)"; then
+  printf '%s\n' \
+    'Error: could not read the persisted configuration to check for removed channel tokens.' \
+    '  Refusing to start: a channel whose token was removed may still be enabled,' \
+    '  and its token may still be on the volume.' >&2
+  exit 1
+fi
+
+channel_teardown=()
+while IFS= read -r channel_teardown_name; do
+  [ -n "$channel_teardown_name" ] || continue
+  channel_teardown+=("$channel_teardown_name")
+done <<< "$channel_teardown_names"
+
+if [ ${#channel_teardown[@]} -gt 0 ]; then
+  # One patch for both channels rather than one each. If both are being torn
+  # down they should both go or neither should, and a rejected patch writes
+  # nothing -- so a single write is also the whole of the rollback story.
+  #
+  # The fragments are fixed strings chosen by name, never built from anything
+  # the environment supplied, so there is no quoting hazard in assembling them.
+  channel_teardown_fragments=()
+  for channel_teardown_name in "${channel_teardown[@]}"; do
+    case "$channel_teardown_name" in
+      telegram)
+        channel_teardown_fragments+=('"telegram":{"enabled":false,"botToken":null}')
+        ;;
+      slack)
+        channel_teardown_fragments+=('"slack":{"enabled":false,"botToken":null,"appToken":null}')
+        ;;
+    esac
+  done
+
+  printf -v channel_teardown_payload '%s,' "${channel_teardown_fragments[@]}"
+  channel_teardown_payload="{\"channels\":{${channel_teardown_payload%,}}}"
+
+  # Redacted like everything else in phase 2, with one honest caveat: the filter
+  # matches on the environment, and the whole premise of a teardown is that the
+  # variable is no longer set -- so the token being removed is the one token
+  # redact_secrets cannot mask. What makes that safe is that this payload holds
+  # no credential at all, only `false` and `null`, and a rejection quotes the
+  # payload. The other channel's tokens, if it still has any, are in the
+  # environment and are filtered normally.
+  if ! channel_teardown_output="$(
+    printf '%s' "$channel_teardown_payload" | openclaw config patch --stdin 2>&1
+  )"; then
+    {
+      echo 'Error: a channel lost its token and the teardown was rejected.'
+      echo '  openclaw config patch said:'
+      redact_secrets "$channel_teardown_output" | sed 's/^/    /'
+      echo
+      echo '  Nothing was written, so the channel is still enabled and its token is'
+      echo '  still on the volume. Refusing to start rather than keep answering on a'
+      echo '  channel you have revoked.'
+    } >&2
+    exit 1
+  fi
+
+  # The setter keeps backups, and the backups keep the token.
+  #
+  # `openclaw config patch` copies the old configuration to
+  # ~/.openclaw/openclaw.json.bak before it writes the new one, and rotates five
+  # generations of it -- .bak through .bak.4. For every other write in this file
+  # that costs nothing: the backup holds the same credentials the live config
+  # holds, so there is no copy of anything that is not already there.
+  #
+  # This write is the exception, and it is the exception in the direction that
+  # matters. The whole point of it is that a credential the operator revoked
+  # stops being stored -- and the setter has just written that credential into a
+  # file beside the one it removed it from. Without this sweep, SPEC's second
+  # user story is unmet by the very command that meets the first: `openclaw.json`
+  # is clean and a copy of the volume still carries the token.
+  #
+  # Probed against the pinned CLI: all five generations carried it, and removing
+  # them leaves `config validate` and the next `config patch` working normally.
+  # Deleted rather than rewritten, because there is no rollback point here that
+  # does not reintroduce a revoked credential -- a backup you cannot safely
+  # restore is not a backup, it is just the credential.
+  #
+  # The glob is broad on purpose: anything named after this config with a .bak
+  # suffix is a copy of this config, whatever generation scheme upstream uses
+  # next.
+  rm -f "$HOME"/.openclaw/openclaw.json.bak*
+
+  # After the write, never before. A teardown line printed ahead of the patch is
+  # a line that can be a lie -- which is the mistake 008 found in its own
+  # approvals block, where the exit code was reported instead of the outcome.
+  #
+  # The variable name, never the token: the token is the whole secret, and 002
+  # established that it never reaches the log.
+  for channel_teardown_name in "${channel_teardown[@]}"; do
+    printf 'channels: %s disabled and its token removed (%s_BOT_TOKEN is not set).\n' \
+      "$channel_teardown_name" "${channel_teardown_name^^}"
+  done
+fi
+
+# ---------------------------------------------------------------------------
 # The bind interface, and the credential that guards it.
 #
 # `--gateway-bind` on the onboarding call above only ever reaches a container

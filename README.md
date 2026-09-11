@@ -341,6 +341,34 @@ unconditionally, so an absent allowlist would be an allowlist admitting nobody.
 | `channels.telegram.allowFrom` | the trimmed, comma-separated contents of `TELEGRAM_ALLOW_FROM` |
 | `channels.telegram.groups` | `{"*": {"requireMention": true}}` — any group, mention-gated |
 
+Removing `TELEGRAM_BOT_TOKEN` from your `docker run` removes the channel. On the next start
+the container sets `channels.telegram.enabled` to `false`, deletes `botToken` from
+`openclaw.json`, and says so in one line:
+
+```
+channels: telegram disabled and its token removed (TELEGRAM_BOT_TOKEN is not set).
+```
+
+The rest of the block — `allowFrom`, `dmPolicy`, `groups` — is left alone. That is why the
+channel is *disabled* rather than deleted: a disabled block is still a description of who was
+allowed, which a deleted one is not.
+
+It does **not** mean the token alone brings the channel back. `TELEGRAM_ALLOW_FROM` is required
+whenever `TELEGRAM_BOT_TOKEN` is set, as above, and that rule is about the *environment*, not
+about what survived in the config — so restoring the token by itself makes the container refuse
+to start with `TELEGRAM_ALLOW_FROM` in its list of missing variables. Put both back. The
+container rewrites the whole channel block from the environment on every start, so whatever you
+supply is what the channel becomes.
+
+`openclaw config patch` keeps rotating backups of the config next to it — `openclaw.json.bak`
+through `openclaw.json.bak.4` — and those would otherwise hold the token you just revoked. A
+teardown deletes them, so the credential is gone from the volume and not merely from the live
+file. Nothing else in this image removes them, and no other write needs to: their contents
+match the config it wrote.
+
+Until this existed, a removed token stayed in `openclaw.json` on the volume and the channel
+kept answering, so revoking access meant knowing to edit a file the container claims to own.
+
 To find your Telegram user ID, message a bot such as [@userinfobot](https://t.me/userinfobot),
 which replies with your numeric ID. Earlier versions of this document said to message *your* bot
 with `TELEGRAM_ALLOW_FROM` unset and read the ID off a pairing prompt. That never worked: this
@@ -387,6 +415,26 @@ Google Workspace credential.
 | `channels.slack.allowFrom` | the trimmed, comma-separated contents of `SLACK_ALLOW_FROM` |
 | `channels.slack.groupPolicy` | `disabled`, or `allowlist` when `SLACK_ALLOW_CHANNELS` is set |
 | `channels.slack.channels` | each listed ID mapped to `{enabled: true, requireMention: true}` |
+
+Removing `SLACK_BOT_TOKEN` from your `docker run` removes the channel. On the next start the
+container sets `channels.slack.enabled` to `false`, deletes **both** `botToken` and `appToken`
+from `openclaw.json`, and says so in one line:
+
+```
+channels: slack disabled and its token removed (SLACK_BOT_TOKEN is not set).
+```
+
+Both credentials go because Slack has two: an `appToken` left behind carries
+`connections:write` on its own. The rotating `openclaw.json.bak*` backups `openclaw config
+patch` keeps are deleted along with them, so the tokens are gone from the volume rather than
+just from the live file.
+
+The rest of the block — `allowFrom`, `dmPolicy`, `groupPolicy`, the `channels` map — is left as
+it was, which is what *disabled* buys over *deleted*. It is not a promise about restoring the
+channel: `SLACK_APP_TOKEN` and `SLACK_ALLOW_FROM` are required whenever `SLACK_BOT_TOKEN` is
+set, and the container rewrites the whole Slack block from the environment on every start — so
+a restart that supplies the tokens but omits `SLACK_ALLOW_CHANNELS` comes back with an empty
+`channels` map and `groupPolicy: disabled`. Supply the same variables you supplied before.
 
 Slack's shape is not Telegram's. DMs gate the same way, but group access gates on
 `groupPolicy` and a `channels` map keyed by channel ID; there is no wildcard, and `groups` is
