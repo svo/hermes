@@ -218,7 +218,7 @@ run_entrypoint() {
 wait_for_registrar() {
   local run_dir="$1" waited=0 limit="${HARNESS_REGISTRAR_TIMEOUT:-400}"
   while [ "$waited" -lt "$limit" ]; do
-    if grep -Eq '^cron: (registered |updated |.* unchanged |declared |.* already registered |giving up )' \
+    if grep -Eq '^cron: (registered |updated |.* unchanged |declared |giving up )' \
       "${run_dir}/stdout" "${run_dir}/stderr" 2>/dev/null; then
       return 0
     fi

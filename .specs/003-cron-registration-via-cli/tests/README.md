@@ -17,7 +17,9 @@ automation store that stub keeps.
 | `mutation-check` | Sensitivity check. Not part of `run`; see below. |
 | `stub-openclaw` | Fake `openclaw`: `onboard`, `gateway`, `gateway health`, `automations list`, `automations create`, `automations remove`. |
 
-Forty-two cases: 23 in `registration-test`, 19 in `failure-test`.
+Forty-one cases: 22 in `registration-test`, 19 in `failure-test`. 011 changed nine of them,
+and folded two into one, when the registrar began declaring the briefing — see [011's PLAN](../../011-briefing-converges/PLAN.md)
+§ Testing Strategy, "003's cases that invert".
 
 ## Why not a container
 
@@ -46,14 +48,17 @@ for the registrar to finish:
 | Line | Path |
 |---|---|
 | `cron: registered morning-briefing <id>` | created |
-| `cron: morning-briefing already registered (<id>)` | already there |
-| `cron: giving up after <n> attempts; briefing not scheduled (<why>)` | gave up |
+| `cron: updated morning-briefing <id>` | converged onto a changed environment |
+| `cron: morning-briefing unchanged (<id>)` | already matched; nothing written |
+| `cron: declared morning-briefing <id>; outcome unavailable` | landed, but `create`'s output did not parse |
+| `cron: giving up after <n> attempts; briefing not scheduled (<why>)` | gave up, with no briefing listed and nothing declared |
+| `cron: giving up after <n> attempts; briefing left as it was (<why>)` | gave up, with a briefing listed, keyed or not |
+| `cron: giving up after <n> attempts; briefing declared but not confirmed (<why>)` | gave up after create said yes and no listing showed the key |
 
 `cron: registration attempt <n>/<max> failed: <error>` is not terminal — it is the per-attempt
-line, and more follow.
-
-The harness's pattern also matches `updated`, `unchanged` and `declared`, the terminal lines
-011's registrar adds. That way the stubs could land before the registrar did.
+line, and more follow. Nor are 011's adoption lines, `cron: replaced unkeyed …` and
+`cron: could not remove unkeyed …`. `cron: morning-briefing already registered (<id>)` was 003's
+and is retired: it described presence, which is no longer the question.
 
 A run that exits non-zero never reached the fork, so the harness does not wait for it.
 
@@ -91,14 +96,9 @@ against the pinned version ([011 PLAN](../../011-briefing-converges/PLAN.md) § 
 - `writes` in the store directory gets one line per real write, so "nothing was written" can
   be counted.
 
-The current registrar never sends a key, so its cases are unaffected. They still pass, with
-two exceptions kept deliberately until 011 replaces the behaviour they pin:
-
-- `OPENCLAW_STUB_CREATE_FAILS` still fails on plain stderr, not in the refusal shape the
-  pinned version uses. The registrar merges create's streams into its failure reason, and
-  `should_keep_a_multi_line_error_on_one_log_line` pins that reason's text.
-- `OPENCLAW_STUB_LIST_SHAPE=wrapped` stays, for the two cases that drive it. It now differs
-  from the default envelope only by an extra key.
+A refused create prints the `--agent` warning and then the refusal on stderr, and the refusal
+again as JSON on stdout. The registrar takes its failure reason from the JSON, which is why
+`should_keep_a_multi_line_error_on_one_log_line` still reads exactly the stub's message.
 
 ### Two shapes worth knowing about
 
@@ -114,28 +114,30 @@ AC2 inverted. It now creates at most once per start and retries only the lookup:
 `should_retry_the_create_when_the_create_itself_failed` pins the case where retrying *is*
 right, because a create that failed wrote nothing.
 
-**A listing whose key names are not the ones guessed at.** The lookup reads `id`/`jobId`/
-`job_id` and `name`/`jobName`/`title` because none of them is documented. The first version
+**A listing whose key names are not the ones guessed at.** 003's lookup read `id`/`jobId`/
+`job_id` and `name`/`jobName`/`title`, because none of them was documented. Its first version
 let a parsed-but-unmatched envelope stand as a definite absence, so a deployment using any
-other key name would register a duplicate on every start forever — while the plain listing,
-which prints the name, sat unread. The plain listing is now a second opinion on that verdict
-rather than a fallback only for when `--json` fails:
-`should_not_duplicate_the_briefing_when_the_listing_key_is_unrecognised` pins it.
+other key name would register a duplicate on every start forever. The fix then was to consult
+the plain listing as a second opinion. 011 replaced both with a strict read of the envelope its
+probe pinned: a listing or row of any other shape permits no write.
+`should_not_duplicate_the_briefing_when_the_listing_key_is_unrecognised` still pins the
+outcome that matters, which is no second briefing.
 
 ### What the stub cannot tell you
 
 The stub answers *given this CLI contract, does the entrypoint do the right thing*. It cannot
 answer whether the contract is right. When 003 shipped, two parts of it were not doc-verified
 upstream: `automations list --json`'s envelope, and whether a CLI call inside the container
-holds `operator.admin`. The registrar is written to survive being wrong about the first — hence
-`should_register_the_briefing_when_the_listing_is_object_wrapped` and
-`..._when_list_json_is_unavailable`, which drive the tolerant paths — and to fail loudly on
-the second. 011's probe has since pinned the envelope against the binary, and the stub's
-default now prints it.
+holds `operator.admin`. The registrar was written to survive being wrong about the first —
+hence `should_register_the_briefing_when_the_listing_is_object_wrapped` and
+`..._when_list_json_is_unavailable`, which drove the tolerant paths — and to fail loudly on
+the second. 011's probe has since pinned the envelope against the binary. The stub's default
+now prints it, and the tolerant paths are gone: the cases that drove them now assert that a
+listing the registrar cannot read leads to no write.
 
 ## Sensitivity
 
-Against the pre-change `entrypoint.sh`, all 42 cases fail:
+When 003 landed, all 42 of its cases failed against the entrypoint before it:
 
 ```bash
 ENTRYPOINT=/path/to/old/entrypoint.sh HARNESS_REGISTRAR_TIMEOUT=4 \
@@ -172,9 +174,12 @@ name, and the timeout is now reported rather than swallowed.
 HARNESS_REGISTRAR_TIMEOUT=200 .specs/003-cron-registration-via-cli/tests/mutation-check
 ```
 
-Twenty-one mutations, one behaviour each, applied to a copy of `entrypoint.sh`. Every one must be
-caught by at least one case; a mutation nothing catches is a hole in the suite. It is not part
-of `run` because it re-runs the suites twenty-one times — `registration-test` first, and
+Eighteen mutations, one behaviour each, applied to a copy of `entrypoint.sh`. Every one must be
+caught by at least one case; a mutation nothing catches is a hole in the suite. 003 shipped
+twenty-one. 011 retired the three whose code it deleted, and re-anchored five on the code that
+replaced theirs. Its own mutations, for the declaration and adoption, are in 011's
+`mutation-check`. This one is not part of `run` because it re-runs the suites once per
+mutation — `registration-test` first, and
 `failure-test` only when nothing has caught the mutation yet, since that is much the slower of
 the two.
 

@@ -1,0 +1,694 @@
+#!/usr/bin/env bash
+#
+# Fake `openclaw`, standing in for the subcommands the entrypoint and these
+# cases use. No network, no credentials, no image.
+#
+# This is 003's stub, copied rather than shared: a change to 003's copy must
+# not silently change what these cases mean. It already models the declared
+# CLI, because 011 taught 003's copy that before the registrar changed. Two
+# changes since: OPENCLAW_STUB_HANG reaches `list`, `create` and `remove`, so
+# a case can time each of them out, and OPENCLAW_STUB_LIST_SHAPE=partial
+# prints one page of several.
+#
+#   onboard             writes the minimal config real onboarding leaves behind
+#   gateway             records that it was reached, then exits 0 instead of serving
+#   gateway health      the readiness probe the registrar polls
+#   config validate     the startup gate 004 added; accepts, and records the call
+#   automations list    reads the stub's automation store
+#   automations create  appends to it, or with --declaration-key upserts by
+#                       key, rejecting flags it does not know
+#   automations remove  deletes one job by id
+#
+# The store is a JSON array in $OPENCLAW_STUB_STORE/jobs.json, so a case can
+# point several runs at the same store and ask what five restarts left behind.
+# Beside it, `writes` gets one line per real write — `create`, `update`,
+# `settle` or `remove`, then the id — so "no start wrote to it" is a line
+# count, not an inference from the store looking the same.
+#
+# `create` rejecting an unknown flag is deliberate. The upstream docs do not
+# publish a complete flag list for it, so the registrar must not invent one —
+# a speculative --json or --deliver has to fail here the way it would fail
+# against the real binary, rather than being quietly accepted.
+#
+# The declared CLI is modelled as 011's probe recorded it against the pinned
+# openclaw 2026.9.2 (.specs/011-briefing-converges/PLAN.md § The probe):
+#
+#   - `list --json` prints the `{ "jobs": [ … ] }` envelope, and a row carries
+#     `declarationKey` only when it has one (B5).
+#   - A keyed create converges schedule, timezone, stagger, prompt and
+#     delivery onto the one job carrying that key, and changes `enabled` only
+#     for an explicit --disabled (B3, B4). It refuses a reserved key (B7) and
+#     a key two jobs carry (R8).
+#   - A job stored with no stagger reports `updated: true`, and writes, on its
+#     first unchanged declaration in every gateway lifetime (B2). Each run of
+#     the entrypoint is one lifetime here, and `--exact` is what stores a
+#     stagger. A registrar that dropped it would write on every start.
+#   - Every create warns on stderr that no --agent was given, and keeps
+#     stdout pure JSON (B8).
+#   - A refused create or remove prints `{"ok":false,"error":…}` on stdout and
+#     the reason again on stderr, and exits 1 (B7, B9).
+#
+# Behaviour switches, all defaulting to the happy path:
+#
+#   OPENCLAW_STUB_GATEWAY_READY  no    -> `gateway health` never succeeds
+#   OPENCLAW_STUB_CREATE_FAILS   yes   -> `automations create` exits 1
+#   OPENCLAW_STUB_CREATE_ERROR   text  -> what it says when it does
+#   OPENCLAW_STUB_CREATE_SILENT  yes   -> create exits 0 but stores nothing
+#   OPENCLAW_STUB_CREATE_OUTPUT  garbage -> create succeeds, but its stdout is
+#                                         not JSON
+#   OPENCLAW_STUB_LIST_JSON      no    -> `list --json` is rejected as unknown
+#   OPENCLAW_STUB_LIST_SHAPE     bare|garbage|renamed|partial -> not the
+#                                         envelope; see `list` below
+#   OPENCLAW_STUB_LIST_FAILS     yes   -> `list` exits 1 whatever the flags
+#   OPENCLAW_STUB_REMOVE_FAILS   yes   -> `automations remove` is refused
+#   OPENCLAW_STUB_HANG           health|list|create|remove -> that call blocks
+#                                         instead of answering. A hung create
+#                                         has already printed the --agent
+#                                         warning, as the real one does before
+#                                         it calls the gateway.
+#
+# Every `automations` call is also appended, verb then argv, to `call-order`
+# in the markers directory, so a case can assert "declare before remove" on
+# the sequence rather than infer it.
+
+set -uo pipefail
+
+config="${HOME}/.openclaw/openclaw.json"
+store="${OPENCLAW_STUB_STORE:-}"
+markers="${OPENCLAW_STUB_MARKERS:-}"
+
+usage() {
+  printf 'stub-openclaw: unsupported invocation: %s\n' "$*" >&2
+  exit 64
+}
+
+# argv as a JSON array, so an argument holding newlines still records as one
+# line and one element.
+argv_json() {
+  printf '%s\0' "$@" | node -e "
+    let raw = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => { raw += chunk; });
+    process.stdin.on('end', () => {
+      const parts = raw.split('\0');
+      parts.pop();
+      process.stdout.write(JSON.stringify(parts));
+    });
+  "
+}
+
+record() {
+  # record <verb> <json-argv>
+  [ -n "$markers" ] || return 0
+  printf '%s\n' "$2" >> "${markers}/calls-$1"
+  printf '%s %s\n' "$1" "$2" >> "${markers}/call-order"
+}
+
+# A refused call, in the shape the pinned version gives one: the error as JSON
+# on stdout, the reason again on stderr, exit 1. Both streams carry it, so the
+# exit status is the only reliable verdict — stdout is JSON either way.
+refuse() {
+  STUB_REASON="$1" node -e "
+    const reason = process.env.STUB_REASON;
+    console.log(JSON.stringify({ ok: false, error: { type: 'cli_error', message: reason } }, null, 2));
+  "
+  printf '%s\n' \
+    '[openclaw] Could not start the CLI.' \
+    "[openclaw] Reason: $1" \
+    '[openclaw] Debug: set OPENCLAW_DEBUG=1 to include the stack trace.' \
+    '[openclaw] Try: openclaw doctor' \
+    '[openclaw] Help: openclaw --help' >&2
+  exit 1
+}
+
+agent_warning='No --agent specified; the job will run with the configured default agent. Specify --agent to choose a specific agent, or set agents.defaults.systemAgent.agentId.'
+
+case "${1:-}" in
+  onboard)
+    mkdir -p "$(dirname "$config")"
+    cat > "$config" <<'ONBOARDED'
+{
+  "gateway": {
+    "port": 3000,
+    "bind": "lan"
+  },
+  "agents": {
+    "defaults": {}
+  },
+  "tools": {},
+  "channels": {},
+  "env": {}
+}
+ONBOARDED
+    exit 0
+    ;;
+
+  gateway)
+    case "${2:-}" in
+      health)
+        if [ -n "$markers" ]; then
+          printf '%s\n' "$*" >> "${markers}/calls-health"
+        fi
+        # A gateway that accepts the connection and then never answers. Only a
+        # timeout bounds this; a retry budget alone would wait forever.
+        [ "${OPENCLAW_STUB_HANG:-no}" = "health" ] && exec sleep 3600
+        [ "${OPENCLAW_STUB_GATEWAY_READY:-yes}" = "yes" ] || exit 1
+        printf 'ok\n'
+        exit 0
+        ;;
+      *)
+        # `exec openclaw gateway` is the last line of the entrypoint, so this
+        # marker is how a case asserts that a rejected configuration never got
+        # that far — and that a failed registration did not stop it.
+        if [ -n "$markers" ]; then
+          : > "${markers}/gateway-started"
+        fi
+        exit 0
+        ;;
+    esac
+    ;;
+
+  config)
+    # 004 gates startup on this before forking the registrar. Nothing here is
+    # about validation, so it accepts — 004's own stub carries the schema
+    # transcription that can reject. The marker lets a case assert the gate ran
+    # ahead of the fork.
+    case "${2:-}" in
+      set)
+        # Write-if-absent, which is the only shape the entrypoint uses. 008 sets
+        # tools.exec.security this way so that a restart cannot revert an
+        # operator's tightened exec policy -- 004's finding B6, which used to be
+        # held by the `[ ! -f ]` guard on exec-approvals.json.
+        #
+        # Strict about the flag for the same reason 008's `config patch` is: a
+        # stub that ignored --expect-current-absent would perform an
+        # unconditional write and turn the case that pins this green.
+        stub_path="${3:-}"
+        stub_value="${4:-}"
+        if [ -z "$stub_path" ] || [ -z "$stub_value" ]; then usage "$@"; fi
+        shift 4
+        stub_expect_absent='no'
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --expect-current-absent) stub_expect_absent='yes' ;;
+            *) usage "config set $*" ;;
+          esac
+          shift
+        done
+        [ "$stub_expect_absent" = 'yes' ] || usage 'config set (without --expect-current-absent)'
+
+        STUB_CONFIG="$config" STUB_PATH="$stub_path" STUB_VALUE="$stub_value" node -e "
+          const fs = require('fs');
+          const configPath = process.env.STUB_CONFIG;
+          let config = {};
+          try {
+            config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+          } catch {}
+
+          const parts = process.env.STUB_PATH.split('.');
+          let node = config;
+          for (const key of parts.slice(0, -1)) {
+            if (node[key] === null || typeof node[key] !== 'object') node[key] = {};
+            node = node[key];
+          }
+          const leaf = parts[parts.length - 1];
+          if (Object.prototype.hasOwnProperty.call(node, leaf)) {
+            // The refusal upstream gives, and the exit code the entrypoint reads.
+            console.error('conditional config set expectation did not match the ' +
+              'authored config, so nothing was changed');
+            process.exit(1);
+          }
+          node[leaf] = process.env.STUB_VALUE;
+          fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+        "
+        exit $?
+        ;;
+
+      patch)
+        # 008 routes the main config block through `openclaw config patch`
+        # rather than letting the entrypoint open openclaw.json itself. The
+        # merge is modelled here; the verdict is not.
+        #
+        # Upstream's contract, from `openclaw config patch --help`: objects
+        # merge recursively, arrays and scalars replace, and null deletes a
+        # path. The entrypoint emits strict JSON, which is the JSON5 subset the
+        # real command accepts, so JSON.parse is enough and no JSON5 parser is
+        # needed here.
+        #
+        # It validates nothing on purpose. A stub with a schema opinion would be
+        # a third transcription to keep in step with upstream; 006's
+        # config-schema-check runs the REAL validator over the file this
+        # produces, which is the check that decides whether the payload is
+        # legal. This decides only what the file looks like.
+        #
+        #   OPENCLAW_STUB_PATCH_ERROR  text -> `config patch` rejects with this
+        #                              message and writes nothing, the way a
+        #                              schema violation does. The entrypoint
+        #                              redacts that message before it reaches
+        #                              the log, so a case has to be able to make
+        #                              it quote a credential.
+        if [ -n "${OPENCLAW_STUB_PATCH_ERROR:-}" ]; then
+          printf '%s\n' "$OPENCLAW_STUB_PATCH_ERROR" >&2
+          exit 1
+        fi
+        # Strict about its flags, and that is load-bearing rather than tidy.
+        # A stub that shrugged at an unrecognised flag let two real regressions
+        # through 008's mutation check: `--dry-run` writes nothing at all, and
+        # `--replace-path agents.defaults.models` restores the whole-object
+        # clobber 008 exists to remove. Both produced a green run against a
+        # permissive stub, because the merge it performed was its own rather
+        # than the one it was asked for.
+        shift 2
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --stdin) ;;
+            *) usage "config patch $*" ;;
+          esac
+          shift
+        done
+
+        STUB_CONFIG="$config" node -e "
+          const fs = require('fs');
+          const configPath = process.env.STUB_CONFIG;
+
+          let patch;
+          try {
+            patch = JSON.parse(fs.readFileSync(0, 'utf8'));
+          } catch (error) {
+            console.error('stub-openclaw: config patch got a malformed document: ' +
+              error.message);
+            process.exit(1);
+          }
+          if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+            console.error('stub-openclaw: config patch expects a JSON object');
+            process.exit(1);
+          }
+
+          let config = {};
+          try {
+            config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+          } catch {}
+
+          // null deletes; a plain object merges into a plain object; anything
+          // else — array, scalar, or an object landing on a non-object —
+          // replaces. That is upstream's rule, restated.
+          const isPlainObject = (value) =>
+            value !== null && typeof value === 'object' && !Array.isArray(value);
+
+          const merge = (target, source) => {
+            for (const [key, value] of Object.entries(source)) {
+              if (value === null) {
+                delete target[key];
+              } else if (isPlainObject(value) && isPlainObject(target[key])) {
+                merge(target[key], value);
+              } else if (isPlainObject(value)) {
+                target[key] = merge({}, value);
+              } else {
+                target[key] = value;
+              }
+            }
+            return target;
+          };
+
+          merge(config, patch);
+          fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+        "
+        exit $?
+        ;;
+
+      validate)
+        if [ -n "$markers" ]; then
+          : > "${markers}/config-validated"
+        fi
+        printf 'ok\n'
+        exit 0
+        ;;
+      *)
+        usage "$@"
+        ;;
+    esac
+    ;;
+
+  automations | cron)
+    verb="${2:-}"
+    shift 2 2>/dev/null || usage "$@"
+    argv="$(argv_json "$@")"
+    record "$verb" "$argv"
+
+    case "$verb" in
+      list)
+        [ "${OPENCLAW_STUB_HANG:-no}" = "list" ] && exec sleep 3600
+        [ "${OPENCLAW_STUB_LIST_FAILS:-no}" = "no" ] || {
+          printf 'stub-openclaw: gateway refused: operator.admin required\n' >&2
+          exit 1
+        }
+        STUB_ARGV="$argv" STUB_STORE="$store" \
+        STUB_LIST_JSON="${OPENCLAW_STUB_LIST_JSON:-yes}" \
+        STUB_LIST_SHAPE="${OPENCLAW_STUB_LIST_SHAPE:-envelope}" node -e "
+          const fs = require('fs');
+          const argv = JSON.parse(process.env.STUB_ARGV);
+
+          let all = false;
+          let json = false;
+          for (const arg of argv) {
+            if (arg === '--all') { all = true; continue; }
+            if (arg === '--json') {
+              if (process.env.STUB_LIST_JSON !== 'yes') {
+                console.error('stub-openclaw: unknown option --json');
+                process.exit(64);
+              }
+              json = true;
+              continue;
+            }
+            console.error('stub-openclaw: unknown list flag: ' + arg);
+            process.exit(64);
+          }
+
+          const stored = JSON.parse(fs.readFileSync(process.env.STUB_STORE + '/jobs.json', 'utf8'));
+          const jobs = all ? stored : stored.filter((job) => job.enabled !== false);
+
+          if (json === false) {
+            for (const job of jobs) console.log(job.id + '  ' + job.name + '  ' + job.schedule);
+            process.exit(0);
+          }
+
+          // The pinned CLI pages through the store and prints one envelope.
+          // Rows are the stub's own flat records; the fields a registrar reads
+          // — id, name, enabled, declarationKey — have upstream's names and
+          // types, and declarationKey is absent rather than null when unset.
+          const envelope = (rows) => ({
+            jobs: rows, total: rows.length, offset: 0, limit: 200, hasMore: false, nextOffset: null
+          });
+          const print = (value) => console.log(JSON.stringify(value, null, 2));
+
+          switch (process.env.STUB_LIST_SHAPE) {
+            case 'envelope':
+              print(envelope(jobs));
+              break;
+            // The rows with no envelope around them, which is what this stub
+            // printed before the envelope was pinned.
+            case 'bare':
+              print(jobs);
+              break;
+            case 'garbage':
+              process.stdout.write('not json at all\n');
+              break;
+            // A real envelope whose rows use none of the key names a registrar
+            // reads. The plain listing above still prints the name, so this is
+            // the case where the --json path must not be the last word — and
+            // where a strict reader has to refuse the rows, not only the
+            // envelope.
+            case 'renamed':
+              print(envelope(jobs.map((job) => ({ automationId: job.id, automationName: job.name }))));
+              break;
+            // The first page of more. The pinned CLI reads every page before
+            // it prints, so a listing that says there is more is not the
+            // whole store, and an absence in it proves nothing.
+            case 'partial':
+              print(Object.assign(envelope(jobs.slice(0, 1)), { hasMore: true, nextOffset: 1 }));
+              break;
+            default:
+              console.error('stub-openclaw: unknown OPENCLAW_STUB_LIST_SHAPE: ' + process.env.STUB_LIST_SHAPE);
+              process.exit(64);
+          }
+        "
+        exit $?
+        ;;
+
+      create)
+        # A refusal at the gateway, such as a missing operator.admin. The CLI
+        # warns about --agent before it reaches the gateway, so the warning
+        # comes first on stderr and the refusal follows it.
+        if [ "${OPENCLAW_STUB_HANG:-no}" = "create" ]; then
+          printf '%s\n' "$agent_warning" >&2
+          exec sleep 3600
+        fi
+        if [ "${OPENCLAW_STUB_CREATE_FAILS:-no}" = "yes" ]; then
+          printf '%s\n' "$agent_warning" >&2
+          refuse "stub-openclaw: ${OPENCLAW_STUB_CREATE_ERROR:-gateway refused: operator.admin required}"
+        fi
+        case "${OPENCLAW_STUB_CREATE_OUTPUT:-json}" in
+          json | garbage) ;;
+          *) usage "OPENCLAW_STUB_CREATE_OUTPUT=${OPENCLAW_STUB_CREATE_OUTPUT}" ;;
+        esac
+
+        # The node block answers on stdout and exits 0 for success, 3 with
+        # the reason on stdout for a refusal, or 64 for a flag it does not
+        # know. The warning and the refusal shape are added here, after flag
+        # parsing, because upstream rejects an unknown option before it gets
+        # as far as warning about --agent.
+        outcome="$(
+          STUB_ARGV="$argv" STUB_STORE="$store" STUB_MARKERS="$markers" \
+          STUB_CREATE_SILENT="${OPENCLAW_STUB_CREATE_SILENT:-no}" node -e "
+            const fs = require('fs');
+            const argv = JSON.parse(process.env.STUB_ARGV);
+
+            const request = {
+              name: null, tz: null, session: null,
+              announce: false, channel: null, to: null
+            };
+            let declarationKey = null;
+            let exact = false;
+            let disabled = false;
+            const positional = [];
+            const takesValue = {
+              '--name': 'name', '--tz': 'tz', '--session': 'session',
+              '--channel': 'channel', '--to': 'to', '--declaration-key': 'declarationKey'
+            };
+
+            for (let i = 0; i < argv.length; i += 1) {
+              const arg = argv[i];
+              if (arg === '--announce') { request.announce = true; continue; }
+              if (arg === '--exact') { exact = true; continue; }
+              if (arg === '--disabled') { disabled = true; continue; }
+              if (Object.prototype.hasOwnProperty.call(takesValue, arg)) {
+                i += 1;
+                if (i >= argv.length) {
+                  console.error('stub-openclaw: ' + arg + ' needs a value');
+                  process.exit(64);
+                }
+                if (arg === '--declaration-key') {
+                  // Upstream trims the key, and a blank one is no key at all.
+                  declarationKey = argv[i].trim() || null;
+                } else {
+                  request[takesValue[arg]] = argv[i];
+                }
+                continue;
+              }
+              if (arg.startsWith('--')) {
+                console.error('stub-openclaw: unknown create flag: ' + arg);
+                process.exit(64);
+              }
+              positional.push(arg);
+            }
+
+            if (positional.length !== 2) {
+              console.error('stub-openclaw: create takes a schedule and a prompt, got ' + positional.length);
+              process.exit(64);
+            }
+            request.schedule = positional[0];
+            request.prompt = positional[1];
+            // --exact stores an explicit zero stagger. Without it nothing is
+            // stored, which is the shape B2 bites on. Upstream would store a
+            // default stagger for a top-of-hour expression; this stub stores
+            // none for any expression, so it shows the defect more often than
+            // upstream does, never less.
+            if (exact) request.staggerMs = 0;
+
+            const refuse = (reason) => {
+              process.stdout.write(reason);
+              process.exit(3);
+            };
+
+            const reserved = ['heartbeat-task:', 'skill-collection-review:']
+              .find((prefix) => declarationKey !== null && declarationKey.startsWith(prefix));
+            if (reserved) {
+              refuse('invalid cron.add params: cron declarationKey namespace \"' + reserved +
+                '\" is system-owned; jobs cannot be created with it');
+            }
+
+            const storeDir = process.env.STUB_STORE;
+            const storePath = storeDir + '/jobs.json';
+            const jobs = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+            const emit = (value) => process.stdout.write(JSON.stringify(value, null, 2));
+
+            // Ids are never reused, as upstream's UUIDs are not: a case that
+            // removes a job must be able to tell its id from the next one.
+            const nextId = () => {
+              const counterPath = storeDir + '/next-id';
+              let last = 0;
+              try { last = Number(fs.readFileSync(counterPath, 'utf8')) || 0; } catch {}
+              for (const job of jobs) {
+                const match = /^job-([0-9]+)\$/.exec(String(job.id));
+                if (match) last = Math.max(last, Number(match[1]));
+              }
+              fs.writeFileSync(counterPath, String(last + 1) + '\n');
+              return 'job-' + String(last + 1).padStart(4, '0');
+            };
+            const write = (kind, id) => {
+              fs.writeFileSync(storePath, JSON.stringify(jobs, null, 2) + '\n');
+              fs.appendFileSync(storeDir + '/writes', kind + ' ' + id + '\n');
+            };
+            const fresh = () => Object.assign(
+              { id: nextId() },
+              declarationKey === null ? {} : { declarationKey },
+              request,
+              { enabled: disabled === false }
+            );
+
+            const matches = declarationKey === null
+              ? []
+              : jobs.filter((job) => job.declarationKey === declarationKey);
+            if (matches.length > 1) {
+              refuse('cron declarationKey is ambiguous within caller scope: ' + declarationKey);
+            }
+
+            // A create that reports success and stores nothing. The registrar
+            // must notice, because that is what an unrecorded failure looks like.
+            if (process.env.STUB_CREATE_SILENT === 'yes') {
+              const job = fresh();
+              emit(declarationKey === null ? job : { created: true, job });
+              process.exit(0);
+            }
+
+            // Without a key, every create is a new job, and it prints the job
+            // itself rather than an outcome (B10).
+            if (matches.length === 0) {
+              const job = fresh();
+              jobs.push(job);
+              write('create', job.id);
+              emit(declarationKey === null ? job : { created: true, job });
+              process.exit(0);
+            }
+
+            // Converge. Name and session are outside a declaration (R3), so
+            // they keep what the job was created with.
+            const existing = matches[0];
+            const next = Object.assign({}, existing);
+            for (const field of ['schedule', 'tz', 'prompt', 'announce', 'channel', 'to']) {
+              next[field] = request[field];
+            }
+            // An explicit stagger wins. An unchanged expression keeps the one
+            // it had, which may be none. A changed one gets the default, which
+            // this stub models as none.
+            const sameExpression = existing.schedule === request.schedule;
+            if (exact) {
+              next.staggerMs = 0;
+            } else if (sameExpression && Object.prototype.hasOwnProperty.call(existing, 'staggerMs')) {
+              next.staggerMs = existing.staggerMs;
+            } else {
+              delete next.staggerMs;
+            }
+            if (disabled) next.enabled = false;
+
+            const fields = new Set([...Object.keys(existing), ...Object.keys(next)]);
+            const differs = [...fields].some(
+              (field) => JSON.stringify(existing[field]) !== JSON.stringify(next[field])
+            );
+
+            // B2. Upstream re-applies an unchanged expression as
+            // { ...schedule, staggerMs: previous.staggerMs }, which adds an
+            // undefined key to a job stored without one, and the convergence
+            // check counts that as a change. The job keeps the key in memory,
+            // so later declarations are no-ops until the gateway restarts and
+            // reloads the job from JSON without it. The markers directory is
+            // per run, so a marker in it is per gateway lifetime.
+            const settledPath = process.env.STUB_MARKERS
+              ? process.env.STUB_MARKERS + '/settled-' + existing.id
+              : null;
+            const settled = settledPath !== null && fs.existsSync(settledPath);
+            const staggerless = exact === false && sameExpression &&
+              Object.prototype.hasOwnProperty.call(existing, 'staggerMs') === false;
+            const settle = () => { if (settledPath !== null) fs.writeFileSync(settledPath, ''); };
+
+            if (differs) {
+              jobs[jobs.indexOf(existing)] = next;
+              write('update', next.id);
+              if (staggerless) settle();
+              emit({ created: false, updated: true, job: next });
+            } else if (staggerless && settled === false) {
+              write('settle', next.id);
+              settle();
+              emit({ created: false, updated: true, job: next });
+            } else {
+              emit({ created: false, updated: false, job: existing });
+            }
+          "
+        )"
+        status=$?
+        case "$status" in
+          0 | 3) printf '%s\n' "$agent_warning" >&2 ;;
+          *) exit "$status" ;;
+        esac
+        [ "$status" -eq 0 ] || refuse "$outcome"
+        if [ "${OPENCLAW_STUB_CREATE_OUTPUT:-json}" = "garbage" ]; then
+          printf 'not json at all\n'
+        else
+          printf '%s\n' "$outcome"
+        fi
+        exit 0
+        ;;
+
+      remove)
+        [ "${OPENCLAW_STUB_HANG:-no}" = "remove" ] && exec sleep 3600
+        outcome="$(
+          STUB_ARGV="$argv" STUB_STORE="$store" \
+          STUB_REMOVE_FAILS="${OPENCLAW_STUB_REMOVE_FAILS:-no}" node -e "
+            const fs = require('fs');
+            const argv = JSON.parse(process.env.STUB_ARGV);
+
+            for (const arg of argv) {
+              if (arg.startsWith('-')) {
+                console.error('stub-openclaw: unknown remove flag: ' + arg);
+                process.exit(64);
+              }
+            }
+            if (argv.length !== 1) {
+              console.error('stub-openclaw: remove takes one id, got ' + argv.length);
+              process.exit(64);
+            }
+
+            const refuse = (reason) => {
+              process.stdout.write(reason);
+              process.exit(3);
+            };
+            if (process.env.STUB_REMOVE_FAILS === 'yes') {
+              refuse('stub-openclaw: gateway refused: operator.admin required');
+            }
+
+            const id = argv[0];
+            const storeDir = process.env.STUB_STORE;
+            const storePath = storeDir + '/jobs.json';
+            const jobs = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+            const index = jobs.findIndex((job) => job.id === id);
+            if (index === -1) {
+              // B9's wording. The character code is a backtick, which would
+              // be a command substitution inside this double-quoted script.
+              const tick = String.fromCharCode(96);
+              refuse('Automation not found: ' + id + '. Run ' + tick + 'openclaw cron list' + tick +
+                ' to see recent automation ids.');
+            }
+            jobs.splice(index, 1);
+            fs.writeFileSync(storePath, JSON.stringify(jobs, null, 2) + '\n');
+            fs.appendFileSync(storeDir + '/writes', 'remove ' + id + '\n');
+            process.stdout.write(JSON.stringify({ ok: true, removed: true }, null, 2));
+          "
+        )"
+        status=$?
+        case "$status" in
+          0) printf '%s\n' "$outcome"; exit 0 ;;
+          3) refuse "$outcome" ;;
+          *) exit "$status" ;;
+        esac
+        ;;
+
+      *)
+        usage "$@"
+        ;;
+    esac
+    ;;
+
+  *)
+    usage "$@"
+    ;;
+esac

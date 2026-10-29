@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+#
+# Adoption: a briefing registered before it had a key is replaced, once, by
+# the declared one, and a store that held a briefing is never left without one.
+#
+# A key cannot be added to an existing job (R5), so the only way under the
+# declaration is to declare beside the old job and then remove it. Each case
+# seeds the store an older image left behind. One behaviour per case, named
+# should_<behaviour>_when_<condition>.
+
+set -uo pipefail
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+BRIEFING='morning-briefing'
+KEY='hermes:morning-briefing'
+
+# What an older image left: one morning-briefing with no key.
+#   seed_unkeyed <store> [enabled]
+seed_unkeyed() {
+  seed_store "$1" <<SEEDED
+[
+  { "id": "job-unkeyed", "name": "morning-briefing", "schedule": "0 8 * * *", "enabled": ${2:-true} }
+]
+SEEDED
+}
+
+# How many morning-briefing jobs carry the key, and how many carry none.
+count_keyed() {
+  jq --arg name "$BRIEFING" --arg key "$KEY" \
+    '[.[] | select(.name == $name and .declarationKey == $key)] | length' "${RUN_STORE}/jobs.json"
+}
+count_unkeyed() {
+  jq --arg name "$BRIEFING" \
+    '[.[] | select(.name == $name and (has("declarationKey") | not))] | length' "${RUN_STORE}/jobs.json"
+}
+
+# The automations verbs this run called, in order, on one line.
+call_verbs() {
+  stub_call_order | cut -d ' ' -f 1 | tr '\n' ' ' | sed 's/ $//'
+}
+
+# --- SPEC § Adopting a job registered before this change ------------------
+
+case_start "should_replace_an_unkeyed_briefing_with_a_declared_one"
+store="$(new_store)"
+seed_unkeyed "$store"
+run_entrypoint --store "$store"
+assert_equals "briefings" "1" "$(store_count_named "$BRIEFING")"
+assert_equals "it carries the key" "1" "$(count_keyed)"
+assert_equals "the unkeyed job is gone" "null" "$(store_field_of job-unkeyed '.id')"
+assert_contains "the replacement is logged" "$RUN_OUT" "cron: replaced unkeyed ${BRIEFING} job-unkeyed"
+assert_contains "and so is the declaration" "$RUN_OUT" "cron: registered ${BRIEFING}"
+case_end
+
+case_start "should_keep_the_briefing_disabled_when_the_unkeyed_one_was_disabled"
+store="$(new_store)"
+seed_unkeyed "$store" false
+run_entrypoint --store "$store"
+assert_equals "it carries the key" "1" "$(count_keyed)"
+assert_equals "still disabled" "false" "$(store_job_field "$BRIEFING" '.enabled')"
+assert_contains "declared disabled" "$(stub_calls create)" '"--disabled"'
+case_end
+
+case_start "should_replace_every_unkeyed_briefing_with_one_when_there_are_several"
+# The duplicate 003 does not defend against: two containers sharing a volume.
+store="$(new_store)"
+seed_store "$store" <<'SEEDED'
+[
+  { "id": "job-unkeyed-1", "name": "morning-briefing", "schedule": "0 8 * * *", "enabled": false },
+  { "id": "job-unkeyed-2", "name": "morning-briefing", "schedule": "0 8 * * *", "enabled": false },
+  { "id": "job-unkeyed-3", "name": "morning-briefing", "schedule": "0 8 * * *", "enabled": false }
+]
+SEEDED
+run_entrypoint --store "$store"
+assert_equals "briefings" "1" "$(store_count_named "$BRIEFING")"
+assert_equals "it carries the key" "1" "$(count_keyed)"
+assert_equals "removals" "3" "$(stub_call_count remove)"
+assert_equals "disabled, as every one of them was" "false" "$(store_job_field "$BRIEFING" '.enabled')"
+assert_contains "declared disabled" "$(stub_calls create)" '"--disabled"'
+case_end
+
+case_start "should_enable_the_declared_briefing_when_any_unkeyed_one_was_enabled"
+# The enabled one is in the middle, so neither the first nor the last row
+# decides.
+store="$(new_store)"
+seed_store "$store" <<'SEEDED'
+[
+  { "id": "job-unkeyed-1", "name": "morning-briefing", "schedule": "0 8 * * *", "enabled": false },
+  { "id": "job-unkeyed-2", "name": "morning-briefing", "schedule": "0 8 * * *", "enabled": true },
+  { "id": "job-unkeyed-3", "name": "morning-briefing", "schedule": "0 8 * * *", "enabled": false }
+]
+SEEDED
+run_entrypoint --store "$store"
+assert_equals "briefings" "1" "$(store_count_named "$BRIEFING")"
+assert_equals "enabled" "true" "$(store_job_field "$BRIEFING" '.enabled')"
+assert_not_contains "not declared disabled" "$(stub_calls create)" '"--disabled"'
+case_end
+
+case_start "should_keep_the_declared_briefing_enabled_when_a_leftover_unkeyed_one_is_disabled"
+# --disabled carries an operator's "off" across adoption, and only adoption.
+# Beside a job that already carries the key, a disabled leftover says nothing
+# about the briefing, and passing --disabled would switch it off.
+store="$(new_store)"
+seed_store "$store" <<'SEEDED'
+[
+  { "id": "job-declared", "declarationKey": "hermes:morning-briefing", "name": "morning-briefing",
+    "schedule": "0 8 * * *", "staggerMs": 0, "enabled": true },
+  { "id": "job-unkeyed", "name": "morning-briefing", "schedule": "0 8 * * *", "enabled": false }
+]
+SEEDED
+run_entrypoint --store "$store"
+assert_equals "briefings" "1" "$(store_count_named "$BRIEFING")"
+assert_equals "still enabled" "true" "$(store_field_of job-declared '.enabled')"
+assert_not_contains "not declared disabled" "$(stub_calls create)" '"--disabled"'
+case_end
+
+case_start "should_declare_before_removing_when_adopting"
+# SPEC Open Question 2: declare first, remove second, so the store never holds
+# no briefing. The removal also waits for a listing that shows the key.
+store="$(new_store)"
+seed_unkeyed "$store"
+run_entrypoint --store "$store"
+assert_equals "the call order" "list create list remove" "$(call_verbs)"
+case_end
+
+case_start "should_keep_the_declared_briefing_when_the_unkeyed_one_cannot_be_removed"
+store="$(new_store)"
+seed_unkeyed "$store"
+run_entrypoint --store "$store" OPENCLAW_STUB_REMOVE_FAILS=yes
+assert_equals "the declared job is in place" "1" "$(count_keyed)"
+assert_equals "the unkeyed job is still there" "1" "$(count_unkeyed)"
+assert_contains "the failure is logged" "$RUN_ERR" \
+  "cron: could not remove unkeyed ${BRIEFING} job-unkeyed: stub-openclaw: gateway refused: operator.admin required; the next start will retry"
+assert_contains "the registration still succeeded" "$RUN_OUT" "cron: registered ${BRIEFING}"
+if ! gateway_started; then
+  fail "the gateway should have started"
+fi
+case_end
+
+case_start "should_remove_the_leftover_on_the_next_start_when_removal_failed"
+store="$(new_store)"
+seed_unkeyed "$store"
+run_entrypoint --store "$store" OPENCLAW_STUB_REMOVE_FAILS=yes
+run_entrypoint --store "$store"
+assert_equals "briefings" "1" "$(store_count_named "$BRIEFING")"
+assert_equals "it carries the key" "1" "$(count_keyed)"
+assert_contains "the leftover is replaced" "$RUN_OUT" "cron: replaced unkeyed ${BRIEFING} job-unkeyed"
+assert_contains "the declared job was already right" "$RUN_OUT" "cron: ${BRIEFING} unchanged"
+case_end
+
+case_start "should_not_remove_the_unkeyed_briefing_when_the_declared_one_is_not_listed"
+# The "never zero" case. create reports success and stores nothing, so the
+# listing never shows the key. Removing the old job on create's word would
+# leave the store with no briefing at all.
+store="$(new_store)"
+seed_unkeyed "$store"
+run_entrypoint --store "$store" OPENCLAW_STUB_CREATE_SILENT=yes
+assert_equals "the unkeyed job is still there" "1" "$(count_unkeyed)"
+assert_equals "remove calls" "0" "$(stub_call_count remove)"
+assert_equals "declared once, and only the read retried" "1" "$(stub_call_count create)"
+assert_contains "the discrepancy is named" "$RUN_ERR" \
+  "declaration reported success but no automation carries ${KEY}"
+case_end
+
+case_start "should_leave_the_unkeyed_briefing_running_when_the_declaration_fails"
+# The other half of "never zero": a start that fails before anything is
+# declared removes nothing, and says the briefing was left as it was — the
+# older job is still there, and still runs.
+store="$(new_store)"
+seed_unkeyed "$store"
+run_entrypoint --store "$store" OPENCLAW_STUB_CREATE_FAILS=yes
+assert_equals "the unkeyed job is still there" "1" "$(count_unkeyed)"
+assert_equals "remove calls" "0" "$(stub_call_count remove)"
+assert_contains "left as it was" "$RUN_ERR" "cron: giving up after 2 attempts; briefing left as it was"
+case_end
+
+case_start "should_keep_the_declared_briefing_when_the_removal_times_out"
+store="$(new_store)"
+seed_unkeyed "$store"
+run_entrypoint --store "$store" OPENCLAW_STUB_HANG=remove
+assert_equals "the declared job is in place" "1" "$(count_keyed)"
+assert_contains "the timeout is logged" "$RUN_ERR" \
+  "cron: could not remove unkeyed ${BRIEFING} job-unkeyed: timed out; the next start will retry"
+assert_contains "the registration still succeeded" "$RUN_OUT" "cron: registered ${BRIEFING}"
+case_end
+
+case_start "should_write_nothing_when_the_listing_cannot_be_read"
+store="$(new_store)"
+seed_unkeyed "$store"
+run_entrypoint --store "$store" OPENCLAW_STUB_LIST_FAILS=yes
+assert_equals "create calls" "0" "$(stub_call_count create)"
+assert_equals "remove calls" "0" "$(stub_call_count remove)"
+assert_equals "writes" "0" "$(store_write_count)"
+case_end
+
+case_start "should_write_nothing_when_the_listing_does_not_parse"
+store="$(new_store)"
+seed_unkeyed "$store"
+run_entrypoint --store "$store" OPENCLAW_STUB_LIST_SHAPE=garbage
+assert_equals "create calls" "0" "$(stub_call_count create)"
+assert_equals "writes" "0" "$(store_write_count)"
+case_end
+
+case_start "should_write_nothing_when_the_listing_is_a_bare_array"
+store="$(new_store)"
+seed_unkeyed "$store"
+run_entrypoint --store "$store" OPENCLAW_STUB_LIST_SHAPE=bare
+assert_equals "create calls" "0" "$(stub_call_count create)"
+assert_equals "writes" "0" "$(store_write_count)"
+case_end
+
+case_start "should_write_nothing_when_the_listing_rows_are_unrecognised"
+store="$(new_store)"
+seed_unkeyed "$store"
+run_entrypoint --store "$store" OPENCLAW_STUB_LIST_SHAPE=renamed
+assert_equals "create calls" "0" "$(stub_call_count create)"
+assert_equals "writes" "0" "$(store_write_count)"
+case_end
+
+case_start "should_write_nothing_when_list_json_is_refused"
+store="$(new_store)"
+seed_unkeyed "$store"
+run_entrypoint --store "$store" OPENCLAW_STUB_LIST_JSON=no
+assert_equals "create calls" "0" "$(stub_call_count create)"
+assert_equals "writes" "0" "$(store_write_count)"
+assert_contains "the attempt is retried within the budget" "$RUN_ERR" "cron: registration attempt 2/2 failed:"
+case_end
+
+case_start "should_write_nothing_when_the_listing_times_out"
+store="$(new_store)"
+seed_unkeyed "$store"
+run_entrypoint --store "$store" OPENCLAW_STUB_HANG=list HERMES_CRON_REGISTER_ATTEMPTS=1
+assert_equals "create calls" "0" "$(stub_call_count create)"
+assert_equals "writes" "0" "$(store_write_count)"
+assert_contains "the timeout is named" "$RUN_ERR" "could not list automations: timed out"
+case_end
+
+case_start "should_write_nothing_when_the_listing_is_one_page_of_several"
+# The unkeyed briefing is on a page this listing does not include, so it
+# shows no briefing at all. Read as complete, it would declare a second one.
+store="$(new_store)"
+seed_store "$store" <<'SEEDED'
+[
+  { "id": "job-other", "name": "something else", "schedule": "0 * * * *", "enabled": true },
+  { "id": "job-unkeyed", "name": "morning-briefing", "schedule": "0 8 * * *", "enabled": true }
+]
+SEEDED
+run_entrypoint --store "$store" OPENCLAW_STUB_LIST_SHAPE=partial
+assert_equals "create calls" "0" "$(stub_call_count create)"
+assert_equals "writes" "0" "$(store_write_count)"
+case_end
+
+case_start "should_leave_a_briefing_with_another_key_alone"
+store="$(new_store)"
+seed_store "$store" <<'SEEDED'
+[
+  { "id": "job-foreign", "declarationKey": "someone-else:briefing", "name": "morning-briefing",
+    "schedule": "15 7 * * *", "enabled": true }
+]
+SEEDED
+run_entrypoint --store "$store"
+assert_equals "remove calls" "0" "$(stub_call_count remove)"
+assert_equals "the other job's key" "someone-else:briefing" "$(store_field_of job-foreign '.declarationKey')"
+assert_equals "the other job's schedule" "15 7 * * *" "$(store_field_of job-foreign '.schedule')"
+assert_equals "ours, beside it" "1" "$(count_keyed)"
+case_end
+
+report_totals "adoption-test"

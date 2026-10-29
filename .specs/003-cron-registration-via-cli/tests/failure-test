@@ -84,10 +84,10 @@ fi
 case_end
 
 case_start "should_report_a_failure_when_create_succeeds_without_storing_the_job"
-# Success is the job appearing in the listing, not what `create` printed —
-# nothing upstream documents create's output, so it is not trusted.
+# Success is the job appearing in the listing, not what `create` printed. The
+# listing is what proves the declaration round-tripped.
 run_entrypoint OPENCLAW_STUB_CREATE_SILENT=yes
-assert_contains "the discrepancy is named" "$RUN_ERR" "create reported success but no automation named ${BRIEFING} is listed"
+assert_contains "the discrepancy is named" "$RUN_ERR" "declaration reported success but no automation carries hermes:morning-briefing"
 assert_not_contains "no success is claimed" "$(run_log)" "cron: registered"
 assert_contains "gives up" "$RUN_ERR" "cron: giving up after 2 attempts"
 case_end
@@ -119,7 +119,7 @@ case_start "should_create_at_most_once_when_the_listing_never_shows_the_job"
 # into one automation per attempt, and N per restart forever.
 run_entrypoint OPENCLAW_STUB_CREATE_SILENT=yes
 assert_equals "create calls" "1" "$(stub_call_count create)"
-assert_contains "the discrepancy is still reported" "$RUN_ERR" "create reported success but no automation named ${BRIEFING} is listed"
+assert_contains "the discrepancy is still reported" "$RUN_ERR" "declaration reported success but no automation carries hermes:morning-briefing"
 assert_contains "and it still gives up" "$RUN_ERR" "cron: giving up after 2 attempts"
 case_end
 

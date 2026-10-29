@@ -50,7 +50,7 @@
 #   OPENCLAW_STUB_CREATE_OUTPUT  garbage -> create succeeds, but its stdout is
 #                                         not JSON
 #   OPENCLAW_STUB_LIST_JSON      no    -> `list --json` is rejected as unknown
-#   OPENCLAW_STUB_LIST_SHAPE     bare|wrapped|garbage|renamed -> not the
+#   OPENCLAW_STUB_LIST_SHAPE     bare|garbage|renamed -> not the
 #                                         envelope; see `list` below
 #   OPENCLAW_STUB_LIST_FAILS     yes   -> `list` exits 1 whatever the flags
 #   OPENCLAW_STUB_REMOVE_FAILS   yes   -> `automations remove` is refused
@@ -378,11 +378,6 @@ ONBOARDED
             case 'bare':
               print(jobs);
               break;
-            // The envelope plus an extra key. It differs from the default only
-            // in that key, and goes when the cases that drive it do.
-            case 'wrapped':
-              print({ ok: true, jobs });
-              break;
             case 'garbage':
               process.stdout.write('not json at all\n');
               break;
@@ -403,14 +398,12 @@ ONBOARDED
         ;;
 
       create)
-        # Plain stderr, not the refusal shape `refuse` gives. Until 011, the
-        # registrar folds create's two streams into its failure reason, and
-        # `should_keep_a_multi_line_error_on_one_log_line` pins that reason's
-        # exact text.
+        # A refusal at the gateway, such as a missing operator.admin. The CLI
+        # warns about --agent before it reaches the gateway, so the warning
+        # comes first on stderr and the refusal follows it.
         if [ "${OPENCLAW_STUB_CREATE_FAILS:-no}" = "yes" ]; then
-          printf 'stub-openclaw: %s\n' \
-            "${OPENCLAW_STUB_CREATE_ERROR:-gateway refused: operator.admin required}" >&2
-          exit 1
+          printf '%s\n' "$agent_warning" >&2
+          refuse "stub-openclaw: ${OPENCLAW_STUB_CREATE_ERROR:-gateway refused: operator.admin required}"
         fi
         case "${OPENCLAW_STUB_CREATE_OUTPUT:-json}" in
           json | garbage) ;;

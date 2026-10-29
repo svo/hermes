@@ -821,18 +821,21 @@ chat, which is not where a summary of the user's inbox belongs.
 At `HERMES_CRON_SCHEDULE`, in `HERMES_TIMEZONE`, Hermes runs `hermes-check`, reads the day's
 calendar and the overnight inbox, and sends one combined briefing.
 
-It is an OpenClaw **automation**, registered through the CLI. Cron data lives in the
-gateway's own store, so there is nothing hand-editable to inspect — use the CLI:
+It is an OpenClaw **automation**, declared through the CLI under the key
+`hermes:morning-briefing`. Cron data lives in the gateway's own store, so there is nothing
+hand-editable to inspect — use the CLI:
 
 ```bash
-docker exec hermes openclaw cron list --all
+docker exec hermes openclaw cron list --all --json \
+  | jq '.jobs[] | select(.name == "morning-briefing") | {id, declarationKey, enabled}'
 ```
 
-Exactly one job named `morning-briefing` should be listed. `--all` matters: without it the
-listing shows only *enabled* jobs, so a briefing someone disabled reads as missing and sends
-you looking for a registration failure that never happened. The registrar passes `--all` for
-the same reason — otherwise it would register a second copy alongside the disabled one. Take its id and you can trigger it
-on demand, or read what happened the last few times it fired:
+Exactly one row should come back, carrying the key. `--all` matters: without it the listing
+shows only *enabled* jobs, so a briefing someone disabled reads as missing and sends you looking
+for a registration failure that never happened. The registrar passes `--all` for the same
+reason. It has to see a disabled briefing to leave it disabled, and to retire a disabled copy an
+older image registered rather than leave it beside a new one. Take the id and you can trigger
+the briefing on demand, or read what happened the last few times it fired:
 
 ```bash
 docker exec hermes openclaw cron run <jobId>
@@ -845,9 +848,9 @@ docker exec hermes openclaw cron runs --id <jobId> --limit 50
 
 Automation mutations are served by the gateway scheduler and require the `operator.admin`
 permission, so the briefing cannot be registered before the gateway is up. The entrypoint
-forks a registrar just before `exec`ing the gateway: it waits for readiness, checks whether
-the job already exists, creates it if it does not, logs the outcome, and exits. The gateway
-remains PID 1.
+forks a registrar just before `exec`ing the gateway. It waits for readiness, declares the job,
+confirms that the listing shows it, retires any copy an older image registered, logs the
+outcome, and exits. The gateway remains PID 1.
 
 Registration is asymmetric on purpose. **A failure to register never stops the gateway** —
 chat access matters more than the briefing, and a container that refuses to start because a
@@ -861,9 +864,15 @@ docker logs hermes | grep '^cron:'
 |---|---|
 | `cron: waiting for gateway (up to <n> attempts)` | The registrar is up, polling for readiness |
 | `cron: registered morning-briefing <id>` | Created on this start |
-| `cron: morning-briefing already registered (<id>)` | Found; nothing was created |
+| `cron: updated morning-briefing <id>` | Existed; its schedule, timezone, prompt or delivery changed to match this start |
+| `cron: morning-briefing unchanged (<id>)` | Existed and already matched; nothing was written |
+| `cron: declared morning-briefing <id>; outcome unavailable` | In place and listed, but `create`'s output could not be read to say which of the three |
+| `cron: replaced unkeyed morning-briefing <id>` | A copy an older image registered was removed, after its replacement was listed |
+| `cron: could not remove unkeyed morning-briefing <id>: <error>; the next start will retry` | The new job is in place; until the old one goes, **both run** |
 | `cron: registration attempt <n>/<max> failed: <error>` | One attempt failed; the underlying message follows |
 | `cron: giving up after <n> attempts; briefing not scheduled (<why>)` | Bounded retries exhausted; **there is no briefing** |
+| `cron: giving up after <n> attempts; briefing left as it was (<why>)` | Bounded retries exhausted; the briefing that was there — declared, or an older copy — runs on its **previous** configuration |
+| `cron: giving up after <n> attempts; briefing declared but not confirmed (<why>)` | `create` reported success, but the listing never showed the job. Check with the command above |
 
 All three budgets must be positive whole numbers. The container refuses to start on anything
 else rather than accept it: a value bash cannot compare skips every iteration, and the
@@ -873,9 +882,33 @@ Retries bound how many attempts are made; `HERMES_CRON_CALL_TIMEOUT` bounds each
 needed — a gateway that accepts the connection and then stalls would otherwise hold the
 registrar open forever and emit none of the lines above.
 
-The job is looked up by name before it is created, so restarts do not accumulate duplicates.
-That holds for a single container against its own volume, which is what this image is for;
-two containers sharing one volume and racing to register are not defended against.
+### The environment decides, on every start
+
+`create` with a declaration key is an upsert: a job already carrying the key is converged in
+place, and a start where nothing differs writes nothing. So on every start:
+
+- `HERMES_CRON_SCHEDULE`, `HERMES_TIMEZONE`, `HERMES_BRIEFING_CHANNEL`/`HERMES_BRIEFING_TO` and
+  the image's prompt are written to the one job. Change a variable, recreate the container, and
+  the same job — same id, same run history — carries the new value.
+- Changes made with `openclaw cron edit` to any of those are replaced. Set the variable instead.
+- **A disabled briefing stays disabled.** `openclaw cron disable <id>` survives restarts and
+  upgrades; the registrar never re-enables it.
+- The briefing runs at exactly `HERMES_CRON_SCHEDULE`. The registrar declares it with `--exact`,
+  so an hourly schedule on the hour is not given OpenClaw's default random delay of up to five
+  minutes. (The flag is there because the pinned gateway otherwise rewrites the job on the first
+  start after every restart.)
+
+A deployment that registered the briefing before it had a key holds a `morning-briefing` with
+none, and a key cannot be added to an existing job. The first start of this image declares the
+keyed job **beside** it, waits until the listing shows the keyed one, and only then removes the
+old one. A store that held a briefing is never left without one. It carries a disabled briefing
+across as disabled, and with several old copies, the new one is enabled if any of them was. A
+job named `morning-briefing` that carries some other key is not the registrar's, and is left
+alone.
+
+Two containers sharing one volume are better off than they were: their declarations converge on
+one job under the scheduler's lock, rather than racing to create two. Two adoptions racing to
+remove the same old job leave one removal failing on an unknown id, which is logged and harmless.
 
 ### Delivery target
 

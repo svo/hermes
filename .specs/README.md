@@ -1,9 +1,10 @@
 # Specs
 
-Nine specifications. Seven derive from the adversarial review of the OpenClaw configuration;
+Ten specifications. Seven derive from the adversarial review of the OpenClaw configuration;
 008 and 009 were deferred out of 004 as its open questions were answered, and carry their
-findings with them. Each directory holds a `SPEC.md` (what and why) and a `PLAN.md` (how),
-following the `/specify` → `/plan` workflow. All nine are planned and landed.
+findings with them. 011 is a 003 defect found while specifying 010, a feature that is not in
+this directory yet. Each directory holds a `SPEC.md` (what and why) and a `PLAN.md` (how),
+following the `/specify` → `/plan` workflow. All ten are planned and landed.
 
 ## Template adaptation
 
@@ -46,6 +47,7 @@ failures come before the systemic fix.
 | 007 | [gateway-supply-chain-hardening](007-gateway-supply-chain-hardening/SPEC.md) | A3, D1, D2, D5 | Posture and stability |
 | 008 | [config-via-cli](008-config-via-cli/SPEC.md) | D2, D3–D6 | Dissolves the hand-written-key class 004 could only gate |
 | 009 | [channel-teardown](009-channel-teardown/SPEC.md) | A2g, B3d | Removing a token should remove the channel |
+| 011 | [briefing-converges](011-briefing-converges/SPEC.md) | R1–R8 (G10) | Numbered after 010, lands before it: 010's briefing step reaches existing deployments only through it |
 
 **008's `verify-locally` check has been run**, and it decided the shape of the plan. Two of its
 five findings changed verdict: D4 is falsified (`tools.exec.security` *is* in the schema, enum
@@ -71,6 +73,8 @@ fails until 001 and 005 land — see `006/PLAN.md` § Preconditions.
  ├──> 008   (needs 004's validate gate and phase ordering)
  └──> 009   (needs 004's phase 3 to leave a valid config for)
 007 (independent, but 007's pinning makes 006's CI deterministic)
+
+003 ──> 011
 ```
 
 - **005 depends on 001** — 001 introduces `sanitize_field()`; 005 consumes it.
@@ -80,6 +84,8 @@ fails until 001 and 005 land — see `006/PLAN.md` § Preconditions.
   relies on for a guaranteed-present `HERMES_CRON_SCHEDULE` and `HERMES_TIMEZONE`.
 - **008 and 009 depend on 004** — both sit inside the three-phase ordering it established, and
   both have to leave a config its phase 3 gate will accept.
+- **011 depends on 003** — it replaces the registrar's lookup and registration inside 003's
+  region, and changes 003's suite where 011 inverts it.
 
 ## Shared-file ownership
 
@@ -163,6 +169,7 @@ one covers the mode of a legacy file a failed migration leaves behind. 007's stu
 | `hermes-check` | VIP matching, counters, jq guards, date parsing | **005** |
 | `entrypoint.sh` | The first `node -e` block, now a payload builder piped into `openclaw config patch`, and the `tools.exec.security` write-if-absent immediately below it; and, inside 004's regions, the `exec-approvals.json` guard and the position of `redact_secrets` | **008** |
 | `entrypoint.sh` | The channel-teardown block between the Slack block and 007's gateway bind/auth block — after both channel blocks, because they write the file this one reads, and above 007's, because the permissions sweep has to stay downstream of every write | **009** |
+| `entrypoint.sh` | Inside 003's briefing registrar: `briefing_declaration_key`; `--exact` and the key on `briefing_create_args`; and `briefing_failure_reason`, `read_briefing_jobs`, `remove_unkeyed_briefings` and `register_briefing`, which replaced 003's lookup and registration. 003 keeps the prompt, the delivery checks, the budgets, the readiness wait, `briefing_one_line` and the fork. See `011/PLAN.md` | **011** |
 
 ## Evidence and confidence
 

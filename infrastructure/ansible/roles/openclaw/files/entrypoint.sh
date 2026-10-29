@@ -1401,6 +1401,12 @@ echo 'config: validated'
 
 briefing_job_name='morning-briefing'
 
+# The key the briefing is declared under. `automations create` with a key is an
+# upsert, so each start converges the one job carrying it instead of adding
+# another. The gateway reserves `heartbeat-task:` and `skill-collection-review:`
+# for its own jobs and refuses a create under either; this begins with neither.
+briefing_declaration_key='hermes:morning-briefing'
+
 # The port to probe, read from the config onboarding wrote rather than
 # repeated as a literal — 007 owns the --port flags and would not know a second
 # copy existed. `openclaw gateway health` is the documented port-targeted
@@ -1514,6 +1520,21 @@ if [ -n "${HERMES_BRIEFING_CHANNEL:-}" ]; then
   )
 fi
 
+# Declared rather than merely created: with the key, a changed schedule,
+# timezone, prompt or target reaches the job on the next start, where a lookup
+# by name would find the old job and stop.
+#
+# --exact is not decoration. With no explicit stagger stored, the pinned
+# gateway counts the first unchanged declaration after every restart as a
+# change: it writes the job and reports it updated (011's probe, B2). Without
+# the flag, every start would write, and log `updated` whether or not anything
+# had. It also pins the briefing to exactly HERMES_CRON_SCHEDULE: an hourly
+# schedule on the hour would otherwise be staggered by up to five minutes.
+briefing_create_args+=(
+  --exact
+  --declaration-key "$briefing_declaration_key"
+)
+
 # One line per logged event. A captured error is a whole stream, and its
 # continuation lines would reach the container log with no `cron:` prefix —
 # so `docker logs hermes | grep '^cron:'`, which README documents, would show
@@ -1548,112 +1569,252 @@ wait_for_gateway() {
   return 1
 }
 
-# Look the briefing up by name.
-#   0  present — briefing_job_id holds its id, or is empty when the listing
-#      carried none this recognised
-#   1  absent
-#   2  the list could not be read; briefing_lookup_error says why
+# Why an openclaw call failed, on one line. A refused call prints
+# {"ok": false, "error": {"message": …}} on stdout, and repeats the reason on
+# stderr between banner lines, after the --agent warning when it is a create
+# (011's probe, B7 and B9). So stdout's message is the clean one. A call that
+# timed out prints no message at all, and its stderr can hold nothing but that
+# warning, so it is named before stderr is read. Then stderr, for a failure
+# that never got as far as JSON, such as an unknown option; then whatever
+# stdout held; then the exit status.
 #
-# --json is documented for `automations get` and `automations runs`, not for
-# `list`, and the envelope it returns is not documented at all. Neither is
-# assumed: the traversal accepts a bare array or any wrapper and reads id,
-# jobId or job_id, and a listing that does not parse falls back to a presence
-# check on the plain text. Presence is what stops a restart duplicating the
-# job; the id is only ever used for a log line.
-lookup_briefing_job() {
-  local listing lookup_status=0
+#   briefing_failure_reason <stdout> <exit status>
+briefing_failure_reason() {
+  local message
 
-  briefing_job_id=""
+  message="$(
+    BRIEFING_OUTPUT="$1" node -e "
+      try {
+        const parsed = JSON.parse(process.env.BRIEFING_OUTPUT);
+        const message = parsed && parsed.ok === false && parsed.error && parsed.error.message;
+        if (typeof message === 'string' && message !== '') {
+          process.stdout.write(message);
+          process.exit(0);
+        }
+      } catch {}
+      process.exit(1);
+    " 2>/dev/null
+  )" || message=''
+
+  if [ -z "$message" ] && [ "$2" -eq 124 ]; then
+    message='timed out'
+  fi
+  if [ -z "$message" ]; then
+    message="$(cat -- "$briefing_stderr" 2>/dev/null || true)"
+  fi
+  if [ -z "$message" ]; then
+    message="$1"
+  fi
+  if [ -z "$message" ]; then
+    message="openclaw exited $2 with no output"
+  fi
+  briefing_one_line "$message"
+}
+
+# The briefing's jobs, one line each in briefing_jobs:
+#   ours <id> <enabled|disabled>     it carries the key, whatever it is named —
+#                                    a declaration leaves the name alone, so an
+#                                    operator's rename is still the briefing
+#   unkeyed <id> <enabled|disabled>  it is named morning-briefing and predates
+#                                    the key
+# A job by that name carrying any other key is not this registrar's, and is
+# not listed at all.
+#
+# Returns 0 when the listing was read (briefing_jobs may then be empty), or 2
+# when it could not be, with briefing_lookup_error saying why.
+#
+# Strict, where 003's lookup was tolerant. That lookup accepted any envelope,
+# guessed at key names, and fell back to the plain listing, because the
+# envelope was undocumented and presence was the only question. Both reasons
+# are gone: 011's probe pinned `{ "jobs": [ … ] }` against the binary, and the
+# question is now which jobs carry the key, which only the JSON says. A
+# listing of any other shape permits no write. Read as "nothing unkeyed", it
+# would declare a second briefing beside the first. That includes one that
+# says it is a partial page: the pinned CLI reads every page before it prints.
+#
+# The listing reaches node on stdin, not through the environment as the small
+# outputs elsewhere do. Every job's full definition is in it, and Linux caps a
+# single environment string at 128 KiB — about a hundred automations.
+read_briefing_jobs() {
+  local listing list_status=0 parse_status=0
+
+  briefing_jobs=""
   briefing_lookup_error=""
 
-  if listing="$(timeout "$briefing_call_timeout" openclaw automations list --all --json 2>/dev/null)"; then
-    briefing_job_id="$(
-      BRIEFING_LISTING="$listing" BRIEFING_NAME="$briefing_job_name" node -e "
-        const name = process.env.BRIEFING_NAME;
+  listing="$(timeout "$briefing_call_timeout" openclaw automations list --all --json 2>"$briefing_stderr")" ||
+    list_status=$?
+  if [ "$list_status" -ne 0 ]; then
+    briefing_lookup_error="$(briefing_failure_reason "$listing" "$list_status")"
+    return 2
+  fi
+
+  briefing_jobs="$(
+    printf '%s' "$listing" |
+      BRIEFING_NAME="$briefing_job_name" BRIEFING_KEY="$briefing_declaration_key" node -e "
         let listing;
         try {
-          listing = JSON.parse(process.env.BRIEFING_LISTING);
+          listing = JSON.parse(require('fs').readFileSync(0, 'utf8'));
         } catch {
           process.exit(2);
         }
-        const found = [];
-        const walk = (node) => {
-          if (Array.isArray(node)) return node.forEach(walk);
-          if (node === null || typeof node !== 'object') return;
-          const candidate = node.name ?? node.jobName ?? node.title;
-          if (candidate === name) found.push(node.id ?? node.jobId ?? node.job_id ?? '');
-          Object.values(node).forEach(walk);
-        };
-        walk(listing);
-        if (found.length === 0) process.exit(1);
-        process.stdout.write(String(found[0]));
+        const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+        if (!isObject(listing)) process.exit(2);
+        if (!Array.isArray(listing.jobs)) process.exit(2);
+        if (listing.hasMore === true) process.exit(2);
+        const rows = listing.jobs;
+        const wellFormed = (row) => isObject(row) && typeof row.id === 'string' && row.id !== '' &&
+          typeof row.name === 'string';
+        if (!rows.every(wellFormed)) process.exit(2);
+
+        for (const row of rows) {
+          const ours = row.declarationKey === process.env.BRIEFING_KEY;
+          const unkeyed = row.name === process.env.BRIEFING_NAME && (row.declarationKey === undefined || row.declarationKey === null);
+          if (!ours && !unkeyed) continue;
+          // One word per field, because the shell reads these lines back.
+          if (/\s/.test(row.id)) process.exit(2);
+          const state = row.enabled === false ? 'disabled' : 'enabled';
+          console.log((ours ? 'ours ' : 'unkeyed ') + row.id + ' ' + state);
+        }
       " 2>/dev/null
-    )" || lookup_status=$?
+  )" || parse_status=$?
 
-    if [ "$lookup_status" -eq 0 ]; then
-      return 0
-    fi
+  if [ "$parse_status" -ne 0 ]; then
+    briefing_jobs=""
+    briefing_lookup_error='automations list --json did not print the { "jobs": [ ... ] } envelope this reads'
+    return 2
   fi
-
-  # Reached when --json was rejected, when the envelope did not parse, and —
-  # the case that matters — when it parsed and nothing in it looked like the
-  # job. The envelope is undocumented, so "no key I recognised carried that
-  # name" is not the same finding as "the job is not there". The plain listing
-  # gets a second opinion before anything is created; without it, one wrong
-  # guess at a key name would register a duplicate on every start forever.
-  if listing="$(timeout "$briefing_call_timeout" openclaw automations list --all 2>&1)"; then
-    case "$listing" in
-      *"$briefing_job_name"*) return 0 ;;
-      *) return 1 ;;
-    esac
-  fi
-
-  briefing_lookup_error="$listing"
-  return 2
+  return 0
 }
 
-# Query before create. A blind create would accumulate a duplicate on every
-# restart if the store does not reject same-name jobs, and nothing upstream
-# says it does.
+# Remove each unkeyed job by id, once the declared one is listed. A failure is
+# logged and does not fail the registration: the declared job is in place, and
+# the next start's read finds the leftover and tries again.
+remove_unkeyed_briefings() {
+  local id remove_output remove_status
+
+  for id in "$@"; do
+    remove_status=0
+    remove_output="$(timeout "$briefing_call_timeout" openclaw automations remove "$id" 2>"$briefing_stderr")" ||
+      remove_status=$?
+    if [ "$remove_status" -eq 0 ]; then
+      echo "cron: replaced unkeyed ${briefing_job_name} ${id}"
+    else
+      echo "cron: could not remove unkeyed ${briefing_job_name} ${id}: $(briefing_failure_reason "$remove_output" "$remove_status"); the next start will retry" >&2
+    fi
+  done
+  return 0
+}
+
+# Read, declare, read again, then retire what predates the key. Each attempt:
+#
+#   read ── failed or not the pinned shape ──> retry; nothing is written
+#    ├─ not yet declared this start ──> declare ── failed ──> retry the declare
+#    │                                     └─ succeeded ──> read again, no sleep
+#    └─ declared ──> is a job carrying the key listed?
+#                     ├─ no  ──> retry the read only
+#                     └─ yes ──> remove each unkeyed job, then one terminal line
+#
+# Declaring first and removing second is what keeps a store that held a
+# briefing from ever holding none. Removal waits for the declared job to be
+# listed, not for create to say it worked.
 register_briefing() {
-  local attempt=1 lookup_status create_output reason='' created='no'
+  local attempt=1 read_status reason='' declared='no' seen_briefing='no'
+  local declare_output='' declare_status outcome kind id state
+  local ours_id ours_count unkeyed_enabled
+  local -a unkeyed_ids declare_args
+
+  # create's stdout is parsed, and the CLI warns on stderr on every create, so
+  # the two are read apart. stderr is kept only to explain a failure.
+  if ! briefing_stderr="$(mktemp)"; then
+    # Nothing was read or written, so whatever the store held, it still does.
+    echo "cron: giving up after 0 attempts; briefing left as it was (could not create a file for openclaw's stderr)" >&2
+    return 1
+  fi
+  trap 'rm -f -- "$briefing_stderr"' EXIT
 
   while [ "$attempt" -le "$briefing_register_attempts" ]; do
     # Assigned through || so that errexit, which is in force here, does not
-    # treat "the briefing is not registered yet" as a fatal error.
-    lookup_status=0
-    lookup_briefing_job || lookup_status=$?
+    # treat a listing it could not read as a fatal error.
+    read_status=0
+    read_briefing_jobs || read_status=$?
 
-    if [ "$lookup_status" -eq 0 ]; then
-      if [ "$created" = 'yes' ]; then
-        echo "cron: registered ${briefing_job_name} ${briefing_job_id:-id unavailable}"
-      else
-        echo "cron: ${briefing_job_name} already registered (${briefing_job_id:-id unavailable})"
-      fi
-      return 0
-    fi
-
-    if [ "$lookup_status" -eq 2 ]; then
+    if [ "$read_status" -ne 0 ]; then
       reason="could not list automations: $(briefing_one_line "$briefing_lookup_error")"
-    elif [ "$created" = 'yes' ]; then
-      # create has already reported success once. Creating again because the
-      # listing still does not show the job is how one unverifiable create
-      # becomes one automation per attempt, and then N per restart — exactly
-      # the duplication this block exists to prevent. Only the lookup is
-      # retried, in case the store is slow to reflect the write.
-      reason="create reported success but no automation named ${briefing_job_name} is listed"
-      if [ -n "$briefing_lookup_error" ]; then
-        reason="${reason} ($(briefing_one_line "$briefing_lookup_error"))"
-      fi
-    elif create_output="$(timeout "$briefing_create_timeout" openclaw "${briefing_create_args[@]}" 2>&1)"; then
-      # What `create` prints on success is not documented, so it is not
-      # parsed. Registration counts as done when the job appears in the
-      # listing, which is also what proves it round-tripped — so go straight
-      # back to the lookup rather than sleeping first.
-      created='yes'
-      continue
     else
-      reason="$(briefing_one_line "$create_output")"
+      ours_id=''
+      ours_count=0
+      unkeyed_ids=()
+      unkeyed_enabled=0
+      while read -r kind id state; do
+        case "$kind" in
+          ours)
+            ours_count=$((ours_count + 1))
+            [ -n "$ours_id" ] || ours_id="$id"
+            ;;
+          unkeyed)
+            unkeyed_ids+=("$id")
+            if [ "$state" = 'enabled' ]; then
+              unkeyed_enabled=$((unkeyed_enabled + 1))
+            fi
+            ;;
+        esac
+      done <<< "$briefing_jobs"
+      if [ "$ours_count" -gt 0 ] || [ "${#unkeyed_ids[@]}" -gt 0 ]; then
+        seen_briefing='yes'
+      fi
+
+      if [ "$declared" = 'no' ]; then
+        declare_args=("${briefing_create_args[@]}")
+        # Adoption carries an operator's "off" across, and only adoption:
+        # where a job with the key exists, the gateway keeps whatever
+        # enabled state it has unless --disabled says otherwise. With several
+        # unkeyed jobs, the declared one is enabled if any of them was.
+        if [ "$ours_count" -eq 0 ] && [ "${#unkeyed_ids[@]}" -gt 0 ] && [ "$unkeyed_enabled" -eq 0 ]; then
+          declare_args+=(--disabled)
+        fi
+
+        declare_status=0
+        declare_output="$(timeout "$briefing_create_timeout" openclaw "${declare_args[@]}" 2>"$briefing_stderr")" ||
+          declare_status=$?
+        if [ "$declare_status" -eq 0 ]; then
+          # At most once per start. A declaration is idempotent by key, but
+          # that rests on the gateway; if it were wrong, retrying would cost
+          # one job per attempt and N per restart, which is what 003 measured.
+          # Only the read is retried from here, so go straight back to it.
+          declared='yes'
+          continue
+        fi
+        reason="$(briefing_failure_reason "$declare_output" "$declare_status")"
+      elif [ "$ours_count" -gt 0 ]; then
+        remove_unkeyed_briefings "${unkeyed_ids[@]}"
+
+        # The outcome is create's to report, and the id the listing's, so all
+        # four lines can name the job.
+        outcome="$(
+          BRIEFING_OUTPUT="$declare_output" node -e "
+            try {
+              const result = JSON.parse(process.env.BRIEFING_OUTPUT);
+              if (result && result.created === true) {
+                process.stdout.write('created');
+              } else if (result && result.created === false && result.updated === true) {
+                process.stdout.write('updated');
+              } else if (result && result.created === false && result.updated === false) {
+                process.stdout.write('unchanged');
+              }
+            } catch {}
+          " 2>/dev/null
+        )" || outcome=''
+
+        case "$outcome" in
+          created) echo "cron: registered ${briefing_job_name} ${ours_id}" ;;
+          updated) echo "cron: updated ${briefing_job_name} ${ours_id}" ;;
+          unchanged) echo "cron: ${briefing_job_name} unchanged (${ours_id})" ;;
+          *) echo "cron: declared ${briefing_job_name} ${ours_id}; outcome unavailable" ;;
+        esac
+        return 0
+      else
+        reason="declaration reported success but no automation carries ${briefing_declaration_key}"
+      fi
     fi
 
     echo "cron: registration attempt ${attempt}/${briefing_register_attempts} failed: ${reason}" >&2
@@ -1664,7 +1825,18 @@ register_briefing() {
     attempt=$((attempt + 1))
   done
 
-  echo "cron: giving up after ${briefing_register_attempts} attempts; briefing not scheduled (${reason})" >&2
+  # The suffix says what is true of the store, as far as this start knows.
+  # After create said yes, a declared job may well exist; only the listing
+  # never showed it. Before that, a failed declaration leaves any briefing
+  # the listing did show — declared or older — running as it was. Only when
+  # neither happened is there certainly no briefing.
+  if [ "$declared" = 'yes' ]; then
+    echo "cron: giving up after ${briefing_register_attempts} attempts; briefing declared but not confirmed (${reason})" >&2
+  elif [ "$seen_briefing" = 'yes' ]; then
+    echo "cron: giving up after ${briefing_register_attempts} attempts; briefing left as it was (${reason})" >&2
+  else
+    echo "cron: giving up after ${briefing_register_attempts} attempts; briefing not scheduled (${reason})" >&2
+  fi
   return 1
 }
 
