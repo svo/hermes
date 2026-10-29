@@ -15,7 +15,7 @@ automation store that stub keeps.
 | `registration-test` | The accepted paths — what lands in the automation store, and what a restart does not do a second time. |
 | `failure-test` | The rejected and failing ones — exit status, log line, and that the gateway starts anyway. |
 | `mutation-check` | Sensitivity check. Not part of `run`; see below. |
-| `stub-openclaw` | Fake `openclaw`: `onboard`, `gateway`, `gateway health`, `automations list`, `automations create`. |
+| `stub-openclaw` | Fake `openclaw`: `onboard`, `gateway`, `gateway health`, `automations list`, `automations create`, `automations remove`. |
 
 Forty-two cases: 23 in `registration-test`, 19 in `failure-test`.
 
@@ -52,6 +52,9 @@ for the registrar to finish:
 `cron: registration attempt <n>/<max> failed: <error>` is not terminal — it is the per-attempt
 line, and more follow.
 
+The harness's pattern also matches `updated`, `unchanged` and `declared`, the terminal lines
+011's registrar adds. That way the stubs could land before the registrar did.
+
 A run that exits non-zero never reached the fork, so the harness does not wait for it.
 
 ## The stub
@@ -73,6 +76,29 @@ Two of its behaviours are deliberate rather than convenient:
   second one.
 
 The switches the cases drive it with are listed at the top of `stub-openclaw`.
+
+### The declared CLI
+
+The stub also models what 011 needs: `create --declaration-key` as an upsert by key,
+`--exact`, `--disabled`, `remove <id>`, and the refusals. It follows what 011's probe recorded
+against the pinned version ([011 PLAN](../../011-briefing-converges/PLAN.md) § The probe):
+
+- `list --json` prints the `{ "jobs": [ … ] }` envelope by default, and a row carries
+  `declarationKey` only when it has one.
+- Every create warns on stderr that no `--agent` was given.
+- A job stored with no stagger writes, and reports `updated: true`, on its first unchanged
+  declaration in each run. That is B2, the upstream defect `--exact` avoids.
+- `writes` in the store directory gets one line per real write, so "nothing was written" can
+  be counted.
+
+The current registrar never sends a key, so its cases are unaffected. They still pass, with
+two exceptions kept deliberately until 011 replaces the behaviour they pin:
+
+- `OPENCLAW_STUB_CREATE_FAILS` still fails on plain stderr, not in the refusal shape the
+  pinned version uses. The registrar merges create's streams into its failure reason, and
+  `should_keep_a_multi_line_error_on_one_log_line` pins that reason's text.
+- `OPENCLAW_STUB_LIST_SHAPE=wrapped` stays, for the two cases that drive it. It now differs
+  from the default envelope only by an extra key.
 
 ### Two shapes worth knowing about
 
@@ -99,12 +125,13 @@ rather than a fallback only for when `--json` fails:
 ### What the stub cannot tell you
 
 The stub answers *given this CLI contract, does the entrypoint do the right thing*. It cannot
-answer whether the contract is right, and two parts of it are not doc-verified upstream:
-`automations list --json`'s envelope, and whether a CLI call inside the container holds
-`operator.admin`. The registrar is written to survive being wrong about the first — hence
+answer whether the contract is right. When 003 shipped, two parts of it were not doc-verified
+upstream: `automations list --json`'s envelope, and whether a CLI call inside the container
+holds `operator.admin`. The registrar is written to survive being wrong about the first — hence
 `should_register_the_briefing_when_the_listing_is_object_wrapped` and
 `..._when_list_json_is_unavailable`, which drive the tolerant paths — and to fail loudly on
-the second.
+the second. 011's probe has since pinned the envelope against the binary, and the stub's
+default now prints it.
 
 ## Sensitivity
 

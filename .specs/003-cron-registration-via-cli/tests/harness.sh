@@ -191,13 +191,17 @@ run_entrypoint() {
 # configuration error exits before the fork) falls through after the timeout
 # rather than hanging.
 #
+# The pattern also names the terminal lines 011's declaring registrar emits —
+# `updated`, `unchanged`, `declared` — so that the stubs and the registrar can
+# land in separate commits, each one green.
+#
 # HARNESS_REGISTRAR_TIMEOUT bounds the wait in twentieths of a second. The
 # default is generous; the sensitivity run lowers it, because an entrypoint
 # with no registrar in it waits out the whole budget on every case.
 wait_for_registrar() {
   local run_dir="$1" waited=0 limit="${HARNESS_REGISTRAR_TIMEOUT:-600}"
   while [ "$waited" -lt "$limit" ]; do
-    if grep -Eq '^cron: (registered |.* already registered |giving up )' \
+    if grep -Eq '^cron: (registered |updated |.* unchanged |declared |.* already registered |giving up )' \
       "${run_dir}/stdout" "${run_dir}/stderr" 2>/dev/null; then
       return 0
     fi
@@ -249,6 +253,26 @@ stub_call_count() {
   # stub_call_count <verb>
   if [ -f "${RUN_DIR}/calls-$1" ]; then
     wc -l < "${RUN_DIR}/calls-$1" | tr -d ' '
+  else
+    printf '0\n'
+  fi
+}
+
+# Every `openclaw automations` call this run made, in order, one per line as
+# `<verb> <json-argv>`. Ordering is what "declare before remove" is about, and
+# the per-verb files above cannot show it.
+stub_call_order() {
+  if [ -f "${RUN_DIR}/call-order" ]; then
+    cat "${RUN_DIR}/call-order"
+  fi
+}
+
+# How many times the stub has written to the store, across every run that
+# shared it. The stub counts a write only when one really happened, so an
+# unchanged declaration leaves this where it was.
+store_write_count() {
+  if [ -f "${RUN_STORE}/writes" ]; then
+    wc -l < "${RUN_STORE}/writes" | tr -d ' '
   else
     printf '0\n'
   fi

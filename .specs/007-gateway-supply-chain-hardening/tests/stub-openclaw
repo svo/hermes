@@ -177,10 +177,23 @@ case "${1:-}" in
     ;;
 
   automations | cron)
-    # 003's registrar only has to finish quietly here. Reporting the briefing
-    # as already present makes it log one line and exit.
+    # 003's registrar only has to finish quietly here. The briefing is listed
+    # as already declared, under the key 011 declares it with, so the
+    # registrar logs one line and exits. A declaration converges onto that job
+    # and changes nothing. Without --json the listing is the plain one, as the
+    # real CLI's is.
+    briefing_job='{"id":"job-0001","name":"morning-briefing","declarationKey":"hermes:morning-briefing","enabled":true}'
     case "${2:-}" in
-      list) printf 'job-0001  morning-briefing  0 8 * * *\n'; exit 0 ;;
+      list)
+        case " ${*:3} " in
+          *' --json '*)
+            printf '{"jobs":[%s],"total":1,"offset":0,"limit":200,"hasMore":false,"nextOffset":null}\n' "$briefing_job"
+            ;;
+          *) printf 'job-0001  morning-briefing  0 8 * * *\n' ;;
+        esac
+        exit 0
+        ;;
+      create) printf '{"created":false,"updated":false,"job":%s}\n' "$briefing_job"; exit 0 ;;
       *) usage "$@" ;;
     esac
     ;;

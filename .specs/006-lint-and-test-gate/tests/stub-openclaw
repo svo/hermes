@@ -176,42 +176,81 @@ SEED
 # entrypoint's registrar treats "created but not listed" as a failure it must
 # not retry — a store that forgot would turn one create into an error path the
 # check would then be measuring instead of the config.
+#
+# One file per job, named after the job, holding the two fields a listing
+# reports beyond the name: `enabled`, and the declaration key when there is
+# one. 011's registrar declares the briefing under a key and tells its own job
+# from an older one by that key alone, so the key has to round-trip too. A
+# keyed create is an upsert by key, as upstream's is; what a declaration
+# converges is not modelled, because nothing here asks. 003's stub models it.
+#
+# A name is a filename here, so two jobs cannot share one. Upstream allows it,
+# and a create that would need it is refused rather than overwriting the first.
 automation_id() {
   printf 'stub-job-%s' "$1"
 }
 
+# automation_field <name> <field>. Empty when the job does not carry it.
+automation_field() {
+  local field value
+  while IFS='=' read -r field value; do
+    if [ "$field" = "$2" ]; then
+      printf '%s' "$value"
+      return 0
+    fi
+  done < "${automations_dir}/$1"
+}
+
+# One row, in the shape `list --json` and `create` print it. Hand-built rather
+# than piped through a JSON tool: the stub has to run in the builder image,
+# which carries no guarantee of `jq`. The name and key are checked for JSON's
+# two special characters when they are stored, so nothing here needs escaping.
+automation_json() {
+  local name="$1" key
+  key="$(automation_field "$name" declarationKey)"
+  printf '{"id":"%s","name":"%s",' "$(automation_id "$name")" "$name"
+  if [ -n "$key" ]; then
+    printf '"declarationKey":"%s",' "$key"
+  fi
+  printf '"enabled":%s,"schedule":"stub"}' "$(automation_field "$name" enabled)"
+}
+
 cmd_automations_list() {
-  local json='no' path name first='yes'
+  local all='no' json='no' path name first='yes'
   local -a names=()
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --all) all='yes' ;;
       --json) json='yes' ;;
+      *) unimplemented "automations list $*" ;;
     esac
     shift
   done
 
   # A glob rather than `ls`: a job name is a filename here, and parsing a
-  # listing would be one more place for a name to be mangled.
+  # listing would be one more place for a name to be mangled. Disabled jobs
+  # are listed only with --all, as upstream's are.
   for path in "${automations_dir}"/*; do
     if [ -e "$path" ]; then
-      names+=("${path##*/}")
+      name="${path##*/}"
+      if [ "$all" = 'yes' ] || [ "$(automation_field "$name" enabled)" != 'false' ]; then
+        names+=("$name")
+      fi
     fi
   done
 
   if [ "$json" = 'yes' ]; then
-    # Hand-built rather than piped through a JSON tool: the stub has to run in
-    # the builder image, which carries no guarantee of `jq`, and the shape is
-    # three fields wide.
-    printf '['
+    # The envelope the pinned CLI prints, which 011's probe recorded.
+    printf '{"jobs":['
     for name in "${names[@]}"; do
       if [ "$first" = 'no' ]; then
         printf ','
       fi
       first='no'
-      printf '{"id":"%s","name":"%s","schedule":"stub"}' "$(automation_id "$name")" "$name"
+      automation_json "$name"
     done
-    printf ']\n'
+    printf '],"total":%d,"offset":0,"limit":200,"hasMore":false,"nextOffset":null}\n' "${#names[@]}"
     return 0
   fi
 
@@ -225,11 +264,16 @@ cmd_automations_list() {
 }
 
 cmd_automations_create() {
-  local name=''
+  local name='' key='' enabled='true' existing_key
 
+  # One shift per iteration, as in cmd_onboard: a flag's value is read here
+  # and passed over on the next pass, and the schedule and prompt are
+  # positionals nothing here needs.
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --name) name="${2:-}" ;;
+      --declaration-key) key="${2:-}" ;;
+      --disabled) enabled='false' ;;
     esac
     shift
   done
@@ -238,15 +282,42 @@ cmd_automations_create() {
     unimplemented 'automations create with no --name'
   fi
   # A name is a filename here, so a separator in it would write outside the
-  # store. The entrypoint's name is a constant; anything else is a bug worth
+  # store, and a quote or backslash would break the hand-built JSON. The
+  # entrypoint's name and key are constants; anything else is a bug worth
   # stopping on rather than silently mangling.
   case "$name" in
-    */*|.|..) unimplemented "automations create with unusable --name '${name}'" ;;
+    */*|.|..|*'"'*|*\\*) unimplemented "automations create with unusable --name '${name}'" ;;
+  esac
+  case "$key" in
+    *'"'*|*\\*) unimplemented "automations create with unusable --declaration-key '${key}'" ;;
   esac
 
   mkdir -p "$automations_dir"
-  printf '%s\n' "$name" > "${automations_dir}/${name}"
-  printf 'Created automation %s (%s)\n' "$name" "$(automation_id "$name")"
+  if [ -e "${automations_dir}/${name}" ]; then
+    existing_key="$(automation_field "$name" declarationKey)"
+    # The declared job already exists, so the upsert converges onto it.
+    # Nothing it converges is stored here, so nothing changes.
+    if [ -n "$key" ] && [ "$key" = "$existing_key" ]; then
+      printf '{"created":false,"updated":false,"job":%s}\n' "$(automation_json "$name")"
+      return 0
+    fi
+    unimplemented "automations create of a second job named '${name}'"
+  fi
+
+  {
+    if [ -n "$key" ]; then
+      printf 'declarationKey=%s\n' "$key"
+    fi
+    printf 'enabled=%s\n' "$enabled"
+  } > "${automations_dir}/${name}"
+
+  # Upstream prints the job itself for an undeclared create, and an outcome
+  # wrapping it for a declared one.
+  if [ -n "$key" ]; then
+    printf '{"created":true,"job":%s}\n' "$(automation_json "$name")"
+  else
+    printf '%s\n' "$(automation_json "$name")"
+  fi
 }
 
 cmd_automations() {

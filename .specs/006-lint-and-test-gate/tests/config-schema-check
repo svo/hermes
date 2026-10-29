@@ -273,7 +273,7 @@ run_entrypoint() {
 wait_for_registrar() {
   local tick=0
   while [ "$tick" -lt "$REGISTRAR_TICKS" ]; do
-    if grep -qE '^cron: (registered |giving up|.* already registered)' "$run_output"; then
+    if grep -qE '^cron: (registered |updated |.* unchanged |declared |.* already registered |giving up)' "$run_output"; then
       return 0
     fi
     sleep "$REGISTRAR_TICK_SECONDS"
