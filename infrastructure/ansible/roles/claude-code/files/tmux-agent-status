@@ -1,0 +1,28 @@
+#!/bin/sh
+
+exec >/dev/null 2>&1
+
+case $1 in
+waiting) signal="waiting ${2:-Agent}" ;;
+clear) signal=clear ;;
+*) exit 0 ;;
+esac
+
+process=$$
+while :; do
+    read -r parent terminal <<EOT
+$(ps -o ppid=,tty= -p "$process")
+EOT
+    case $terminal in
+    '' | '?' | '??' | -) ;;
+    *) break ;;
+    esac
+    [ "${parent:-0}" -gt 0 ] || exit 0
+    process=$parent
+done
+
+[ -w "/dev/$terminal" ] || exit 0
+
+printf '\033[22;2t\033]2;tmux-agent-status %s\033\\\033[23;2t' "$signal" >"/dev/$terminal"
+
+exit 0

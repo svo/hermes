@@ -22,6 +22,7 @@
   ansible.builtin.apt:
     name:
       - jq
+      - procps
       - ripgrep
       - fd-find
       - tree
@@ -59,3 +60,53 @@
     name: gh
     state: present
   become: true
+
+- name: Create tmux-agent-status install directory
+  ansible.builtin.file:
+    path: "{{ claude_code_tmux_agent_status_path | dirname }}"
+    state: directory
+    mode: '0755'
+
+- name: Install tmux-agent-status agent waiting signal
+  ansible.builtin.copy:
+    src: tmux-agent-status
+    dest: "{{ claude_code_tmux_agent_status_path }}"
+    mode: '0755'
+
+- name: Create Claude Code configuration directory
+  ansible.builtin.file:
+    path: "{{ claude_code_settings_path | dirname }}"
+    state: directory
+    mode: '0755'
+
+- name: Check Claude Code user settings file
+  ansible.builtin.stat:
+    path: "{{ claude_code_settings_path }}"
+  register: claude_code_settings_stat
+
+- name: Read Claude Code user settings file
+  ansible.builtin.slurp:
+    src: "{{ claude_code_settings_path }}"
+  register: claude_code_settings_file
+  when: claude_code_settings_stat.stat.exists
+
+- name: Merge Claude Code tmux-agent-status hooks
+  ansible.builtin.command:
+    argv:
+      - jq
+      - --null-input
+      - --arg
+      - script
+      - "{{ claude_code_tmux_agent_status_path }}"
+      - "{{ lookup('ansible.builtin.file', 'claude-code-hooks.jq') }}"
+    stdin: "{{ claude_code_settings_file.content | default('') | b64decode | default('{}', true) }}"
+  register: claude_code_settings_merged
+  changed_when: false
+  check_mode: false
+
+- name: Configure Claude Code tmux-agent-status hooks
+  ansible.builtin.copy:
+    content: "{{ claude_code_settings_merged.stdout }}\n"
+    dest: "{{ claude_code_settings_path }}"
+    mode: "{{ claude_code_settings_stat.stat.mode | default('0644') }}"
+  when: claude_code_settings_merged.stdout | length > 0
