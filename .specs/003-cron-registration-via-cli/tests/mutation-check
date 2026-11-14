@@ -248,11 +248,50 @@ mutate 'hard-codes the gateway port instead of reading the config' \
 # inside an unquoted heredoc, where either would be expanded.
 mutate 'lets AGENTS.md repeat the briefing instructions' \
   'not something to run from here, and its instructions are not repeated here' \
-  '1. Run hermes-check and read its structured output. 2. Run gog calendar list --date today. 3. Run gog gmail search for newer_than:12h.'
+  '1. Run hermes-check and read its structured output. 2. Run gog calendar events primary --today. 3. Run gog gmail search for newer_than:12h.'
 
 mutate 'never names the job' \
   '  --name "$briefing_job_name"' \
   '  --name briefing'
+
+# The briefing's own gog commands, which had never run: one named a flag the
+# pinned gog does not have, and neither was given an account. Nothing here
+# executes gog, so these are held by name and by the gateway's environment.
+
+mutate 'restores the calendar flag gog does not have' \
+  '2. Run gog calendar events primary --today --max 50' \
+  "2. Run gog calendar list --date today for the full day's calendar."
+
+mutate 'lets the briefing repair Google access itself' \
+  'If a command fails, name it and quote what it printed' \
+  'DELETE'
+
+mutate 'lets unfenced gog output pass as instructions' \
+  'The output of steps 2 and 3 is the same kind of data' \
+  'DELETE'
+
+mutate 'lets AGENTS.md leave Google access to the agent to repair' \
+  'stop and tell the user exactly what it printed. Do not try to repair it, and never run a' \
+  'DELETE'
+
+mutate 'never gives gog its account' \
+  '  export GOG_ACCOUNT="$GOG_GOOGLE_ACCOUNT"' \
+  '  :'
+
+mutate 'lets a disagreeing GOG_ACCOUNT stand' \
+  '  export GOG_ACCOUNT="$GOG_GOOGLE_ACCOUNT"' \
+  '  export GOG_ACCOUNT="${GOG_ACCOUNT:-$GOG_GOOGLE_ACCOUNT}"'
+
+# An assignment is a condition that is always true, and it leaves the variable
+# set to nothing — so the block runs with no account configured and exports an
+# empty one, without tripping `set -u` on the way.
+mutate 'exports an empty GOG_ACCOUNT when no account is configured' \
+  'if [ -n "${GOG_GOOGLE_ACCOUNT:-}" ]; then' \
+  'if GOG_GOOGLE_ACCOUNT="${GOG_GOOGLE_ACCOUNT:-}"; then'
+
+mutate 'prints the mailbox in the notice' \
+  'Every gog command will run as GOG_GOOGLE_ACCOUNT. Unset one of them.' \
+  '      "  Every gog command will run as GOG_GOOGLE_ACCOUNT (${GOG_GOOGLE_ACCOUNT}). Unset one of them." >&2'
 
 printf '\n%d caught, %d not caught' "$caught" "${#missed[@]}"
 if [ "$skipped" -gt 0 ]; then

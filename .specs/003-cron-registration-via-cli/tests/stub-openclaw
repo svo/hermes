@@ -4,7 +4,8 @@
 # cases use. No network, no credentials, no image.
 #
 #   onboard             writes the minimal config real onboarding leaves behind
-#   gateway             records that it was reached, then exits 0 instead of serving
+#   gateway             records that it was reached, and the GOG_ACCOUNT it was
+#                       started with, then exits 0 instead of serving
 #   gateway health      the readiness probe the registrar polls
 #   config validate     the startup gate 004 added; accepts, and records the call
 #   automations list    reads the stub's automation store
@@ -151,6 +152,14 @@ ONBOARDED
         # that far — and that a failed registration did not stop it.
         if [ -n "$markers" ]; then
           : > "${markers}/gateway-started"
+          # The account `gog` would resolve from here. Every command the agent
+          # runs is a child of this process, so this environment is the one the
+          # briefing's bare `gog` commands get. Written only when the variable
+          # is set: "set to nothing" and "not set" are different answers, and a
+          # case has to be able to tell that the entrypoint invented neither.
+          if [ -n "${GOG_ACCOUNT+set}" ]; then
+            printf '%s' "$GOG_ACCOUNT" > "${markers}/gateway-gog-account"
+          fi
         fi
         exit 0
         ;;

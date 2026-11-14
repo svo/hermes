@@ -161,7 +161,7 @@ On first run, the entrypoint automatically configures OpenClaw via non-interacti
 | Variable | Required | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | Yes, every start | Anthropic API key for the OpenClaw gateway. Required on **every** start, not only the first — see [Startup validation](#startup-validation) |
-| `GOG_GOOGLE_ACCOUNT` | No | Google account email for gog service account auth |
+| `GOG_GOOGLE_ACCOUNT` | No | Google account every `gog` command runs as — with `GOG_SERVICE_ACCOUNT_KEY`, the Workspace user the service account impersonates. Handed to `gog` as `GOG_ACCOUNT`, the variable it actually reads — see [Which account `gog` runs as](#which-account-gog-runs-as) |
 | `GOG_SERVICE_ACCOUNT_KEY` | No | Path (inside the container) to the GCP service account JSON key file |
 | `TELEGRAM_BOT_TOKEN` | No | Telegram bot token from @BotFather |
 | `TELEGRAM_ALLOW_FROM` | With `TELEGRAM_BOT_TOKEN` | Comma-separated Telegram user IDs to allow. The container refuses to start without it |
@@ -557,6 +557,45 @@ gog auth add you@gmail.com
 
 Tokens are persisted in the volume so this only needs to be done once.
 
+### Which account `gog` runs as
+
+`gog` takes its account from `--account` or from the `GOG_ACCOUNT` environment variable. It does
+not read `GOG_GOOGLE_ACCOUNT` — that name is this image's — and storing a service account key
+does not make its address a default. So the entrypoint exports `GOG_ACCOUNT` from
+`GOG_GOOGLE_ACCOUNT` before it starts the gateway, and every `gog` command the agent runs
+inherits it: the morning briefing's two, the examples in `AGENTS.md`, and anything the agent
+composes for itself. `hermes-check` passes the same address as `--account`.
+
+| You set | `gog` runs as |
+|---|---|
+| `GOG_GOOGLE_ACCOUNT` | that account, everywhere |
+| `GOG_ACCOUNT` only | that account — `hermes-check` passes no flag, and `gog` reads the variable |
+| both, naming different accounts | `GOG_GOOGLE_ACCOUNT`, with a `google:` line on stderr saying so. Honouring both would have the heartbeat watching one mailbox while the briefing read another |
+| neither | whatever `gog` resolves for itself: the stored OAuth token, when there is exactly one |
+
+Without an account, a bare command fails before it reaches Google:
+
+```
+missing --account (or set GOG_ACCOUNT, set default via `gog auth manage`, or store exactly one token)
+```
+
+That is what the briefing's own commands answered before this export existed, while the
+heartbeat — which goes through `hermes-check` — kept working. If it appears now, neither
+variable is set and `gog` holds no single token to fall back on.
+
+`docker exec` does not inherit the export: it starts from the container's own environment, not
+from what the entrypoint added to it. To run by hand what the briefing runs:
+
+```bash
+docker exec hermes sh -c 'GOG_ACCOUNT="$GOG_GOOGLE_ACCOUNT" gog calendar events primary --today --max 50'
+```
+
+Nothing behind `gog auth manage` can work from inside the container. It opens a browser, there
+is none — `exec: "xdg-open": executable file not found in $PATH` — and the
+`http://127.0.0.1:<port>` address it falls back to is the container's own loopback. The agent
+is told not to run `gog auth` commands at all, in `AGENTS.md` and in the briefing job, and to
+report what `gog` printed instead of trying to repair it.
+
 ## Workspace Instructions
 
 On startup, the entrypoint generates OpenClaw workspace files at `~/.openclaw/workspace/` using the `HERMES_*` environment variables and sets `agents.defaults.skipBootstrap: true` so OpenClaw uses the pre-seeded files directly:
@@ -821,6 +860,12 @@ chat, which is not where a summary of the user's inbox belongs.
 At `HERMES_CRON_SCHEDULE`, in `HERMES_TIMEZONE`, Hermes runs `hermes-check`, reads the day's
 calendar and the overnight inbox, and sends one combined briefing.
 
+The three steps are `hermes-check`, `gog calendar events primary --today --max 50` and
+`gog gmail search 'newer_than:12h' --json`. Neither `gog` command names an account; both run as
+`GOG_GOOGLE_ACCOUNT` — see [Which account `gog` runs as](#which-account-gog-runs-as). When a
+step fails, the briefing names it, quotes what it printed and briefs from the rest. It is told
+not to repair Google access itself.
+
 It is an OpenClaw **automation**, declared through the CLI under the key
 `hermes:morning-briefing`. Cron data lives in the gateway's own store, so there is nothing
 hand-editable to inspect — use the CLI:
@@ -980,6 +1025,12 @@ The morning briefing is the second reader of that output, and it is exposed the 
 runs `hermes-check` in an isolated session, which also does not load `SOUL.md` or `AGENTS.md`.
 Its prompt therefore carries the same fencing contract, and that prompt is the one place the
 briefing instructions exist — see [Morning Briefing](#morning-briefing).
+
+The briefing's other two steps run `gog` directly, so their output reaches that session with
+**no fence**: event titles, senders and subjects as third parties wrote them, which
+`sanitize_field()` never sees. The prompt tells the agent to treat all of it exactly as fenced
+text. That is an instruction, not a boundary. The pinned `gog` has a `--wrap-untrusted` flag for
+its JSON output, and this image does not pass it.
 
 Every run reports `SANITIZED: <n>` in its summary — the number of fields modified. It does
 not raise `ACTION_NEEDED` on its own, because any subject containing an angle bracket trips

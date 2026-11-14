@@ -15,11 +15,13 @@ automation store that stub keeps.
 | `registration-test` | The accepted paths — what lands in the automation store, and what a restart does not do a second time. |
 | `failure-test` | The rejected and failing ones — exit status, log line, and that the gateway starts anyway. |
 | `mutation-check` | Sensitivity check. Not part of `run`; see below. |
-| `stub-openclaw` | Fake `openclaw`: `onboard`, `gateway`, `gateway health`, `automations list`, `automations create`, `automations remove`. |
+| `stub-openclaw` | Fake `openclaw`: `onboard`, `gateway` (which also records the `GOG_ACCOUNT` it was started with), `gateway health`, `automations list`, `automations create`, `automations remove`. |
 
-Forty-one cases: 22 in `registration-test`, 19 in `failure-test`. 011 changed nine of them,
+Fifty-one cases: 32 in `registration-test`, 19 in `failure-test`. 011 changed nine of them,
 and folded two into one, when the registrar began declaring the briefing — see [011's PLAN](../../011-briefing-converges/PLAN.md)
-§ Testing Strategy, "003's cases that invert".
+§ Testing Strategy, "003's cases that invert". Ten were added, and two changed, when the
+briefing's own `gog` commands turned out never to have run — see
+[The briefing's `gog` commands](#the-briefings-gog-commands).
 
 ## Why not a container
 
@@ -135,6 +137,48 @@ the second. 011's probe has since pinned the envelope against the binary. The st
 now prints it, and the tolerant paths are gone: the cases that drove them now assert that a
 listing the registrar cannot read leads to no write.
 
+## The briefing's `gog` commands
+
+The prompt this suite registers names three commands, and for as long as it had existed two of
+them could not run. Against the pinned gog (v0.39.1):
+
+```
+$ gog calendar list --date today
+unknown flag --date, did you mean one of "--days", "--page"?           # exit 2
+$ gog gmail search 'newer_than:12h' --json
+missing --account (or set GOG_ACCOUNT, set default via `gog auth manage`, or store exactly one token)   # exit 2
+```
+
+The first is a flag gog does not have. The second is the account: gog reads `GOG_ACCOUNT`, this
+image's variable is `GOG_GOOGLE_ACCOUNT`, and only `hermes-check` passed it on. An agent told
+"do not ask what to do" then took gog's own suggestion, and `gog auth manage` tried to open a
+browser — `exec: "xdg-open": executable file not found in $PATH` — which is what the user
+received in place of a briefing.
+
+Every case here was green throughout, and that is the point of this section. The stub stores
+whatever prompt it is handed and nothing in the suite runs `gog`, so a prompt naming a command
+that does not exist registers perfectly. What the cases can hold, they now hold:
+
+- **The commands, by name.** `--date` is refused, and the calendar step is pinned to the form
+  `hermes-check` already runs against the same binary.
+- **The account, by environment.** The stub's `gateway` records the `GOG_ACCOUNT` it was started
+  with, in `gateway-gog-account`, and writes nothing when the variable is unset — so "exported
+  empty" and "not exported" are different answers. That environment is the one every command
+  the agent runs inherits. Six cases cover it: set, set alongside a service account key, unset,
+  an operator's own `GOG_ACCOUNT`, the two disagreeing, and the two agreeing.
+- **The instructions.** The briefing and `AGENTS.md` both say to report a failed `gog` command
+  rather than repair it, and never to run `gog auth`. The briefing also says the output of its
+  two bare commands is third-party text with no fence around it.
+
+`install_gog_stub` in `harness.sh` puts a recording `gog` on `PATH` for the one case that takes
+the service-account branch. No other case calls `gog`, so no other case needs it.
+
+What still cannot be asserted here is that gog accepts the commands — only the binary can say.
+The check that found this ran each command the registered prompt names against the real gog,
+in the environment the gateway was exec'd with, with HTTPS pointed at a closed port so that
+reaching the network meant the arguments and the account had both been accepted. Do the same
+when the prompt's commands change, and when `openclaw_gog_version` is bumped.
+
 ## Sensitivity
 
 When 003 landed, all 42 of its cases failed against the entrypoint before it:
@@ -174,11 +218,12 @@ name, and the timeout is now reported rather than swallowed.
 HARNESS_REGISTRAR_TIMEOUT=200 .specs/003-cron-registration-via-cli/tests/mutation-check
 ```
 
-Eighteen mutations, one behaviour each, applied to a copy of `entrypoint.sh`. Every one must be
+Twenty-six mutations, one behaviour each, applied to a copy of `entrypoint.sh`. Every one must be
 caught by at least one case; a mutation nothing catches is a hole in the suite. 003 shipped
 twenty-one. 011 retired the three whose code it deleted, and re-anchored five on the code that
 replaced theirs. Its own mutations, for the declaration and adoption, are in 011's
-`mutation-check`. This one is not part of `run` because it re-runs the suites once per
+`mutation-check`. Eight more came with the `gog` cases above: the flag restored, each of the
+three instructions dropped, and four ways of getting the account wrong. This one is not part of `run` because it re-runs the suites once per
 mutation — `registration-test` first, and
 `failure-test` only when nothing has caught the mutation yet, since that is much the slower of
 the two.

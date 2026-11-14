@@ -220,6 +220,30 @@ gateway_started() {
   [ -f "${RUN_DIR}/gateway-started" ]
 }
 
+# The account `gog` resolves from the gateway's environment, which is the one
+# every command the agent runs inherits. Prints it; returns 1, printing
+# nothing, when the gateway was started with no GOG_ACCOUNT at all.
+gateway_gog_account() {
+  [ -f "${RUN_DIR}/gateway-gog-account" ] || return 1
+  cat "${RUN_DIR}/gateway-gog-account"
+}
+
+# A `gog` that records its argv and succeeds, installed ahead of anything real
+# on PATH. Only the service-account branch of the entrypoint calls gog, and
+# only the cases that take that branch need this, so it is installed on demand
+# rather than for every run. One line per call, in `calls-gog` beside the
+# stub's other markers.
+install_gog_stub() {
+  cat > "${BIN_DIR}/gog" <<'STUB'
+#!/usr/bin/env bash
+if [ -n "${OPENCLAW_STUB_MARKERS:-}" ]; then
+  printf '%s\n' "$*" >> "${OPENCLAW_STUB_MARKERS}/calls-gog"
+fi
+exit 0
+STUB
+  chmod +x "${BIN_DIR}/gog"
+}
+
 # The automations the stub holds, as JSON.
 store_jobs() {
   cat "${RUN_STORE}/jobs.json"
