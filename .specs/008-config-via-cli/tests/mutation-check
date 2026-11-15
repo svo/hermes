@@ -286,6 +286,24 @@ mutate "doctor's report is printed without redacting it" \
   '        redact_secrets "$doctor_output" | tail -n 5' \
   '        printf '"'"'%s\n'"'"' "$doctor_output" | tail -n 5'
 
+mutate 'messages are answered by the small model again' \
+  "    const chatModel = 'anthropic/claude-opus-5';" \
+  "    const chatModel = 'anthropic/claude-haiku-4-5';"
+
+mutate 'the heartbeat runs on the larger model' \
+  '            model: utilityModel,' \
+  '            model: chatModel,'
+
+mutate 'compaction runs on the larger model' \
+  '          compaction: { model: utilityModel },' \
+  '          compaction: { model: chatModel },'
+
+mutate 'the larger model is left on the default cache' \
+  "            [chatModel]: {
+              params: { cacheRetention: 'long' }
+            }," \
+  ''
+
 printf '\n'
 if [ "$skipped" -gt 0 ]; then
   printf '%d mutation(s) skipped by the filter.\n' "$skipped"

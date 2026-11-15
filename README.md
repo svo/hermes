@@ -89,6 +89,11 @@ against a stub and validates the configuration it produces. A schema change that
 bricked every running container shows up as a red gate you are looking at, instead of as a dead
 assistant on Friday.
 
+Check the Node version the new release wants before any of that: `npm view openclaw@<version>
+engines`. 2026.9.2 accepts Node 22. 2026.9.37 wants `>=24.22.1 <25 || >=26.12.1` and exits at
+startup on anything else, and `roles/node` installs Node 22 for the service, builder and
+development images alike.
+
 ### Bumping gog
 
 ```bash
@@ -832,6 +837,57 @@ turn can still read every secret listed above. Real answers — Docker secrets, 
 indirection, running the agent as a non-root user — are tracked as
 [`.specs/007-gateway-supply-chain-hardening/SPEC.md`](.specs/007-gateway-supply-chain-hardening/SPEC.md)
 Open Question 5 and are not solved here.
+
+## Models
+
+Two models, chosen by what the work is. The entrypoint writes all three keys on every start.
+
+| Work | Model | Key |
+|---|---|---|
+| Messages, and the tasks they start | `anthropic/claude-opus-5` | `agents.defaults.model` |
+| Morning briefing | the same | none: the job declares no model, so it runs on the default |
+| Heartbeat | `anthropic/claude-haiku-4-5` | `agents.defaults.heartbeat.model` |
+| Compaction | `anthropic/claude-haiku-4-5` | `agents.defaults.compaction.model` |
+
+Messages and the briefing read text that third parties wrote, with an unrestricted shell and
+the mailbox in reach, and take several steps to finish. That is where judgement is worth
+paying for, and there is little volume to pay for: one user, and one briefing a day. The
+heartbeat is one fixed command and a sanitised, fenced report, about a dozen times a day, so
+it stays on the small model.
+
+One model, Haiku 4.5, used to do all four. Opus 5 is priced at five times Haiku 4.5 per
+token, so the briefing, and a message in a short conversation, cost about five times as much.
+A message in a long conversation can cost more than that. OpenClaw compacts a session only
+when it nears the model's context window, which is 1,000,000 tokens for Opus 5 against
+200,000 for Haiku 4.5, and nothing here resets a session or caps the window. The heartbeat's
+cost does not change.
+
+A better model is not a boundary. What the agent may run is still decided by
+`tools.exec.security`, and what it reads is still third-party text — see
+[Untrusted Content Boundary](#untrusted-content-boundary).
+
+Each model has an entry under `agents.defaults.models` asking for an hour of prompt cache
+(`cacheRetention: long`). The parameters are keyed by model, so a model with no entry gets
+OpenClaw's default of five minutes.
+
+To change a model, edit `chatModel` or `utilityModel` in `entrypoint.sh`. A model set inside
+the container with `openclaw config set` lasts until the next start, because these keys are
+written on every start. An entry you add under `agents.defaults.models` is kept.
+
+### Newer models need a newer OpenClaw, and that needs a newer Node
+
+The pinned OpenClaw does not know the Claude 5.5 models:
+
+```bash
+docker exec hermes openclaw models list --provider anthropic --all
+```
+
+On 2026.9.2 that lists Opus 5, Sonnet 5 and Haiku 4.5, among others, and no 5.5 model.
+2026.9.37, npm's `extended-stable`, carries `anthropic/claude-opus-5-5` and
+`anthropic/claude-haiku-5-5`. It also requires Node 24, at 24.22.1 or later, or Node 26.12.1
+or later, and refuses to start on Node 22, which is what `roles/node` installs in all three
+images. So moving to those models is a Node upgrade and an OpenClaw upgrade together — see
+[Bumping OpenClaw](#bumping-openclaw) — and neither has been done.
 
 ## Heartbeat delivery
 

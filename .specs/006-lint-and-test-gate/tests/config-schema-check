@@ -335,7 +335,7 @@ for (const id of entries(env.SLACK_ALLOW_CHANNELS)) {
 
 const expected = new Map([
   ['agents.defaults.skipBootstrap', true],
-  ['agents.defaults.model', 'anthropic/claude-haiku-4-5'],
+  ['agents.defaults.model', 'anthropic/claude-opus-5'],
   ['agents.defaults.heartbeat.every', '59m'],
   ['agents.defaults.heartbeat.target', 'owner'],
   ['agents.defaults.heartbeat.model', 'anthropic/claude-haiku-4-5'],
@@ -348,26 +348,8 @@ const expected = new Map([
   ['agents.defaults.heartbeat.activeHours.end', env.HERMES_QUIET_HOURS_START],
   ['agents.defaults.heartbeat.activeHours.timezone', env.HERMES_TIMEZONE],
   ['agents.defaults.compaction.model', 'anthropic/claude-haiku-4-5'],
-  // The whole map, so that the model onboarding seeded is shown to be STILL
-  // THERE beside the one the container uses.
-  //
-  // This expectation was the exact opposite until 008, and the inversion is the
-  // point of that spec rather than a concession to it. The entrypoint used to
-  // assign this object whole, which deleted every entry it did not write on
-  // every start — and this map is upstream's, seeded by its own
-  // `modelPolicyAllowlist` migration, so what was being deleted were entries of
-  // a model policy allowlist. `openclaw config patch` merges recursively, so
-  // they survive. `--replace-path agents.defaults.models` would restore the old
-  // behaviour exactly and is deliberately not used: an operator adding a model's
-  // parameters beside the container's is the case 008's third acceptance
-  // criterion is about, and upstream protects this path for the same reason —
-  // `openclaw config set` demands an explicit `--replace` to overwrite it.
-  //
-  // The seeded entry is spelled out rather than skipped, because "the container
-  // no longer wipes the map" and "the container writes its own entry correctly"
-  // are separate promises and this is the only place that holds both.
   ['agents.defaults.models', {
-    'anthropic/claude-opus-5': {},
+    'anthropic/claude-opus-5': { params: { cacheRetention: 'long' } },
     'anthropic/claude-haiku-4-5': { params: { cacheRetention: 'long' } }
   }],
   // Only enabled. warningThreshold, criticalThreshold and
@@ -482,10 +464,7 @@ if (section === 'emptiness') {
   // "Writes" is doing work in that sentence, and it did not have to before 008.
   // The entrypoint now patches rather than rewrites, so the file it leaves
   // behind also holds keys it never touched — onboarding's seed, carried
-  // through. `agents.defaults.models['anthropic/claude-opus-5']` is `{}` there
-  // and legitimately so: an entry with no parameters means upstream's defaults
-  // for that model. Blaming the entrypoint for it would be blaming it for not
-  // deleting something, which is the behaviour 008 exists to remove.
+  // through.
   //
   // So a leaf that is byte-identical to the seed is upstream's and is skipped.
   // Every leaf the entrypoint actually produced is still judged exactly as

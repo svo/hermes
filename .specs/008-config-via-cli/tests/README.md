@@ -17,7 +17,7 @@ Anthropic key: the real `entrypoint.sh` runs against stub `openclaw` and `gog` b
 | `stub-openclaw` | Fake `openclaw`: `onboard`, `gateway`, `gateway health`, `config patch`, `config set`, `config get`, `config validate`, `doctor`, `automations list`. |
 | `stub-gog` | Fake `gog`. Records and succeeds. |
 
-Thirty-two cases: 19 in `setter-test`, 13 in `approvals-test`. Nothing skips.
+Thirty-six cases: 23 in `setter-test`, 13 in `approvals-test`. Nothing skips.
 
 ## The probe came first
 
@@ -118,8 +118,8 @@ quote a credential back, which is why its output is redacted like everything els
 .specs/008-config-via-cli/tests/mutation-check
 ```
 
-Twenty-six mutations, one behaviour each, all against a copy of `entrypoint.sh`. Every one is
-caught. It is not part of `run` because it re-runs the suites up to twenty-six times.
+Thirty-one mutations, one behaviour each, all against a copy of `entrypoint.sh`. Every one is
+caught. It is not part of `run` because it re-runs the suites up to thirty-one times.
 
 Each mutation asserts its anchor occurs exactly once in the file, and that the mutant still
 parses as bash, before it is applied; a bad anchor is reported as a bad anchor rather than as a
