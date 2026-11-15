@@ -1,20 +1,7 @@
 #!/usr/bin/env bash
-#
-# Shared assertions and the hermetic runner for 002's checks. Sourced, not run.
-#
-# The plan's verification is container-level — docker exec, openclaw config get.
-# That needs an image, an Anthropic key and a Slack workspace, so it stays a
-# manual acceptance step (see README.md). What runs here is the same assertion
-# against the same artefact: the real entrypoint.sh is executed against a stub
-# openclaw, and the openclaw.json it writes is what the cases read.
-#
-# Assertion style follows the plan: one behaviour per case, named
-# should_<behaviour>_when_<condition>.
 
 TESTS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${TESTS_DIR}/../../.." && pwd)"
-# Overridable so a case can be pointed at another copy — which is how these
-# were shown to fail before the access-control block landed.
 ENTRYPOINT="${ENTRYPOINT:-${REPO_ROOT}/infrastructure/ansible/roles/openclaw/files/entrypoint.sh}"
 MANIFEST="${MANIFEST:-${REPO_ROOT}/infrastructure/slack-app-manifest.json}"
 
@@ -55,7 +42,6 @@ fail() {
 }
 
 assert_equals() {
-  # assert_equals <what> <expected> <actual>
   if [ "$2" != "$3" ]; then
     fail "$1"
     printf '       expected: %s\n' "$2" >&2
@@ -64,7 +50,6 @@ assert_equals() {
 }
 
 assert_contains() {
-  # assert_contains <what> <haystack> <needle>
   case "$2" in
     *"$3"*) ;;
     *)
@@ -75,7 +60,6 @@ assert_contains() {
 }
 
 assert_not_contains() {
-  # assert_not_contains <what> <haystack> <needle>
   case "$2" in
     *"$3"*)
       fail "$1"
@@ -84,14 +68,6 @@ assert_not_contains() {
   esac
 }
 
-# Run the real entrypoint in a clean environment: empty env, a private HOME so
-# no persisted config carries between cases, and a stub openclaw ahead of
-# anything real on PATH. The HERMES_* variables are the ones the entrypoint
-# already requires; only the SLACK_* ones vary between cases.
-#
-#   run_entrypoint [VAR=VALUE ...]
-#
-# Sets RUN_OUT, RUN_ERR, RUN_STATUS, RUN_CONFIG (path), RUN_HOME.
 run_entrypoint() {
   local run_dir errexit_was_set=""
   run_dir="$(mktemp -d "${TMP_ROOT}/run.XXXXXX")"
@@ -115,13 +91,10 @@ run_entrypoint() {
     HERMES_QUIET_HOURS_END=08:00 \
     "$@" \
     bash "$ENTRYPOINT" >"${run_dir}/stdout" 2>"${run_dir}/stderr"
-  # A comment does not disturb $?, so the disable can sit here.
   # shellcheck disable=SC2034
   RUN_STATUS=$?
   [ -n "$errexit_was_set" ] && set -e
 
-  # RUN_* are the contract with the suites that source this file; shellcheck
-  # cannot see those consumers from here.
   # shellcheck disable=SC2034
   RUN_OUT="$(cat "${run_dir}/stdout")"
   # shellcheck disable=SC2034
@@ -134,18 +107,10 @@ run_entrypoint() {
   RUN_DIR="${run_dir}"
 }
 
-# Did the entrypoint reach `exec openclaw gateway`? The stub records it, so a
-# case can assert that a rejected configuration never started the gateway.
 gateway_started() {
   [ -f "${RUN_DIR}/gateway-started" ]
 }
 
-# A value out of the config the last run wrote, by jq path expression.
-#
-# A run rejected in 004's phase 1 exits before onboarding, so there is no config
-# file at all. That is the same answer these cases are asking for — the channel
-# is not configured — only stronger, so an absent file reads as an empty config
-# rather than as a jq failure.
 config_get() {
   if [ -f "$RUN_CONFIG" ]; then
     jq -c -r "$1" "$RUN_CONFIG"
@@ -154,7 +119,6 @@ config_get() {
   fi
 }
 
-# `openclaw config validate` against the config the last run wrote.
 config_validate() {
   env HOME="$RUN_HOME" PATH="${BIN_DIR}:${PATH}" openclaw config validate --json
 }

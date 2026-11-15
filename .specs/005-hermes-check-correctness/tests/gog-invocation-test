@@ -1,21 +1,4 @@
 #!/usr/bin/env bash
-#
-# How `gog` is invoked: finding C10.
-#
-# The account flag lived in a string:
-#
-#   gog_account_flag=""
-#   [ -n "$GOG_ACCOUNT" ] && gog_account_flag="--account $GOG_ACCOUNT"
-#   gog gmail messages search ... --json $gog_account_flag
-#
-# Unquoted, so that it would split into two arguments. shellcheck reported
-# SC2086 on both call sites, and the obvious reading of that warning — add
-# quotes — would have passed `gog` a single empty argument on every run where
-# GOG_GOOGLE_ACCOUNT was unset, which is the default. The warning was real and
-# its obvious fix was wrong; an array satisfies both.
-#
-# None of that is visible in the report, so these cases look at what the process
-# was actually called with, via the stub's argv log.
 
 set -uo pipefail
 
@@ -23,7 +6,6 @@ set -uo pipefail
 # shellcheck source=harness.sh
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
 
-# AC: given GOG_GOOGLE_ACCOUNT is unset, no empty argument is passed.
 should_pass_no_empty_argument_when_the_account_is_unset() {
   case_start "${FUNCNAME[0]}"
   local log
@@ -61,8 +43,6 @@ should_pass_the_account_flag_when_the_account_is_set() {
   case_end
 }
 
-# An account with a space in it is the case the string form could never handle:
-# unquoted it split into two arguments, quoted it stopped being a flag at all.
 should_pass_an_account_as_one_argument_when_it_contains_a_space() {
   case_start "${FUNCNAME[0]}"
   local log
@@ -90,7 +70,6 @@ should_call_both_upstreams_when_the_check_runs() {
 
 should_keep_the_query_intact_when_the_account_is_unset() {
   case_start "${FUNCNAME[0]}"
-  # The flag change must not disturb the arguments either side of it.
   local log
   log="$(new_log)"
   run_check --argv-log "$log" gmail-clean.json calendar-clean.json

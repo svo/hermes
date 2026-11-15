@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-#
-# Runs every check for 005. Accumulates failures rather than stopping at the
-# first, so one run reveals every problem.
-#
-# `bin/hermes-check-test` is the entry point 006's `bin/test` invokes; it runs
-# this file along with 001's, because both verify the same script.
 
 set -uo pipefail
 

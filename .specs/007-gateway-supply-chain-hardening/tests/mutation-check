@@ -1,25 +1,5 @@
 #!/usr/bin/env bash
-#
-# Sensitivity check. Not part of `run`: it is slow, and it is a check on the
-# cases rather than on the code.
-#
-# Each mutation changes exactly one behaviour in a copy of the file it names
-# and asserts that at least one case notices. A mutation nothing catches is a
-# hole in the suite.
-#
-#   .specs/007-gateway-supply-chain-hardening/tests/mutation-check [name-substring]
-#
-# With an argument, only mutations whose name contains it are run — the whole
-# set takes a while, and this is how you re-check one after editing its anchor.
-#
-# Every anchor is asserted to occur exactly once in the whole file before it is
-# applied, and a bad anchor is reported as a bad anchor rather than as a caught
-# or uncaught mutation. 002 learned that the hard way: two of its mutations
-# anchored on a string that also occurred in a neighbouring block, so they
-# mutated code nothing there tested and read as clean.
 
-# The anchors below are literal fragments of the files under test, so every $
-# in them is meant to stay a $. Single quotes are the point.
 # shellcheck disable=SC2016
 
 set -uo pipefail
@@ -47,11 +27,6 @@ selected() {
   esac
 }
 
-# apply <source> <destination> <anchor> <replacement>
-#
-# The anchor is a fixed string, matched against the whole file so that it may
-# span lines; the replacement takes its place. Both are passed through the
-# environment, never interpolated into a pattern.
 apply() {
   MUT_ANCHOR="$3" MUT_REPLACEMENT="$4" python3 -c '
 import os, sys
@@ -67,7 +42,6 @@ open(dst, "w").write(s.replace(anchor, replacement, 1))
 ' "$1" "$2"
 }
 
-# Report a mutation as caught or not, given the FAIL lines the suites printed.
 verdict() {
   local name="$1" caught="$2"
   if [ -n "$caught" ]; then
@@ -82,8 +56,6 @@ failing_cases() {
   printf '%s\n' "$1" | grep '^FAIL ' | sed 's/^FAIL //' | paste -sd, -
 }
 
-# mutate <name> <anchor> <replacement> — entrypoint.sh, checked by the two
-# suites that run it.
 mutate() {
   local name="$1" mutant="${work}/entrypoint.sh" out caught
 
@@ -95,15 +67,12 @@ mutate() {
     return
   fi
 
-  # A mutant that no longer parses proves nothing about the cases.
   if ! bash -n "$mutant" 2>/dev/null; then
     printf 'SYNTAX %-45s the mutant does not parse — not applied\n' "$name" >&2
     missed+=("$name (bad mutant)")
     return
   fi
 
-  # bind-test first: it is the larger of the two and catches most of these.
-  # permissions-test only runs while nothing has caught the mutation yet.
   out="$(ENTRYPOINT="$mutant" bash "${tests_dir}/bind-test" 2>&1)"
   caught="$(failing_cases "$out")"
   if [ -z "$caught" ]; then
@@ -114,8 +83,6 @@ mutate() {
   verdict "$name" "$caught"
 }
 
-# mutate_role <name> <role-relative path> <anchor> <replacement> — the Ansible
-# tree, checked by provisioning-test against a whole mutated copy.
 mutate_role() {
   local name="$1" relative="$2" tree="${work}/ansible" out caught
 
@@ -130,7 +97,6 @@ mutate_role() {
     return
   fi
 
-  # A mutant that is no longer YAML proves nothing either.
   if ! python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' \
       "${tree}/${relative}" 2>/dev/null; then
     printf 'SYNTAX %-45s the mutant is not valid YAML — not applied\n' "$name" >&2
@@ -143,15 +109,10 @@ mutate_role() {
   verdict "$name" "$caught"
 }
 
-# --- the bind default ------------------------------------------------------
-
 mutate 'the bind defaults to lan' \
   'gateway_bind="${HERMES_GATEWAY_BIND:-loopback}"' \
   'gateway_bind="${HERMES_GATEWAY_BIND:-lan}"'
 
-# The anchor runs on to the next flag so that it does not end on a backslash;
-# a single-quoted string ending in one reads as an escaped quote to a linter,
-# and this file has to pass the same shellcheck as everything else here.
 mutate 'onboarding is told a different bind' \
   '    --gateway-bind "$gateway_bind" \
     --skip-skills' \
@@ -169,8 +130,6 @@ mutate 'the bind is never written to the config' \
 mutate 'the port is changed along with the bind' \
   'exec openclaw gateway --port 3000 --bind "$gateway_bind"' \
   'exec openclaw gateway --port 3001 --bind "$gateway_bind"'
-
-# --- the rule that guards a non-loopback bind ------------------------------
 
 mutate 'a non-loopback bind needs no token' \
   '      missing+=(HERMES_GATEWAY_TOKEN)' \
@@ -201,8 +160,6 @@ case "$gateway_bind" in' \
 
 case "${HERMES_NEVER_SET:-loopback}" in'
 
-# --- the credential --------------------------------------------------------
-
 mutate 'auth is rewritten on a loopback bind too' \
   "    if (bind !== 'loopback') {" \
   '    if (true) {'
@@ -224,8 +181,6 @@ mutate 'the bind and auth line is dropped' \
 mutate 'the published-port consequence is not stated' \
   "    'gateway: a loopback bind is not reachable through a published port under Docker' \\" \
   "    'gateway: bound loopback' \\"
-
-# --- the permissions step --------------------------------------------------
 
 mutate 'nothing is tightened' \
   'for gateway_secret_path in \
@@ -255,8 +210,6 @@ mutate 'the permissions step runs only when the file is new' \
   '  if [ -f "$gateway_secret_path" ]; then' \
   '  if [ ! -f "$gateway_secret_path" ]; then'
 
-# --- what review found the first draft could not catch ---------------------
-
 mutate 'the validate gate does not redact the gateway token' \
   '                "${SLACK_BOT_TOKEN:-}" "${SLACK_APP_TOKEN:-}" \
                 "${HERMES_GATEWAY_TOKEN:-}"; do' \
@@ -277,25 +230,23 @@ mutate 'a read-only credential kills the start' \
   '  chmod 0600 "$GOG_SERVICE_ACCOUNT_KEY"
   if false; then'
 
-# The real ordering defect, reproduced the only way that reproduces it: the
-# rule counted into `missing` *before* 004's owner check reads that array.
 mutate 'the bind rule runs before the owner is derived' \
-  '# Who the heartbeat reports to.' \
+  'owner_entries=()
+owner_candidates=0' \
   'gateway_bind="${HERMES_GATEWAY_BIND:-loopback}"
 case "$gateway_bind" in
   loopback) ;;
   *) if [ -z "${HERMES_GATEWAY_TOKEN:-}" ]; then missing+=(HERMES_GATEWAY_TOKEN); fi ;;
 esac
 
-# Who the heartbeat reports to.'
+owner_entries=()
+owner_candidates=0'
 
 mutate 'password auth is reported as none' \
   '      } else if (auth.password) {
         mode = '"'"'password'"'"';' \
   '      } else if (false) {
         mode = '"'"'password'"'"';'
-
-# --- provisioning ----------------------------------------------------------
 
 mutate_role 'openclaw is installed at latest again' \
   roles/openclaw/tasks/main.yml \

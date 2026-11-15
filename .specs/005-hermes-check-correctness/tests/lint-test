@@ -1,16 +1,4 @@
 #!/usr/bin/env bash
-#
-# The lint gate 006 depends on.
-#
-# 006's `bin/test` cannot pass while `hermes-check` has shellcheck findings, and
-# five of them — two SC2086 and three SC2106 — are the code this spec fixes.
-# The SC2106s were C4: shellcheck had been reporting that `continue` inside a
-# command substitution does nothing useful for as long as the file existed.
-#
-# So this is not a style check. It asserts that the two specific rules that were
-# reporting real defects report nothing, and that the whole file is clean at the
-# `info` level 006 Open Question 2 asks about — which is the level that catches
-# SC2086, and so the level worth committing to.
 
 set -uo pipefail
 
@@ -23,7 +11,6 @@ if ! command -v shellcheck >/dev/null 2>&1; then
   exit 0
 fi
 
-# AC: `shellcheck -s bash hermes-check` exits zero.
 should_exit_zero_when_shellcheck_reads_hermes_check() {
   case_start "${FUNCNAME[0]}"
   local out status
@@ -36,8 +23,6 @@ should_exit_zero_when_shellcheck_reads_hermes_check() {
 
 should_report_no_word_splitting_findings_when_shellcheck_reads_hermes_check() {
   case_start "${FUNCNAME[0]}"
-  # SC2086 on the account flag. Resolved by an array, not by quoting — quoting
-  # is what would have passed an empty argument.
   local out
   out="$(shellcheck -s bash -f gcc "$HERMES_CHECK" 2>&1 || true)"
   assert_equals "no SC2086" "0" "$(count_matching_lines "$out" 'SC2086')"
@@ -46,7 +31,6 @@ should_report_no_word_splitting_findings_when_shellcheck_reads_hermes_check() {
 
 should_report_no_misplaced_continue_when_shellcheck_reads_hermes_check() {
   case_start "${FUNCNAME[0]}"
-  # SC2106 — the rule that was reporting C4 all along.
   local out
   out="$(shellcheck -s bash -f gcc "$HERMES_CHECK" 2>&1 || true)"
   assert_equals "no SC2106" "0" "$(count_matching_lines "$out" 'SC2106')"
@@ -55,8 +39,6 @@ should_report_no_misplaced_continue_when_shellcheck_reads_hermes_check() {
 
 should_exit_zero_when_shellcheck_reads_the_checks_themselves() {
   case_start "${FUNCNAME[0]}"
-  # A whole-tree lint reads these files too, so they have to be clean on the
-  # same terms. `-x` resolves the `source harness.sh` they all carry.
   local out status
   out="$(shellcheck -x -s bash \
     "${TESTS_DIR}/harness.sh" \
@@ -87,8 +69,6 @@ should_parse_when_bash_reads_hermes_check() {
   case_end
 }
 
-# The installed path and the tested path have to be the same file, or the suite
-# verifies something the container never runs. PLAN.md § Risks names this one.
 should_install_the_tested_file_when_ansible_copies_hermes_check() {
   case_start "${FUNCNAME[0]}"
   local tasks

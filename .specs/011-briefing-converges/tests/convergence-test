@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-#
-# Declared registration: the job converges onto the environment on every
-# start, a start with nothing to change writes nothing, and the terminal line
-# says which of those happened.
-#
-# Every case that is about convergence is a restart over a store an earlier
-# start, or a seed, left behind. One behaviour per case, named
-# should_<behaviour>_when_<condition>.
 
 set -uo pipefail
 # shellcheck source=harness.sh
@@ -15,12 +7,9 @@ set -uo pipefail
 BRIEFING='morning-briefing'
 KEY='hermes:morning-briefing'
 
-# The value the registrar passed after --declaration-key on its first create.
 declared_key() {
   stub_calls create | head -n 1 | jq -r 'index("--declaration-key") as $i | if $i == null then "none" else .[$i + 1] end'
 }
-
-# --- SPEC § Declared registration -----------------------------------------
 
 case_start "should_declare_the_briefing_under_the_hermes_key_when_the_store_is_empty"
 run_entrypoint
@@ -31,9 +20,6 @@ assert_contains "it is logged as created" "$(run_log)" \
 case_end
 
 case_start "should_store_an_explicit_zero_stagger_when_the_briefing_is_declared"
-# Without it, the pinned gateway rewrites the job on the first declaration
-# after every restart (011's probe, B2). It also means the briefing runs at
-# exactly HERMES_CRON_SCHEDULE.
 run_entrypoint
 assert_contains "create was passed --exact" "$(stub_calls create)" '"--exact"'
 assert_equals "the stored stagger" "0" "$(store_job_field "$BRIEFING" '.staggerMs')"
@@ -89,9 +75,6 @@ assert_equals "the new target" "-1001234567890" "$(store_job_field "$BRIEFING" '
 case_end
 
 case_start "should_carry_the_new_prompt_on_the_same_job_when_the_prompt_changes"
-# The prompt lives in the image, so a new prompt arrives as a new image over
-# an old store. An older image's job is modelled by editing the prompt the
-# first start declared.
 store="$(new_store)"
 run_entrypoint --store "$store"
 first_id="$(store_job_field "$BRIEFING" '.id')"
@@ -123,7 +106,6 @@ assert_contains "and nothing changed" "$(run_log)" "cron: ${BRIEFING} unchanged"
 case_end
 
 case_start "should_keep_a_disabled_briefing_disabled_when_the_schedule_changes"
-# Disabled survives a real convergence, not only a no-op.
 store="$(new_store)"
 run_entrypoint --store "$store"
 store_edit "$store" '.[0].enabled = false'
@@ -133,8 +115,6 @@ assert_equals "still disabled" "false" "$(store_job_field "$BRIEFING" '.enabled'
 case_end
 
 case_start "should_replace_a_hand_edit_when_the_container_restarts"
-# SPEC Open Question 1: the environment wins. An `automations edit` to the
-# schedule, prompt or delivery lasts until the next start.
 store="$(new_store)"
 run_entrypoint --store "$store"
 first_id="$(store_job_field "$BRIEFING" '.id')"
@@ -150,10 +130,6 @@ assert_equals "the environment's delivery" "$fresh" \
 case_end
 
 case_start "should_recognise_the_declared_briefing_when_the_operator_renamed_it"
-# A declaration converges onto the key and leaves the name alone, so a renamed
-# job is still the briefing. Read by name, it would look missing: the start
-# would pass --disabled for the leftover beside it, switching the operator's
-# briefing off, and then never find what it declared.
 store="$(new_store)"
 seed_store "$store" <<'SEEDED'
 [
@@ -171,8 +147,6 @@ assert_contains "the declared job is named in the log" "$RUN_OUT" "${BRIEFING} j
 case_end
 
 case_start "should_read_a_listing_larger_than_an_environment_variable_can_hold"
-# Every job's full definition is in the listing, and Linux caps one
-# environment string at 128 KiB — about a hundred real automations.
 store="$(new_store)"
 node -e "
   const jobs = [];
@@ -189,8 +163,6 @@ assert_contains "it registered" "$RUN_OUT" "cron: registered ${BRIEFING}"
 case_end
 
 case_start "should_declare_under_a_key_outside_the_reserved_namespaces"
-# The gateway refuses a create under heartbeat-task: or skill-collection-review:
-# (R7), so a key in either would fail on every start.
 run_entrypoint
 key="$(declared_key)"
 assert_equals "the key" "$KEY" "$key"
@@ -199,12 +171,7 @@ case "$key" in
 esac
 case_end
 
-# --- SPEC § Failure and logging -------------------------------------------
-
 case_start "should_report_an_unavailable_outcome_when_create_output_does_not_parse"
-# The declaration landed — the listing shows the key — but create's stdout
-# cannot say whether it created, updated or changed nothing. The line says so
-# rather than guess.
 run_entrypoint OPENCLAW_STUB_CREATE_OUTPUT=garbage
 id="$(store_job_field "$BRIEFING" '.id')"
 assert_contains "outcome unavailable" "$(run_log)" "cron: declared ${BRIEFING} ${id}; outcome unavailable"
@@ -212,8 +179,6 @@ assert_not_contains "no outcome is guessed" "$(run_log)" "cron: registered"
 case_end
 
 case_start "should_read_the_outcome_when_create_warns_on_stderr"
-# Every create warns that no --agent was given. Merged into stdout, the warning
-# would make every outcome unparseable; logged, it would repeat on every start.
 run_entrypoint
 assert_contains "the outcome was read" "$(run_log)" "cron: registered ${BRIEFING}"
 assert_not_contains "the warning is not logged" "$(run_log)" "No --agent specified"
@@ -226,8 +191,6 @@ assert_contains "the gateway's reason" "$RUN_ERR" "operator.admin required"
 case_end
 
 case_start "should_say_the_briefing_was_left_as_it_was_when_giving_up_with_one_in_place"
-# A declaration that fails against an existing job leaves it running on its
-# previous configuration. "Not scheduled" would be false.
 store="$(new_store)"
 run_entrypoint --store "$store"
 run_entrypoint --store "$store" OPENCLAW_STUB_CREATE_FAILS=yes HERMES_CRON_SCHEDULE='30 6 * * 1-5'
@@ -237,24 +200,17 @@ assert_equals "still the old schedule" "0 8 * * *" "$(store_job_field "$BRIEFING
 case_end
 
 case_start "should_say_the_declaration_is_unconfirmed_when_giving_up_after_create_said_yes"
-# create reported success, so a declared job may exist; the listing never
-# showed one. Neither "not scheduled" nor "left as it was" is known to be true.
 run_entrypoint OPENCLAW_STUB_CREATE_SILENT=yes
 assert_contains "unconfirmed" "$RUN_ERR" "cron: giving up after 2 attempts; briefing declared but not confirmed"
 case_end
 
 case_start "should_say_the_declaration_timed_out_when_create_never_answers"
-# A hung create has printed the --agent warning and nothing else. Read from
-# stderr, the warning would be logged as the reason. One attempt, because each
-# one waits out the create timeout.
 run_entrypoint OPENCLAW_STUB_HANG=create HERMES_CRON_REGISTER_ATTEMPTS=1
 assert_contains "timed out" "$RUN_ERR" "cron: registration attempt 1/1 failed: timed out"
 assert_not_contains "the warning is not the reason" "$RUN_ERR" "No --agent specified"
 case_end
 
 case_start "should_take_the_reason_from_the_json_when_create_is_refused"
-# A refused create prints its reason as JSON on stdout and again on stderr,
-# after the --agent warning and among banner lines. The JSON is the clean copy.
 run_entrypoint OPENCLAW_STUB_CREATE_FAILS=yes
 assert_contains "the reason" "$RUN_ERR" \
   "cron: registration attempt 1/2 failed: stub-openclaw: gateway refused: operator.admin required"
@@ -271,9 +227,6 @@ fi
 case_end
 
 case_start "should_emit_exactly_one_terminal_line_on_every_path"
-# A restart sequence that visits every terminal line: created, unchanged,
-# updated, outcome unavailable, left as it was — and, on a fresh store, not
-# scheduled.
 store="$(new_store)"
 paths=0
 for variant in \

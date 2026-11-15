@@ -1,70 +1,10 @@
 #!/usr/bin/env bash
-#
-# Fake `openclaw`, standing in for the subcommands 007's cases drive. No
-# network, no credentials, no image.
-#
-#   onboard          writes what onboarding leaves behind, honouring
-#                    --gateway-port and --gateway-bind rather than ignoring
-#                    them, and carrying the gateway token onboarding is
-#                    documented to generate
-#   gateway          records that it was reached, and with which --bind
-#   gateway health   the readiness probe 003's registrar polls
-#   config get       one dotted path out of the config, so a case can ask the
-#                    same question README tells an operator to ask
-#   config validate  records that the phase 3 gate ran; never judges
-#   automations ...  just enough that the registrar finishes and gets out of
-#                    the way
-#
-# Behaviour switches, all defaulting to the documented happy path:
-#
-#   OPENCLAW_STUB_ONBOARD_AUTH    token (default) -> onboarding writes
-#                                 gateway.auth.{mode,token}
-#                                 none            -> it writes no auth at all
-#                                 bare            -> it writes a token with no
-#                                                    mode, the shape upstream
-#                                                    documents as still meaning
-#                                                    token auth
-#                                 password        -> password auth, the third
-#                                                    branch of the startup line
-#   OPENCLAW_STUB_DOCTOR_FAILS    yes -> `doctor --fix` exits non-zero and
-#                                 leaves the legacy approvals file in place
-#   OPENCLAW_STUB_VALIDATE_ERROR  text -> `config validate` rejects with this
-#                                 message. The phase 3 gate passes the
-#                                 validator's output through a redaction filter
-#                                 to `docker logs`, and 007 adds a credential to
-#                                 the file that validator reads -- so a case has
-#                                 to be able to make it quote one.
-#
-# The auth default is not a convenience. Upstream documents onboarding as using
-# token auth by default and generating a token when nothing else applies, so a
-# stub that onboarded without one would model a container that has never
-# existed — and would quietly turn the "leave an existing credential alone"
-# cases green by giving them nothing to leave alone.
-#
-# Every invocation is appended to OPENCLAW_STUB_ARGV_LOG in the bracketed shape
-# 005's stub-gog and 006's stub-openclaw both use, because the flags this spec
-# changes are only observable in argv: the config records the bind, but only
-# the log records that `exec openclaw gateway` was told the same thing.
 
 set -uo pipefail
 
 config="${HOME}/.openclaw/openclaw.json"
 markers="${OPENCLAW_STUB_MARKERS:-}"
 
-# One record, one write.
-#
-# This is not a micro-optimisation, it is the whole correctness of the log. Two
-# processes append to it concurrently: the foreground `exec openclaw gateway`,
-# and 003's briefing registrar probing `openclaw gateway health --port <n>` from
-# a background subshell. Written as a `{ printf; printf; ... } >> file` block
-# each line is its own write, so the two records interleave — and because both
-# calls log under the command name `gateway`, a reader then attributes the
-# registrar's arguments to the exec.
-#
-# That is not hypothetical. It was caught by running bind-test twenty times:
-# one run in twenty reported the gateway's `--bind` as `3000`, because the exec
-# wrote `ARG [--bind]` and the registrar's `ARG [3000]` landed between it and
-# `ARG [lan]`. A single write(2) with O_APPEND cannot split that way.
 log_invocation() {
   if [ -z "${OPENCLAW_STUB_ARGV_LOG:-}" ]; then
     return 0
@@ -91,8 +31,6 @@ case "${1:-}" in
       : > "${markers}/onboarded"
     fi
 
-    # The flags are read rather than assumed. A stub that hardcoded the bind
-    # would pass whatever the entrypoint sent it, including nothing.
     stub_port=3000
     stub_bind=lan
     while [ "$#" -gt 0 ]; do
@@ -144,9 +82,6 @@ case "${1:-}" in
         exit 0
         ;;
       *)
-        # `exec openclaw gateway` is the last line of the entrypoint, so this
-        # marker is how a case asserts a rejected configuration never got that
-        # far — and the argv log above is how it asserts what bind it was told.
         if [ -n "$markers" ]; then
           : > "${markers}/gateway-started"
         fi
@@ -156,10 +91,6 @@ case "${1:-}" in
     ;;
 
   doctor)
-    # 008's one-off approvals migration, modelled here because a strict stub
-    # answers an unmodelled call with exit 64 -- and the entrypoint calls this
-    # whenever a legacy exec-approvals.json is on the volume, which a
-    # permissions case can arrange.
     case " $* " in
       *" --fix "*) ;;
       *) usage "$@" ;;
@@ -177,11 +108,6 @@ case "${1:-}" in
     ;;
 
   automations | cron)
-    # 003's registrar only has to finish quietly here. The briefing is listed
-    # as already declared, under the key 011 declares it with, so the
-    # registrar logs one line and exits. A declaration converges onto that job
-    # and changes nothing. Without --json the listing is the plain one, as the
-    # real CLI's is.
     briefing_job='{"id":"job-0001","name":"morning-briefing","declarationKey":"hermes:morning-briefing","enabled":true}'
     case "${2:-}" in
       list)
@@ -201,14 +127,6 @@ case "${1:-}" in
   config)
     case "${2:-}" in
       set)
-        # Write-if-absent, which is the only shape the entrypoint uses. 008 sets
-        # tools.exec.security this way so that a restart cannot revert an
-        # operator's tightened exec policy -- 004's finding B6, which used to be
-        # held by the `[ ! -f ]` guard on exec-approvals.json.
-        #
-        # Strict about the flag for the same reason 008's `config patch` is: a
-        # stub that ignored --expect-current-absent would perform an
-        # unconditional write and turn the case that pins this green.
         stub_path="${3:-}"
         stub_value="${4:-}"
         if [ -z "$stub_path" ] || [ -z "$stub_value" ]; then usage "$@"; fi
@@ -239,7 +157,6 @@ case "${1:-}" in
           }
           const leaf = parts[parts.length - 1];
           if (Object.prototype.hasOwnProperty.call(node, leaf)) {
-            // The refusal upstream gives, and the exit code the entrypoint reads.
             console.error('conditional config set expectation did not match the ' +
               'authored config, so nothing was changed');
             process.exit(1);
@@ -251,39 +168,10 @@ case "${1:-}" in
         ;;
 
       patch)
-        # 008 routes the main config block through `openclaw config patch`
-        # rather than letting the entrypoint open openclaw.json itself. The
-        # merge is modelled here; the verdict is not.
-        #
-        # Upstream's contract, from `openclaw config patch --help`: objects
-        # merge recursively, arrays and scalars replace, and null deletes a
-        # path. The entrypoint emits strict JSON, which is the JSON5 subset the
-        # real command accepts, so JSON.parse is enough and no JSON5 parser is
-        # needed here.
-        #
-        # It validates nothing on purpose. A stub with a schema opinion would be
-        # a third transcription to keep in step with upstream; 006's
-        # config-schema-check runs the REAL validator over the file this
-        # produces, which is the check that decides whether the payload is
-        # legal. This decides only what the file looks like.
-        #
-        #   OPENCLAW_STUB_PATCH_ERROR  text -> `config patch` rejects with this
-        #                              message and writes nothing, the way a
-        #                              schema violation does. The entrypoint
-        #                              redacts that message before it reaches
-        #                              the log, so a case has to be able to make
-        #                              it quote a credential.
         if [ -n "${OPENCLAW_STUB_PATCH_ERROR:-}" ]; then
           printf '%s\n' "$OPENCLAW_STUB_PATCH_ERROR" >&2
           exit 1
         fi
-        # Strict about its flags, and that is load-bearing rather than tidy.
-        # A stub that shrugged at an unrecognised flag let two real regressions
-        # through 008's mutation check: `--dry-run` writes nothing at all, and
-        # `--replace-path agents.defaults.models` restores the whole-object
-        # clobber 008 exists to remove. Both produced a green run against a
-        # permissive stub, because the merge it performed was its own rather
-        # than the one it was asked for.
         shift 2
         while [ "$#" -gt 0 ]; do
           case "$1" in
@@ -315,9 +203,6 @@ case "${1:-}" in
             config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
           } catch {}
 
-          // null deletes; a plain object merges into a plain object; anything
-          // else — array, scalar, or an object landing on a non-object —
-          // replaces. That is upstream's rule, restated.
           const isPlainObject = (value) =>
             value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -358,13 +243,6 @@ case "${1:-}" in
         ;;
 
       validate)
-        # No schema opinion of its own. 004's stub carries a transcription and
-        # 006's check runs the real validator; a third opinion here would only
-        # be a third thing to keep in step with upstream.
-        #
-        # It can still be told to fail, because what the gate does with a
-        # failure -- redact the message and refuse to start -- is 007's problem
-        # the moment 007 puts a fifth credential into the file being validated.
         if [ -n "$markers" ]; then
           : > "${markers}/config-validated"
         fi

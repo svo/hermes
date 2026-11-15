@@ -1,18 +1,4 @@
 #!/usr/bin/env bash
-#
-# Sensitivity check: mutate the Slack block one behaviour at a time and confirm
-# that at least one named case fails for each. A green suite proves nothing on
-# its own — this is what shows the cases are attached to the behaviour they
-# claim to be about.
-#
-# Not part of `run`: it executes both suites once per mutation. Run it by hand
-# after changing the Slack block or the cases.
-#
-#   .specs/002-slack-access-control/tests/mutation-check
-#
-# Two of these mutations were initially anchored on a string that also appears
-# in the Telegram block a few lines above, so they silently mutated Telegram and
-# were reported as uncaught. Both anchors now include a neighbouring Slack line.
 
 set -uo pipefail
 
@@ -59,23 +45,16 @@ run_mutation group-policy-open "channelIds.length > 0 ? 'allowlist' : 'disabled'
 run_mutation no-require-mention "{ enabled: true, requireMention: true }" "{ enabled: true }"
 run_mutation no-allow-from-guard "if (allowFrom.length === 0) {" "if (false) {"
 run_mutation regex-accepts-anything "/^[CG][A-Z0-9]+\$/.test(id) === false" "false"
-# Anchored on the two adjacent Slack lines: the bare dmPolicy line also appears
-# in the Telegram block above, which is not under test here.
 run_mutation dm-policy-pairing "      dmPolicy: 'allowlist',
       allowFrom," "      dmPolicy: 'pairing',
       allowFrom,"
 run_mutation no-startup-log "    console.log(" "    const unused = ("
-# Same trap: Telegram's groups: { '*': { requireMention: true } } comes first.
 run_mutation require-mention-false "{ enabled: true, requireMention: true }" "{ enabled: true, requireMention: false }"
 run_mutation not-enabled "      enabled: true,
       mode: 'socket'," "      enabled: false,
       mode: 'socket',"
 run_mutation logs-the-ids "' allowFrom=' + allowFrom.length" "' allowFrom=' + allowFrom.join('+')"
 run_mutation logs-the-channel-ids "' channels=' + channelIds.length" "' channels=' + channelIds.join('+')"
-# Pure insertion: `channels` is an ES6 shorthand property backed by a const, so
-# renaming it here would mutate a variable reference and crash the block with a
-# ReferenceError instead of producing the Telegram-shaped config this is about.
-# A crash is caught by every case; that would prove nothing about A2d.
 run_mutation telegram-groups-shape "      groupPolicy: channelIds.length > 0 ? 'allowlist' : 'disabled',
       channels" "      groups: { '*': { requireMention: true } },
       groupPolicy: channelIds.length > 0 ? 'allowlist' : 'disabled',

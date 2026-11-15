@@ -9,29 +9,15 @@ BASE_LOOKBACK_HOURS=2
 MAX_LOOKBACK_HOURS=168
 FETCH_MAX=100
 SEEN_MAX=1000
-# Overridable so the checks can point at a stub. The urgency classifier is
-# gated on this file *existing*, so stubbing `fasttext` on PATH is not enough:
-# on an image without the 800 MB model — the builder image, where the gate runs
-# — the branch below is skipped entirely and every message lands in the wrong
-# bucket. Three of 005's classification cases failed that way in CI while
-# passing on any developer machine, because the model is present there.
 MODEL_FILE="${HERMES_MODEL_FILE:-/opt/hermes/urgency.bin}"
 GOG_ACCOUNT="${GOG_GOOGLE_ACCOUNT:-}"
 HERMES_FIELD_MAX_LEN="${HERMES_FIELD_MAX_LEN:-200}"
 
-# A non-numeric override would abort the run inside sanitize_field(), and silent
-# monitoring is the worst failure this script has. Fall back to the default.
-# Normalise to base 10 as well: `test` reads a leading-zero value as decimal while
-# the substring expansion below reads it as octal, so "010" would compare against
-# 10 but cut at 8.
 case "$HERMES_FIELD_MAX_LEN" in
   '' | *[!0-9]*) HERMES_FIELD_MAX_LEN=200 ;;
   *) HERMES_FIELD_MAX_LEN=$((10#$HERMES_FIELD_MAX_LEN)) ;;
 esac
 
-# Fence markers delimiting attacker-controlled text. Quoted verbatim in the
-# heartbeat prompt (entrypoint.sh); the drift assertion under
-# .specs/001-sanitize-untrusted-content/tests/ keeps the two in step.
 UNTRUSTED_EMAIL_OPEN="<untrusted-email>"
 UNTRUSTED_EMAIL_CLOSE="</untrusted-email>"
 UNTRUSTED_CALENDAR_OPEN="<untrusted-calendar>"
@@ -40,21 +26,11 @@ UNTRUSTED_CALENDAR_CLOSE="</untrusted-calendar>"
 mkdir -p "$STATE_DIR"
 touch "$SEEN_FILE" "$VIP_FILE"
 
-# An array, not a string. The string form had to be left unquoted to split into
-# two arguments, and quoting it — the obvious reading of shellcheck SC2086 —
-# would pass one empty argument to `gog` whenever GOG_GOOGLE_ACCOUNT is unset.
-# An empty array expands to no words at all, so both readings are correct here.
 gog_args=()
 if [ -n "$GOG_ACCOUNT" ]; then
   gog_args=(--account "$GOG_ACCOUNT")
 fi
 
-# Stands in for any absent field in the tab-separated records below. A literal
-# empty field would be lost: `read` with IFS set to tab treats a run of tabs as
-# one delimiter, and strips leading and trailing ones, because tab is IFS
-# whitespace. So an empty field shifts every later field left — an event with no
-# start would silently adopt its end as its start, and a summary would land in a
-# variable the numeric tests read. Nothing emitted below is ever empty.
 ABSENT="-"
 
 action_needed="no"
@@ -65,19 +41,6 @@ data_source_errors=0
 FETCHED_JSON=""
 FETCHED_OK="no"
 
-# The single choke point for attacker-controlled text: email subjects, sender
-# headers, calendar titles. Pure — stdin to stdout, no state, no globals beyond
-# the truncation bound — so it can be exercised on its own.
-#
-#   1. delete C0 controls and DEL, so no value can forge a line or a section
-#   2. fold U+0085/U+2028/U+2029 to a space, so no value can look like a line
-#      break (they are not C0, so step 1 leaves them)
-#   3. delete angle brackets, so no value can forge a fence marker
-#   4. collapse whitespace runs and trim
-#   5. bound the length, with a visible elision marker when truncated
-#
-# LC_ALL=C keeps tr and sed byte-oriented. C0 bytes never occur inside a UTF-8
-# sequence, so printable multi-byte text passes through untouched.
 sanitize_field() {
   local value
   value=$(LC_ALL=C tr -d '[:cntrl:]' \
@@ -86,10 +49,6 @@ sanitize_field() {
     | LC_ALL=C sed -e 's/[[:space:]][[:space:]]*/ /g' -e 's/^ //' -e 's/ $//')
 
   if [ "${#value}" -gt "$HERMES_FIELD_MAX_LEN" ]; then
-    # ${value:0:N} counts characters under a UTF-8 locale and bytes otherwise,
-    # so in the container's C locale it can cut mid-codepoint. Drop an
-    # incomplete trailing sequence rather than emit an invalid one; a complete
-    # character is never matched by these patterns.
     value=$(printf '%s' "${value:0:HERMES_FIELD_MAX_LEN}" \
       | LC_ALL=C sed -e 's/[\xC0-\xDF]$//' \
                      -e 's/[\xE0-\xEF][\x80-\xBF]\{0,1\}$//' \
@@ -104,9 +63,6 @@ sanitize_field() {
   printf '%s' "$value"
 }
 
-# Counting wrapper around sanitize_field(). Runs in the current shell so the
-# aggregate counter survives; the result comes back in SANITIZED_VALUE rather
-# than on stdout, which a subshell would swallow along with the increment.
 sanitize() {
   SANITIZED_VALUE=$(printf '%s' "$1" | sanitize_field)
   if [ "$SANITIZED_VALUE" != "$1" ]; then
@@ -123,36 +79,6 @@ add_reason() {
   action_needed="yes"
 }
 
-# Fetch a JSON document from an upstream call, or substitute a documented empty
-# structure and report a named error.
-#
-#   fetch_json <source-name> <top-level-key> <command> [args...]
-#
-# The result comes back in FETCHED_JSON rather than on stdout: like sanitize(),
-# this has to run in the current shell or the error counter — and the error
-# line — would be swallowed by the command substitution that captured it.
-#
-# Two failure modes, and the `|| echo '{"messages":[]}'` guard this replaces
-# handled neither. On a non-zero exit the guard *appended* its fallback to
-# whatever the call had already written, so jq was handed a two-document stream
-# and reported counts from both. On a zero exit with output that is not the
-# JSON we need — an HTML error page, a login prompt — the guard never fired at
-# all, and the unguarded jq that followed took the whole run down under
-# `set -e`, with the report abandoned part-written.
-#
-# A response is usable when it is exactly one JSON object whose top-level key
-# holds an array, or omits it. Omitted counts as empty rather than broken, so
-# an upstream that drops the key for an empty result is not reported as an
-# error. Anything else — a bare array, a bare string, a key of the wrong type —
-# is reported, which also turns the "gog renamed a field" failure from a silent
-# zero into something an operator can see.
-#
-# The document count is part of the check, not decoration. `jq -e` reports the
-# status of the last value it produced, and over empty input it produces none
-# and exits zero — so a call that succeeded and printed nothing would otherwise
-# validate, and the empty string would reach the report as `EVENTS_TODAY: `
-# with no number after it. Slurping makes "no documents" and "more than one"
-# both answerable in the same expression.
 fetch_json() {
   local name="$1" key="$2"
   shift 2
@@ -171,26 +97,10 @@ fetch_json() {
   FETCHED_OK="no"
   FETCHED_JSON="$(printf '{"%s":[]}' "$key")"
   data_source_errors=$((data_source_errors + 1))
-  # Named, and emitted in the section it belongs to: broken monitoring has to be
-  # distinguishable from a quiet inbox, and "which upstream" is the first thing
-  # an operator needs.
   echo "DATA_SOURCE_ERROR: ${name}"
   add_reason "${name} data source unavailable"
 }
 
-# An epoch for a calendar timestamp, or the empty string when there is not one.
-#
-# The absent check is not redundant with the parse: `date -d ""` succeeds and
-# answers "now", so an event with a missing timestamp would otherwise be
-# silently placed at the moment the check ran — ending now, or starting now —
-# rather than reported as one that could not be read. That is the same class of
-# failure as the one this spec is repairing, arriving by a different route.
-#
-# The zone matters for Google's other timed form, `{"dateTime": "...", 
-# "timeZone": "..."}`, where the timestamp carries no offset of its own and is
-# meaningless without it — read in the container's UTC, a 09:00 New York meeting
-# lands five hours out. Applying the zone is safe either way: when the timestamp
-# does carry an offset, that offset wins and TZ affects nothing.
 parse_epoch() {
   local value="$1" zone="${2:-}"
   if [ -z "$value" ] || [ "$value" = "$ABSENT" ]; then
@@ -203,15 +113,6 @@ parse_epoch() {
   fi
 }
 
-# True when a sender matches an entry in the VIP file. An entry is an exact
-# email address, or an exact domain written with or without a leading `@`;
-# comparison is case-insensitive, blank lines and `#` comments are ignored.
-#
-# Matching is equality against a whole entry, never substring containment in
-# either direction. Containment is what made a sender whose From header carried
-# no parseable address match every entry in the file, and what made a VIP entry
-# of `notexample.com` match a sender at `example.com` — the test ran the wrong
-# way round. Neither is expressible here.
 vip_matches() {
   local addr="$1" domain="$2" entry
   if [ -z "$addr" ] || [ ! -s "$VIP_FILE" ]; then
@@ -237,8 +138,6 @@ vip_matches() {
 echo "=== HERMES CHECK ==="
 echo "TIMESTAMP: $(date --iso-8601=seconds)"
 echo ""
-
-# ─── EMAIL ───────────────────────────────────────────────────────────
 
 echo "--- EMAIL ---"
 
@@ -286,11 +185,6 @@ urgent_lines=""
 vip_lines=""
 other_lines=""
 
-# Walk the messages by position, and read each one's fields by that position
-# too. Looking them up by `.id` instead meant two messages sharing an id had
-# their subjects and senders concatenated into one string, and both were then
-# rendered as a line belonging to neither — with the VIP check run against the
-# merged value. A position is unique by construction; an id is not.
 msg_index=0
 while [ "$msg_index" -lt "$message_count" ]; do
   index="$msg_index"
@@ -299,12 +193,6 @@ while [ "$msg_index" -lt "$message_count" ]; do
   msg_id=$(printf '%s' "$email_json" | jq -r --argjson i "$index" \
     '.messages[$i] | if type == "object" then (.id // empty) else empty end')
 
-  # The id is the key into the seen-message file, which is one id per line, so
-  # it has to exist and be a single line. A message whose id is missing or
-  # carries whitespace is one we cannot track between runs: report it rather
-  # than drop it. Untracked, a newline-bearing id also split into several
-  # phantom entries and — being appended to the seen file — evicted the real
-  # ids from it, so messages already notified came back as new.
   case "$msg_id" in
     '' | *[[:space:]]*)
       unreadable_messages=$((unreadable_messages + 1))
@@ -312,10 +200,6 @@ while [ "$msg_index" -lt "$message_count" ]; do
       ;;
   esac
 
-  # `--` matters: GNU grep permutes its arguments, so an id beginning with `-`
-  # was read as an option. The seen file then became the *pattern*, leaving no
-  # file operand, and grep read the loop's own input instead — swallowing every
-  # remaining message. One `-e` in an id silently emptied the rest of the inbox.
   if ! grep -qFx -- "$msg_id" "$SEEN_FILE" 2>/dev/null; then
     new_ids="${new_ids}${msg_id}"$'\n'
     new_count=$((new_count + 1))
@@ -325,13 +209,6 @@ while [ "$msg_index" -lt "$message_count" ]; do
     from=$(printf '%s' "$email_json" | jq -r --argjson i "$index" \
       '.messages[$i].from // "unknown"')
 
-    # Take the address from the angle-bracketed addr-spec when there is one.
-    # The display name in front of it is chosen by the sender, and scanning the
-    # whole header for the first address-shaped token read that name as the
-    # address: a stranger who set their display name to a VIP's address was
-    # flagged VIP, and a real VIP whose header carried a list address in front
-    # of theirs was demoted. Tightening the VIP file comparison achieved nothing
-    # while the value being compared was the sender's to choose.
     case "$from" in
       *'<'*'>'*)
         addr_spec="${from##*<}"
@@ -340,13 +217,6 @@ while [ "$msg_index" -lt "$message_count" ]; do
       *) addr_spec="$from" ;;
     esac
 
-    # `|| true`, not `|| from_addr=""`: grep exits 1 when the header carries no
-    # address — normal, not fatal, and under `pipefail` it used to take the whole
-    # run down. But the pipeline also exits non-zero when `head` closes the pipe
-    # on grep mid-write, and there the address was already extracted correctly;
-    # blanking it on status alone silently demoted a VIP whose header was long
-    # enough to fill the pipe buffer. The captured value is kept either way, and
-    # it is empty exactly when nothing matched.
     from_addr=$(printf '%s' "$addr_spec" \
       | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' | head -1) || true
     from_addr="${from_addr,,}"
@@ -370,19 +240,11 @@ while [ "$msg_index" -lt "$message_count" ]; do
       is_vip="yes"
     fi
 
-    # Trust boundary. Everything above operates on the raw values; nothing below
-    # emits anything but a sanitized copy.
     sanitize "$from"
     safe_from="$SANITIZED_VALUE"
     sanitize "$subject"
     safe_subject="$SANITIZED_VALUE"
 
-    # Exactly one bucket per message, with an explicit precedence, and the
-    # counter incremented in the same branch that emits the line. OTHER is a
-    # count of its own bucket. Deriving it as new - urgent - vip made it go
-    # negative for a message that was both urgent and VIP, because that message
-    # was subtracted twice and listed once; with one branch per message the
-    # arithmetic that could disagree with the listing no longer exists.
     line="From: ${safe_from} | Subject: ${safe_subject}"
     if [ "$is_urgent" = "yes" ]; then
       urgent_count=$((urgent_count + 1))
@@ -414,16 +276,10 @@ echo "OTHER: ${other_count}"
 echo "UNREADABLE_MESSAGES: ${unreadable_messages}"
 echo "FETCH_TRUNCATED: ${fetch_truncated}"
 
-# The operator can add these three up against NEW_UNREAD directly from the
-# output; this asserts the same invariant from the inside. It cannot fire while
-# every message takes exactly one branch above, which is the point of keeping
-# it — it fires if that ever stops being true.
 if [ "$((urgent_count + vip_count + other_count))" -ne "$new_count" ]; then
   add_reason "internal count mismatch"
 fi
 
-# Counts stay outside the fence — the agent acts on those. Inside it is only
-# third-party text, to be summarised and never obeyed.
 echo "$UNTRUSTED_EMAIL_OPEN"
 [ -n "$urgent_lines" ] && printf '%s' "$urgent_lines"
 [ -n "$vip_lines" ] && printf '%s' "$vip_lines"
@@ -438,8 +294,6 @@ echo "$UNTRUSTED_EMAIL_CLOSE"
 
 echo ""
 
-# ─── CALENDAR ────────────────────────────────────────────────────────
-
 echo "--- CALENDAR ---"
 
 fetch_json calendar events \
@@ -450,40 +304,6 @@ echo "EVENTS_TODAY: ${event_count}"
 
 now_epoch=$(date +%s)
 
-# Extract every event into a tab-separated record the loop below can read.
-#
-# `gog calendar events` emits the raw Google Calendar v3 Event resource with a
-# few string fields merged in, so `start` and `end` are OBJECTS, not strings: a
-# timed event carries `{"dateTime": ...}` and an all-day one `{"date": ...}`,
-# and the `date` form is what makes an event all-day. Reading `.start` as a
-# string fed an object to `@tsv`, which refuses one — so jq failed, the loop
-# read nothing, and the calendar reported EVENTS_TODAY alongside no next event
-# and no conflicts. Every reminder and every clash, gone, with the reason on
-# stderr where nobody was looking.
-#
-# `startLocal`/`endLocal` are gog's own normalisation, RFC3339 with an offset,
-# so they are preferred for a timed event — but only when they actually look
-# like a timestamp, and never for an all-day one. `start.date` is the
-# authoritative all-day signal and it decides both what is read and what is
-# flagged; keying that off the *text shape* of `startLocal` instead let an
-# all-day event whose `startLocal` carried an offset come back as a
-# midnight-to-midnight event overlapping everything on the day, and let a timed
-# event whose `startLocal` was a bare date vanish from the report as all-day. A
-# plain string is accepted too, which is the shape the fixtures used before this
-# was pinned to the real one.
-#
-# `allday` decides all-day for every shape, in one place: `start.date` for the
-# real resource, and a bare-date string for the flat shape the fixtures used
-# before this was pinned. It is the only thing that decides — a second check in
-# the shell, keyed on how the timestamp happened to render, would mask this one
-# and neither could then be shown to matter.
-#
-# An element that is not an object becomes an all-absent record rather than
-# being filtered away, so it is counted as an event that could not be read
-# instead of disappearing between EVENTS_TODAY and every other counter.
-#
-# Every branch yields a string, so no event shape can make the extraction fail;
-# if one ever does, it is reported rather than silently emptying the calendar.
 events_tsv=""
 if ! events_tsv="$(printf '%s' "$cal_json" | jq -r --arg absent "$ABSENT" '
       def stamp($raw; $local):
@@ -525,23 +345,6 @@ if ! events_tsv="$(printf '%s' "$cal_json" | jq -r --arg absent "$ABSENT" '
   add_reason "calendar events unreadable"
 fi
 
-# Parse every event once, here, into a normalized record — start epoch, end
-# epoch, summary — and let both consumers below read numbers.
-#
-# Parsing inside each consumer is what required `date -d ... || continue`
-# inside a command substitution. That `continue` never skipped the iteration:
-# it ended the subshell, left the epoch empty, and let the loop carry on with
-# it, so every later numeric test wrote "integer expression expected" to stderr
-# while the event itself disappeared from conflict detection with nothing said.
-# Parsing once also means an unparseable event is counted once rather than once
-# per loop.
-#
-# An event is counted as unparseable when either end of its range will not
-# parse, and is excluded from conflict detection. An all-day event — a
-# date-only start, and an end date that is exclusive — has no start *time* and
-# no meaningful duration, so it gets its own counter and takes part in neither
-# consumer. Treating one as a timed event beginning at midnight is what made it
-# overlap every other event on the day.
 parsed_events=""
 unparseable_events=0
 all_day_events=0
@@ -570,7 +373,6 @@ done <<< "$events_tsv"
 echo "UNPARSEABLE_EVENTS: ${unparseable_events}"
 echo "ALL_DAY_EVENTS: ${all_day_events}"
 
-# Find next upcoming event
 next_summary=""
 next_start_time=""
 next_mins=""
@@ -600,17 +402,10 @@ else
   echo "NEXT_EVENT: none"
 fi
 
-# Detect conflicts (overlapping events)
 conflict_count=0
 conflict_lines=""
-# The empty string means "no previous event", which 0 cannot: 0 is a real end
-# time, and using it as the sentinel meant an event ending before 1970 was
-# never carried forward and so never overlapped anything.
 prev_summary="" prev_end_epoch=""
 
-# The sort key is bounded to one field and numeric. Unbounded, it ran from the
-# start of field 2 to the end of the line, so the end time and the title took
-# part in ordering the events by their start.
 while IFS=$'\t' read -r start_epoch end_epoch summary; do
   if [ -z "$start_epoch" ] || [ "$end_epoch" = "$ABSENT" ]; then
     continue
@@ -643,8 +438,6 @@ fi
 [ "$unparseable_events" -gt 0 ] && add_reason "${unparseable_events} unparseable calendar event(s)"
 
 echo ""
-
-# ─── SUMMARY ─────────────────────────────────────────────────────────
 
 echo "--- SUMMARY ---"
 echo "ACTION_NEEDED: ${action_needed}"

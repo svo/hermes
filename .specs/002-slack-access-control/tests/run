@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-#
-# Runs every check for 002. Accumulates failures rather than stopping at the
-# first, so one run reveals every problem.
-#
-# 006's `bin/test` should invoke this file alongside 001's.
 
 set -uo pipefail
 

@@ -8,15 +8,6 @@
   become: true
 
 - name: Download fastText
-  # Fetched and verified before anything unpacks or compiles it.
-  #
-  # This was an `unarchive` straight from the URL, which cannot check a digest:
-  # the module has no `checksum` option and its own documentation says to use
-  # `get_url` with `remote_src=yes` instead. So an archive that had been
-  # replaced upstream would have been unpacked, compiled, and installed into
-  # the image with nothing noticing. The classifier this builds decides which
-  # of the user's mail is urgent, and it runs inside the same container as the
-  # agent's shell.
   ansible.builtin.get_url:
     url: "https://github.com/facebookresearch/fastText/archive/v{{ fasttext_version }}.zip"
     dest: "{{ fasttext_archive }}"
@@ -24,12 +15,6 @@
     mode: '0644'
 
 - name: Unpack fastText
-  # No `creates:` guard. The cleanup below deletes this directory on every
-  # successful run, so the guard could only ever fire after a run that died
-  # between here and the cleanup -- and what it would then skip is
-  # re-extraction over a half-unpacked tree, which is the one case where
-  # re-extracting is exactly what is wanted. A guard that is dead when it would
-  # help and wrong when it fires is worse than no guard.
   ansible.builtin.unarchive:
     src: "{{ fasttext_archive }}"
     dest: /tmp
@@ -66,27 +51,11 @@
   ansible.builtin.copy:
     src: train.txt
     dest: /tmp/urgency-train.txt
-    # Without an explicit mode the file lands with whatever the remote umask
-    # happens to be, so what the build produces depends on the machine it ran
-    # on. Pinning it is the point; 0644 rather than 0600 only because nothing
-    # in this file is secret and a world-readable temp file is the least
-    # surprising thing to leave in /tmp between the copy above and the cleanup
-    # below. The reader is root and would manage at any mode.
     mode: '0644'
 
 - name: Train urgency classification model
   ansible.builtin.command:
     cmd: fasttext supervised -input /tmp/urgency-train.txt -output /opt/hermes/urgency -lr 1.0 -epoch 25 -wordNgrams 2
-  # Training rewrites /opt/hermes/urgency.bin and urgency.vec on every run, so
-  # reporting `changed` is simply the truth.
-  #
-  # The tempting alternative, `creates: /opt/hermes/urgency.bin`, buys
-  # idempotence by keying on the *output* when the thing that varies is the
-  # *input*: edit train.txt and the model would not be retrained, the task
-  # would report ok, and hermes-check would keep classifying urgency with a
-  # model that no longer matches its training data. That failure is silent and
-  # survives every subsequent run -- exactly the class this spec exists to
-  # catch. A stale-able guard is worse than a task that admits it did work.
   changed_when: true
   become: true
 

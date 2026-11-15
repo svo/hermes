@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-#
-# The accepted configurations: what the entrypoint writes into openclaw.json
-# when SLACK_BOT_TOKEN is set and the access-control variables are well formed.
-#
-# The shape matters more than it looks. Slack gates DMs on dmPolicy + allowFrom
-# like Telegram, but gates groups on groupPolicy + a channels map keyed by
-# channel ID — there is no wildcard. Copying Telegram's groups: { '*': ... }
-# would produce a config that reads as gated and is not, which is finding A2d.
 
 set -uo pipefail
 
@@ -36,8 +28,6 @@ should_trim_entries_when_slack_allow_from_has_surrounding_whitespace() {
 
 should_pass_access_group_entries_through_untouched_when_allow_from_contains_them() {
   case_start "${FUNCNAME[0]}"
-  # The documented accessGroup:<name> form contains a colon. Entries are passed
-  # through unparsed, so it must survive rather than be rejected as malformed.
   run_entrypoint "${SLACK_ENV[@]}" SLACK_ALLOW_FROM='U0123ABCDE,accessGroup:on-call'
   assert_equals "entrypoint succeeded" "0" "$RUN_STATUS"
   assert_equals "accessGroup entry preserved" \
@@ -69,10 +59,6 @@ should_allowlist_each_channel_with_mention_required_when_channels_are_supplied()
 
 should_not_write_a_telegram_shaped_groups_key_when_slack_is_configured() {
   case_start "${FUNCNAME[0]}"
-  # Slack has no wildcard group key: `groups` is not a key it has at all, and a
-  # channels map keyed by '*' is not a channel ID. Absence is the assertion —
-  # so the case also has to prove the block ran and wrote something, or it
-  # would pass against an entrypoint that writes no Slack config whatsoever.
   run_entrypoint "${SLACK_ENV[@]}" SLACK_ALLOW_FROM=U0123ABCDE SLACK_ALLOW_CHANNELS=C0123ABCDE
   assert_equals "entrypoint succeeded" "0" "$RUN_STATUS"
   assert_equals "the channel was written" '{"enabled":true,"requireMention":true}' \
@@ -112,10 +98,6 @@ should_exit_zero_from_config_validate_when_channels_are_allowlisted() {
 
 should_reject_a_telegram_shaped_groups_key_when_config_validate_runs() {
   case_start "${FUNCNAME[0]}"
-  # Guards the guard. Every other validate case asserts a zero exit, which a
-  # validator that always succeeded would also produce — so nothing yet proves
-  # the schema transcription can reject anything. A2d is the shape it exists
-  # for, so A2d is the shape it gets fed.
   run_entrypoint "${SLACK_ENV[@]}" SLACK_ALLOW_FROM=U0123ABCDE
   local rewritten="${RUN_DIR}/with-groups.json"
   jq '.channels.slack.groups = {"*": {"requireMention": true}}' "$RUN_CONFIG" > "$rewritten"
@@ -129,9 +111,6 @@ should_reject_a_telegram_shaped_groups_key_when_config_validate_runs() {
 
 should_reject_a_key_slack_omits_when_config_validate_runs() {
   case_start "${FUNCNAME[0]}"
-  # groupAllowFrom is valid on every other channel and omitted from Slack's
-  # schema; allowFrom is valid at the Slack root and omitted from the
-  # per-channel entry. Both are the shapes an author would reach for.
   run_entrypoint "${SLACK_ENV[@]}" SLACK_ALLOW_FROM=U0123ABCDE SLACK_ALLOW_CHANNELS=C0123ABCDE
   local rewritten="${RUN_DIR}/with-omitted-keys.json"
   jq '.channels.slack.groupAllowFrom = ["U0123ABCDE"]
@@ -158,8 +137,6 @@ should_log_the_policies_and_the_entry_counts_when_the_channel_is_configured() {
 
 should_not_log_a_token_or_an_id_when_the_channel_is_configured() {
   case_start "${FUNCNAME[0]}"
-  # Counts only. IDs would leak workspace membership into the container log and
-  # tokens must never reach it at all.
   run_entrypoint "${SLACK_ENV[@]}" SLACK_ALLOW_FROM=U0123ABCDE SLACK_ALLOW_CHANNELS=C0123ABCDE
   local logged="${RUN_OUT}${RUN_ERR}"
   assert_not_contains "bot token absent" "$logged" "xoxb-test-bot-token"
@@ -178,8 +155,6 @@ should_start_the_gateway_when_the_configuration_is_accepted() {
 
 should_not_configure_slack_when_no_bot_token_is_set() {
   case_start "${FUNCNAME[0]}"
-  # SLACK_ALLOW_FROM is required *with* the token, not on its own: an operator
-  # who is not using Slack must not be forced to configure it.
   run_entrypoint
   assert_equals "entrypoint succeeded" "0" "$RUN_STATUS"
   assert_equals "slack absent" "null" "$(config_get '.channels.slack')"

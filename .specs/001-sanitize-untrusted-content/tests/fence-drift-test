@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-#
-# Drift assertion: the fence markers emitted by hermes-check and the markers
-# named in the heartbeat prompt must be the same strings.
-#
-# The prompt tells the agent that text between those markers is data. If either
-# side is edited alone, the instruction stops referring to anything real and the
-# fence silently becomes decoration. Nothing else catches that — the two files
-# have no other connection.
 
 set -uo pipefail
 
@@ -14,17 +6,14 @@ set -uo pipefail
 # shellcheck source=harness.sh
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
 
-# The marker constants, read without executing the script.
 markers_in_script() {
   sed -n 's/^UNTRUSTED_[A-Z_]*="\(.*\)"$/\1/p' "$HERMES_CHECK"
 }
 
-# The heartbeat prompt string, as written in the entrypoint.
 heartbeat_prompt() {
   sed -n "s/^ *prompt: '\(.*\)',$/\1/p" "$ENTRYPOINT"
 }
 
-# Anything in the prompt shaped like one of our markers.
 markers_in_prompt() {
   heartbeat_prompt | grep -oE '</?untrusted-[a-z-]+>' | sort -u
 }
@@ -82,7 +71,6 @@ should_instruct_the_agent_that_fenced_text_is_data_when_the_heartbeat_runs() {
 
 should_keep_the_heartbeat_ok_contract_when_the_prompt_is_extended() {
   case_start "${FUNCNAME[0]}"
-  # 003 and 004 both depend on this token; the clause must not displace it.
   assert_contains "HEARTBEAT_OK preserved" "$(heartbeat_prompt)" "respond with exactly HEARTBEAT_OK"
   case_end
 }

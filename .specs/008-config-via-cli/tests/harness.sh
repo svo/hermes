@@ -1,30 +1,7 @@
 #!/usr/bin/env bash
-#
-# Shared assertions and the hermetic runner for 008's checks. Sourced, not run.
-#
-# `PLAN.md` § Testing Strategy asks for container-level verification —
-# `docker exec hermes openclaw exec-policy show`, an operator's tuned
-# `tools.exec.timeoutSeconds` surviving a real restart, a real schema rejecting
-# a real bad key. That needs the image and an Anthropic key, so it stays a
-# manual acceptance step (see README.md).
-#
-# What runs here is the same assertion by a shorter route: the real
-# `entrypoint.sh` runs against a stub `openclaw` that models `config patch`, and
-# the cases read the configuration it produced, the argv it used to produce it,
-# and what it said while doing it.
-#
-# The stub is 007's, extended with `config patch`. It is copied rather than
-# referenced so that a change to 007's stub cannot silently change what these
-# cases mean.
-#
-# Assertion style follows the plan: one behaviour per case, named
-# should_<behaviour>_when_<condition>.
 
 TESTS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${TESTS_DIR}/../../.." && pwd)"
-# Overridable so a case can be pointed at another copy — which is how these are
-# shown to fail against the pre-change entrypoint, and how mutation-check drives
-# them.
 ENTRYPOINT="${ENTRYPOINT:-${REPO_ROOT}/infrastructure/ansible/roles/openclaw/files/entrypoint.sh}"
 
 TESTS_PASSED=0
@@ -43,12 +20,6 @@ chmod +x "${BIN_DIR}/openclaw" "${BIN_DIR}/gog"
 cleanup() { rm -rf "$TMP_ROOT"; }
 trap cleanup EXIT
 
-# The variables a correct start supplies, and nothing else. A case adds what it
-# is about, so that every run says in one line what it is testing.
-#
-# The three registrar budgets are pinned to 1: 003's registrar is forked before
-# `exec` and would otherwise retry for minutes against a stub that answers
-# instantly.
 DEFAULT_ENV=(
   ANTHROPIC_API_KEY=sk-ant-stub-not-a-real-key
   HERMES_VIBE=calm
@@ -86,16 +57,12 @@ fail() {
   printf '     %s\n' "$1" >&2
 }
 
-# A case that cannot run here, announced rather than quietly dropped — the same
-# contract bin/test honours for an absent tool. Silence would be
-# indistinguishable from a pass.
 skip_case() {
   printf 'SKIP %s (%s)\n' "$1" "$2" >&2
   TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
 }
 
 assert_equals() {
-  # assert_equals <what> <expected> <actual>
   if [ "$2" != "$3" ]; then
     fail "$1"
     printf '       expected: %s\n' "$2" >&2
@@ -104,7 +71,6 @@ assert_equals() {
 }
 
 assert_contains() {
-  # assert_contains <what> <haystack> <needle>
   case "$2" in
     *"$3"*) ;;
     *)
@@ -116,7 +82,6 @@ assert_contains() {
 }
 
 assert_not_contains() {
-  # assert_not_contains <what> <haystack> <needle>
   case "$2" in
     *"$3"*)
       fail "$1"
@@ -125,10 +90,6 @@ assert_not_contains() {
   esac
 }
 
-# A HOME several runs can share, so a case can ask what a *restart* does to a
-# config volume that already holds a configured container's state. Most of this
-# spec is only visible that way: a sibling survives a restart, or it does not,
-# and one start can never tell you which.
 new_home() {
   local dir
   dir="$(mktemp -d "${TMP_ROOT}/home.XXXXXX")"
@@ -136,14 +97,6 @@ new_home() {
   printf '%s\n' "$dir"
 }
 
-# Run the real entrypoint in a clean environment: empty env, a private HOME so
-# no persisted config carries between cases, and a stub openclaw ahead of
-# anything real on PATH.
-#
-#   run_entrypoint [--home DIR] [VAR=VALUE ...]
-#
-# Sets RUN_OUT, RUN_ERR, RUN_ALL, RUN_STATUS, RUN_HOME, RUN_CONFIG, RUN_DIR,
-# RUN_PATCH_STDIN.
 run_entrypoint() {
   local run_dir home="" errexit_was_set=""
 
@@ -169,14 +122,10 @@ run_entrypoint() {
     "${DEFAULT_ENV[@]}" \
     "$@" \
     bash "$ENTRYPOINT" >"${run_dir}/stdout" 2>"${run_dir}/stderr"
-  # A comment does not disturb $?, so the disable can sit here.
   # shellcheck disable=SC2034
   RUN_STATUS=$?
   [ -n "$errexit_was_set" ] && set -e
 
-  # The briefing registrar is 003's, forked just before `exec`. It outlives the
-  # entrypoint and keeps writing to these files, so a successful run waits for
-  # its one line before anything reads them.
   # shellcheck disable=SC2034
   RUN_REGISTRAR_STATUS=0
   if [ "$RUN_STATUS" -eq 0 ]; then
@@ -184,8 +133,6 @@ run_entrypoint() {
     wait_for_registrar "$run_dir" || RUN_REGISTRAR_STATUS=$?
   fi
 
-  # RUN_* are the contract with the suites that source this file; shellcheck
-  # cannot see those consumers from here.
   # shellcheck disable=SC2034
   RUN_DIR="${run_dir}"
   # shellcheck disable=SC2034
@@ -196,22 +143,12 @@ run_entrypoint() {
   RUN_OUT="$(cat "${run_dir}/stdout")"
   # shellcheck disable=SC2034
   RUN_ERR="$(cat "${run_dir}/stderr")"
-  # Both streams together, the way an operator reads `docker logs`. The
-  # redaction cases have to search everything the container said, not whichever
-  # half happened to carry it.
   # shellcheck disable=SC2034
   RUN_ALL="$(cat "${run_dir}/stdout" "${run_dir}/stderr")"
-  # The document the entrypoint handed the setter, exactly as the setter
-  # received it. This is the only way to assert on the *payload* rather than on
-  # the file, and the difference matters: a merge that quietly dropped a key
-  # would leave the file looking right on a fresh container and wrong on a
-  # restart.
   # shellcheck disable=SC2034
   RUN_PATCH_STDIN="$(cat "${run_dir}/patch-stdin" 2>/dev/null || true)"
 }
 
-# Bounded wait for the registrar's single terminal line. A run that never forked
-# one falls through after the timeout rather than hanging.
 wait_for_registrar() {
   local run_dir="$1" waited=0 limit="${HARNESS_REGISTRAR_TIMEOUT:-400}"
   while [ "$waited" -lt "$limit" ]; do
@@ -225,21 +162,14 @@ wait_for_registrar() {
   return 1
 }
 
-# Did the entrypoint reach `exec openclaw gateway`?
 gateway_started() {
   [ -f "${RUN_DIR}/gateway-started" ]
 }
 
-# How many invocations of <command> were recorded. `config` is what 007's stub
-# logs for every `openclaw config ...` call, because it names argv[1] only.
 argv_invocation_count() {
   grep -c "^INVOCATION \[$1\] " "${RUN_DIR}/argv" 2>/dev/null || printf '0'
 }
 
-# Was <command> called with <arg> anywhere in its argv? This is how a case
-# asserts that the setter was *used* — the config coming out right is not the
-# same claim, because a block that still wrote the file directly would satisfy
-# every value assertion while dissolving nothing.
 argv_has_arg() {
   if [ "$(argv_arg_count "$1" "$2")" -gt 0 ]; then
     printf 'yes'
@@ -248,9 +178,6 @@ argv_has_arg() {
   fi
 }
 
-# How many invocations of <command> carried <arg>. `config` is not specific
-# enough to count on its own: 007's stub names an invocation by argv[1], so
-# `config patch` and phase 3's `config validate` are both logged as `config`.
 argv_arg_count() {
   local command="$1" wanted="$2"
   ARGV_LOG="${RUN_DIR}/argv" ARGV_COMMAND="$command" ARGV_WANTED="$wanted" node -e "
@@ -265,8 +192,6 @@ argv_arg_count() {
     const command = process.env.ARGV_COMMAND;
     const wanted = process.env.ARGV_WANTED;
 
-    // One argument list per INVOCATION line, never a shared one: 003's
-    // registrar logs concurrently from a background subshell.
     const invocations = [];
     let current = null;
     for (const line of text.split('\n')) {
@@ -286,12 +211,6 @@ argv_arg_count() {
   "
 }
 
-# A value out of the config the last run wrote, by dotted path. An absent file
-# reads as `absent`: a run rejected in phase 1 writes nothing at all, and that is
-# the answer rather than an error.
-#
-# Bracket notation for one segment, because a model id contains dots:
-# `agents.defaults.models[anthropic/claude-haiku-4-5]`.
 config_get() {
   CONFIG_PATH="$RUN_CONFIG" CONFIG_QUERY="$1" node -e "
     const fs = require('fs');
@@ -327,10 +246,6 @@ config_get() {
   "
 }
 
-# The same question, asked of the payload the entrypoint sent rather than of the
-# file that came out. `absent` when the key is not mentioned; `null` when it is
-# mentioned as a deletion, which is a different statement and has to stay
-# distinguishable from both `absent` and a written value.
 patch_get() {
   PATCH_DOC="$RUN_PATCH_STDIN" PATCH_QUERY="$1" node -e "
     let patch;
@@ -353,11 +268,6 @@ patch_get() {
   "
 }
 
-# Seed a config volume with keys an operator set by hand, before a start runs
-# against it. This is the whole of acceptance criterion 3: the sibling has to
-# exist before the restart that must not remove it.
-#
-#   seed_config <home> <json>
 seed_config() {
   local home="$1" document="$2"
   mkdir -p "${home}/.openclaw"
@@ -385,9 +295,6 @@ seed_config() {
   "
 }
 
-# Does a path exist under $HOME after the run? `exec-approvals.json` is asserted
-# absent on a fresh start and gone after a migration, and "absent" is the
-# answer either way rather than an error.
 home_file_present() {
   if [ -e "${RUN_HOME}/$1" ]; then
     printf 'yes'

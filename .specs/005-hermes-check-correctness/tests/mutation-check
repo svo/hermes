@@ -1,24 +1,5 @@
 #!/usr/bin/env bash
-#
-# Sensitivity check. Not part of `run`: it is slow, and it is a check on the
-# cases rather than on hermes-check.
-#
-# Each mutation changes exactly one behaviour in a copy of hermes-check and
-# asserts that at least one case notices. A mutation nothing catches is a hole
-# in the suite — or, occasionally, a change with no observable effect, which is
-# worth knowing too and is recorded in README.md § Mutation-checked.
-#
-#   .specs/005-hermes-check-correctness/tests/mutation-check [name-substring]
-#
-# With an argument, only mutations whose name contains it are run.
-#
-# Every anchor is asserted to occur exactly once in the whole file before it is
-# applied, and a bad anchor is reported as a bad anchor rather than as a caught
-# or uncaught mutation. 002 learned that the hard way: two of its mutations
-# anchored on a string that also occurred in a neighbouring block.
 
-# The anchors below are literal fragments of hermes-check, so every $ in them is
-# meant to stay a $. Single quotes are the point.
 # shellcheck disable=SC2016
 
 set -uo pipefail
@@ -35,8 +16,6 @@ trap 'rm -rf "$work"' EXIT
 missed=()
 skipped=0
 
-# The suites, cheapest and most sensitive first: the loop stops as soon as
-# something catches the mutation.
 suites=(
   vip-matching-test
   classification-test
@@ -58,11 +37,6 @@ selected() {
   esac
 }
 
-# mutate <name> <anchor> <replacement>
-#
-# The anchor is a fixed string, matched against the whole file so that it may
-# span lines; the replacement takes its place. Both are passed through the
-# environment, never interpolated into a pattern.
 mutate() {
   local name="$1" anchor="$2" replacement="$3"
   local mutant="${work}/hermes-check" status caught out suite
@@ -89,7 +63,6 @@ open(dst, "w").write(s.replace(anchor, replacement, 1))
     return
   fi
 
-  # A mutant that no longer parses proves nothing about the cases.
   if ! bash -n "$mutant" 2>/dev/null; then
     printf 'SYNTAX %-46s the mutant does not parse — not applied\n' "$name" >&2
     missed+=("$name (bad mutant)")
@@ -112,14 +85,6 @@ open(dst, "w").write(s.replace(anchor, replacement, 1))
     missed+=("$name")
   fi
 }
-
-# Two further mutations are deliberately absent, and README.md § Mutation-checked
-# says why: deriving OTHER by subtraction again, and dropping the counter on the
-# calendar-extraction failure path. Neither is observable — the first because the
-# buckets are disjoint, the second because the extraction cannot fail. They are
-# named there rather than left here as permanent red.
-
-# --- VIP matching: C1 and C5 ----------------------------------------------
 
 mutate 'vip matches an address by containment' \
   '    if [ "$entry" = "$addr" ]; then' \
@@ -145,8 +110,6 @@ mutate 'an unreadable sender aborts the run' \
   "      | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' | head -1) || true" \
   "      | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' | head -1)"
 
-# --- classification and the counts: C2 -------------------------------------
-
 mutate 'vip is counted independently of the bucket' \
   '    if [ "$is_urgent" = "yes" ]; then
       urgent_count=$((urgent_count + 1))' \
@@ -161,8 +124,6 @@ mutate 'a message can land in two buckets' \
     if [ "$is_vip" = "yes" ]; then
       vip_count=$((vip_count + 1))'
 
-# --- data acquisition: C3 and C3b ------------------------------------------
-
 mutate 'the response shape is not validated' \
   '  if [ "$status" -eq 0 ] && printf '"'"'%s'"'"' "$raw" | jq -e -s --arg k "$key" \
     '"'"'length == 1 and (.[0] | type == "object"
@@ -176,8 +137,8 @@ mutate 'an empty response counts as usable' \
 
 mutate 'a data source failure is not counted' \
   '  data_source_errors=$((data_source_errors + 1))
-  # Named, and emitted in the section it belongs to' \
-  '  # Named, and emitted in the section it belongs to'
+  echo "DATA_SOURCE_ERROR: ${name}"' \
+  '  echo "DATA_SOURCE_ERROR: ${name}"'
 
 mutate 'a data source failure raises no alert' \
   '  add_reason "${name} data source unavailable"' \
@@ -186,8 +147,6 @@ mutate 'a data source failure raises no alert' \
 mutate 'the failing source is not named' \
   '  echo "DATA_SOURCE_ERROR: ${name}"' \
   '  :'
-
-# --- date handling: C4 -----------------------------------------------------
 
 mutate 'an absent timestamp is parsed as now' \
   '  if [ -z "$value" ] || [ "$value" = "$ABSENT" ]; then
@@ -225,8 +184,6 @@ mutate 'the unparseable count is not reported' \
   'echo "UNPARSEABLE_EVENTS: ${unparseable_events}"' \
   ':'
 
-# --- all-day events and ordering: C11 --------------------------------------
-
 mutate 'events are not ordered by start time' \
   'done <<< "$(printf '"'"'%s'"'"' "$parsed_events" | sort -t$'"'"'\t'"'"' -k1,1n)"' \
   'done <<< "$parsed_events"'
@@ -234,8 +191,6 @@ mutate 'events are not ordered by start time' \
 mutate 'the sort key runs to the end of the line' \
   "sort -t\$'\\t' -k1,1n" \
   "sort -t\$'\\t' -k1"
-
-# --- the upstream shape: SPEC Open Question 2 ------------------------------
 
 mutate 'a start object is not unwrapped' \
   '        if ($raw | type) == "object" then
@@ -247,8 +202,6 @@ mutate 'a start object is not unwrapped' \
 mutate "gog's local timestamps are ignored" \
   '           elif ($local | type) == "string" and ($local | test("T")) then $local' \
   '           elif false then $local'
-
-# --- message identity, and the sender address ------------------------------
 
 mutate 'grep is called without an option terminator' \
   '  if ! grep -qFx -- "$msg_id" "$SEEN_FILE" 2>/dev/null; then' \
@@ -293,8 +246,6 @@ mutate 'the unreadable message count is not reported' \
   'echo "UNREADABLE_MESSAGES: ${unreadable_messages}"' \
   ':'
 
-# --- the authoritative all-day signal, and event accounting ----------------
-
 mutate 'the all-day flag is ignored' \
   '  if [ "$all_day" = "all-day" ]; then
     all_day_events=$((all_day_events + 1))
@@ -321,8 +272,6 @@ mutate 'a non-object event is filtered away' \
 mutate 'zero is the no-previous-event sentinel again' \
   '  if [ -n "$prev_end_epoch" ] && [ "$start_epoch" -lt "$prev_end_epoch" ]; then' \
   '  if [ "${prev_end_epoch:-0}" -gt 0 ] && [ "$start_epoch" -lt "$prev_end_epoch" ]; then'
-
-# --- how gog is invoked: C10 -----------------------------------------------
 
 mutate 'an empty account argument is passed' \
   'gog_args=()' \

@@ -1,28 +1,5 @@
 #!/usr/bin/env bash
-#
-# Sensitivity check. Not part of `run`: it is slow, and it is a check on the
-# cases rather than on the entrypoint.
-#
-# Each mutation changes exactly one behaviour of the registrar in a copy of
-# entrypoint.sh and asserts that at least one case notices. A mutation nothing
-# catches is a hole in the suite.
-#
-# This is 003's script with 011's suites and 011's mutations. 003 keeps its own
-# for the behaviour 003 still owns: readiness, budgets, timeouts, delivery
-# validation and the prompt.
-#
-#   .specs/011-briefing-converges/tests/mutation-check [name-substring]
-#
-# With an argument, only mutations whose name contains it are run — the whole
-# set takes a while, and this is how you re-check one after editing its anchor.
-#
-# Every mutation's anchor is asserted to match exactly once first. 002 learned
-# that the hard way: two of its mutations anchored on a string that also
-# occurred in a neighbouring block, so they mutated code nothing there tested
-# and read as uncaught.
 
-# The anchors below are literal lines of entrypoint.sh, so every $ in them is
-# meant to stay a $. Single quotes are the point.
 # shellcheck disable=SC2016
 
 set -uo pipefail
@@ -40,7 +17,6 @@ caught=0
 missed=()
 skipped=0
 
-# Nothing is mutated for a name the filter excludes.
 selected() {
   if [ -z "$only" ]; then
     return 0
@@ -51,11 +27,6 @@ selected() {
   esac
 }
 
-# mutate <name> <anchor> <replacement>
-#
-# The anchor is a fixed string matched whole-line-substring; the replacement is
-# substituted for the whole line, or the line is deleted when it is the literal
-# DELETE.
 mutate() {
   local name="$1" anchor="$2" replacement="$3"
   local mutant="${work}/entrypoint.sh" hits
@@ -95,8 +66,6 @@ run_mutant() {
     return
   fi
 
-  # convergence-test first, and adoption-test only if nothing has caught it
-  # yet. A mutation is caught when any case catches it.
   local output
   output="$(ENTRYPOINT="$mutant" bash "${tests_dir}/convergence-test" 2>&1)"
   if ! printf '%s' "$output" | grep -q '^FAIL '; then
@@ -104,8 +73,6 @@ run_mutant() {
 $(ENTRYPOINT="$mutant" bash "${tests_dir}/adoption-test" 2>&1)"
   fi
 
-  # A mutant that never terminates leaves its registrar polling after the run.
-  # The mutant's path is unique to this iteration, so this matches only it.
   pkill -f "$mutant" 2>/dev/null || true
 
   if printf '%s' "$output" | grep -q '^FAIL '; then
@@ -118,10 +85,6 @@ $(ENTRYPOINT="$mutant" bash "${tests_dir}/adoption-test" 2>&1)"
   fi
 }
 
-# Mutation scoring reads FAIL lines out of the mutant run, so a suite that is
-# already failing would credit every mutation — including one that changes
-# nothing — as caught, and the script would exit 0. The baseline is asserted
-# green first, under the same budget the mutants get.
 printf 'Checking the baseline is green before mutating anything.\n'
 if ! baseline="$(ENTRYPOINT="$original" bash "${tests_dir}/convergence-test" 2>&1
                  ENTRYPOINT="$original" bash "${tests_dir}/adoption-test" 2>&1)" ||
@@ -140,7 +103,6 @@ mutate 'declares without the key' \
   '  --declaration-key "$briefing_declaration_key"' \
   'DELETE'
 
-# B2: with no stagger stored, every start's first declaration writes.
 mutate 'declares without --exact' \
   '  --exact' \
   'DELETE'
@@ -149,7 +111,6 @@ mutate 'removes before declaring' \
   '        declare_args=("${briefing_create_args[@]}")' \
   '        remove_unkeyed_briefings "${unkeyed_ids[@]}"; declare_args=("${briefing_create_args[@]}")'
 
-# On create's word, before a listing shows the key.
 mutate 'removes without confirming' \
   "          declared='yes'" \
   "          declared='yes'; remove_unkeyed_briefings \"\${unkeyed_ids[@]}\""
@@ -158,12 +119,10 @@ mutate 'removes a foreign-keyed job' \
   '          const unkeyed = row.name === process.env.BRIEFING_NAME && (row.declarationKey === undefined || row.declarationKey === null);' \
   '          const unkeyed = row.name === process.env.BRIEFING_NAME && !ours;'
 
-# A declaration leaves the name alone, so a renamed job is still the briefing.
 mutate 'matches the declared job by name as well as key' \
   '          const ours = row.declarationKey === process.env.BRIEFING_KEY;' \
   '          const ours = row.name === process.env.BRIEFING_NAME && row.declarationKey === process.env.BRIEFING_KEY;'
 
-# A no-op rather than DELETE: the line is the whole body of its `if`.
 mutate 'drops --disabled on adoption' \
   '          declare_args+=(--disabled)' \
   '          :'
@@ -188,8 +147,6 @@ mutate 'reports every outcome as registered' \
   '        case "$outcome" in' \
   '        outcome=created; case "$outcome" in'
 
-# The confirming read is what is retried after a declaration that succeeded.
-# Clearing the flag there retries the declaration instead, once per attempt.
 mutate 'declares again after a declare that succeeded' \
   '        reason="declaration reported success but no automation carries ${briefing_declaration_key}"' \
   "        declared='no'; reason=\"declaration reported success but no automation carries \${briefing_declaration_key}\""
@@ -210,7 +167,6 @@ mutate 'takes the reason from stderr when the JSON has one' \
   "  )\" || message=''" \
   "  )\"; message=''"
 
-# A hung create has printed only the --agent warning.
 mutate 'reports a timeout as whatever stderr held' \
   '  if [ -z "$message" ] && [ "$2" -eq 124 ]; then' \
   '  if false; then'

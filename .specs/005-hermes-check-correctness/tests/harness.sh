@@ -1,19 +1,8 @@
 #!/usr/bin/env bash
-#
-# Shared assertions and the hermetic runner for 005's checks. Sourced, not run.
-#
-# Assertion style follows the plan: one behaviour per case, named
-# should_<behaviour>_when_<condition>.
-#
-# This is the harness `bin/hermes-check-test` drives, and the one 001's checks
-# take their stubs from. There is deliberately only one.
 
 TESTS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${TESTS_DIR}/../../.." && pwd)"
 FIXTURES="${REPO_ROOT}/.specs/005-hermes-check-correctness/fixtures"
-# Overridable so a case can be pointed at another copy of the script — which is
-# how every case here was shown to fail before the fixes landed. See README.md
-# § Red before green.
 HERMES_CHECK="${HERMES_CHECK:-${REPO_ROOT}/infrastructure/ansible/roles/openclaw/files/hermes-check}"
 
 TESTS_PASSED=0
@@ -28,16 +17,6 @@ cp "${TESTS_DIR}/stub-gog" "${BIN_DIR}/gog"
 cp "${TESTS_DIR}/stub-fasttext" "${BIN_DIR}/fasttext"
 chmod +x "${BIN_DIR}/gog" "${BIN_DIR}/fasttext"
 
-# A stand-in for the urgency model. Stubbing `fasttext` on PATH is not enough:
-# hermes-check gates classification on the model *file* existing, so on an
-# image that has no /opt/hermes/urgency.bin the classifier is skipped and every
-# message lands in the wrong bucket. That is the builder image, which is where
-# 006's gate runs these suites — three classification cases failed there while
-# passing on any developer machine, because the 800 MB model is provisioned
-# there and the suites silently depended on it.
-#
-# The contents never matter; the stub classifier ignores its argument. Only the
-# existence of the path is load-bearing, so an empty file is the honest stub.
 MODEL_FILE_STUB="${TMP_ROOT}/urgency.bin"
 : > "$MODEL_FILE_STUB"
 
@@ -67,7 +46,6 @@ fail() {
 }
 
 assert_equals() {
-  # assert_equals <what> <expected> <actual>
   if [ "$2" != "$3" ]; then
     fail "$1"
     printf '       expected: %s\n' "$2" >&2
@@ -76,7 +54,6 @@ assert_equals() {
 }
 
 assert_contains() {
-  # assert_contains <what> <haystack> <needle>
   case "$2" in
     *"$3"*) ;;
     *)
@@ -87,7 +64,6 @@ assert_contains() {
 }
 
 assert_not_contains() {
-  # assert_not_contains <what> <haystack> <needle>
   case "$2" in
     *"$3"*)
       fail "$1"
@@ -96,43 +72,22 @@ assert_not_contains() {
   esac
 }
 
-# Number of lines in $1 that are exactly $2.
 count_exact_lines() {
   printf '%s\n' "$1" | grep -cxF -- "$2" || true
 }
 
-# Number of lines in $1 matching the basic regex $2.
 count_matching_lines() {
   printf '%s\n' "$1" | grep -c -- "$2" || true
 }
 
-# The value of a `NAME: value` line in the last run's output. Empty when the
-# line is absent, which a case should distinguish from a value of 0.
 field() {
   printf '%s\n' "$RUN_OUT" | sed -n "s/^$1: //p" | head -1
 }
 
-# Every `  - ` line of the last run, fence content included.
 listed_lines() {
   printf '%s\n' "$RUN_OUT" | grep '^  - ' || true
 }
 
-# Run hermes-check in a clean environment: an empty environment, a private HOME
-# so seen-message state never carries between cases, UTC so rendered times are
-# stable, and the stubs ahead of anything real on PATH.
-#
-#   run_check [--vip <content>] [--home <dir>] [--argv-log <file>] \
-#             <gmail-fixture> <calendar-fixture> [VAR=VALUE ...]
-#
-# A fixture argument naming a file under fixtures/ is passed as that path;
-# anything else is handed to the stub verbatim, so a case can feed output that
-# could not be stored as a fixture.
-#
-# --vip seeds the VIP file. Passing it per call rather than through a global is
-# deliberate: a global would leak a previous case's VIP list into the next one,
-# and "everything is a VIP" is exactly the bug this suite exists to catch.
-#
-# Sets RUN_OUT, RUN_ERR, RUN_STATUS.
 run_check() {
   local vip="" home_dir="" argv_log=""
   while [ "$#" -gt 0 ]; do
@@ -165,9 +120,6 @@ run_check() {
     calendar="${FIXTURES}/${calendar}"
   fi
 
-  # Restore errexit to whatever the caller had rather than forcing it on: an
-  # unconditional `set -e` here would make the next assignment whose command
-  # substitution finds nothing kill the whole suite silently.
   case $- in *e*) errexit_was_set="yes" ;; esac
   set +e
   env -i \
@@ -184,16 +136,12 @@ run_check() {
   RUN_STATUS=$?
   [ -n "$errexit_was_set" ] && set -e
 
-  # RUN_* are the contract with the suites that source this file; shellcheck
-  # cannot see those consumers from here.
   # shellcheck disable=SC2034
   RUN_OUT="$(cat "${run_dir}/stdout")"
   # shellcheck disable=SC2034
   RUN_ERR="$(cat "${run_dir}/stderr")"
 }
 
-# A private HOME that survives across several run_check calls, for the cases
-# that need a second run to see what the first one recorded.
 new_home() {
   local dir
   dir="$(mktemp -d "${TMP_ROOT}/home.XXXXXX")"
@@ -206,10 +154,6 @@ new_log() {
   printf '%s' "$file"
 }
 
-# Assertions shared by every case, so that the invariants hold on every fixture
-# rather than only where a case thinks to look. This is the general form of the
-# negative-OTHER and the abandoned-report findings: both were single fixtures
-# that happened to be looked at, and both are properties of every run.
 assert_universal_invariants() {
   local new urgent vip other
   assert_equals "exit status is zero" "0" "$RUN_STATUS"
@@ -231,8 +175,6 @@ assert_universal_invariants() {
     fi
   fi
 
-  # C4's regression markers. Either string in stderr means an unparsed date
-  # reached arithmetic, or a `continue` was written where it cannot act.
   assert_not_contains "no integer-expression errors" "$RUN_ERR" "integer expression expected"
   assert_not_contains "no misplaced continue" "$RUN_ERR" "continue: only meaningful"
 }

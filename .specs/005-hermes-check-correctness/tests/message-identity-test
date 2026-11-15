@@ -1,19 +1,4 @@
 #!/usr/bin/env bash
-#
-# The `.id` field, and the sender address extracted from `.from`.
-#
-# These are the two attacker-influenced values the rest of the pipeline trusts
-# without looking at, and an adversarial review of the finished change found
-# them still trusted. Every case here was a silent loss: the report read as an
-# ordinary quiet day and the missing thing was simply absent — no counter, no
-# stderr, `ACTION_NEEDED: no`. That is the one outcome SPEC.md § Operability
-# says must never happen, so they belong with the findings this spec set out to
-# fix rather than beside them.
-#
-# `.id` is a key into the seen-message file, not an identifier the script can
-# assume is present, unique, single-line, or safe to hand to `grep` unprefixed.
-# `.from` is a whole RFC 5322 header, and only the addr-spec inside it is the
-# sender's actual mailbox.
 
 set -uo pipefail
 
@@ -21,9 +6,6 @@ set -uo pipefail
 # shellcheck source=harness.sh
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
 
-# GNU grep permutes its arguments, so an id beginning with `-` was read as an
-# option. The seen file then became the pattern, leaving no file operand, and
-# grep read the loop's own input instead — consuming every remaining message.
 should_read_every_message_when_an_id_looks_like_a_grep_option() {
   case_start "${FUNCNAME[0]}"
   run_check --vip 'boss@example.com' gmail-option-shaped-id.json calendar-empty.json
@@ -37,8 +19,6 @@ should_read_every_message_when_an_id_looks_like_a_grep_option() {
 
 should_not_emit_grep_output_when_an_id_is_a_grep_long_option() {
   case_start "${FUNCNAME[0]}"
-  # `--version` and `--help` made grep print its own text onto the report's
-  # stdout, outside the fence and past the sanitizer — angle brackets included.
   run_check '{"messages":[{"id":"--version","subject":"x","from":"a@example.net"}]}' \
     calendar-empty.json
   assert_universal_invariants
@@ -47,7 +27,6 @@ should_not_emit_grep_output_when_an_id_is_a_grep_long_option() {
   case_end
 }
 
-# The display name in front of the addr-spec is chosen by the sender.
 should_not_flag_vip_when_the_display_name_impersonates_one() {
   case_start "${FUNCNAME[0]}"
   run_check --vip 'boss@example.com' gmail-spoofed-display-name.json calendar-empty.json
@@ -60,8 +39,6 @@ should_not_flag_vip_when_the_display_name_impersonates_one() {
 
 should_flag_vip_when_a_decoy_address_precedes_the_real_sender() {
   case_start "${FUNCNAME[0]}"
-  # The mirror image, and the reason this cannot be fixed by simply taking the
-  # last address instead of the first: it has to be the addr-spec.
   run_check --vip 'boss@example.com' gmail-vip-behind-decoy.json calendar-empty.json
   assert_universal_invariants
   assert_equals "is VIP" "1" "$(field VIP)"
@@ -79,12 +56,6 @@ should_flag_vip_when_the_header_is_a_bare_address_with_no_brackets() {
 
 should_keep_a_correct_sender_when_the_header_is_long_enough_to_fill_a_pipe() {
   case_start "${FUNCNAME[0]}"
-  # Built here rather than kept as a fixture: it is ~110 KB of filler, and the
-  # property under test is its size, not its content.
-  #
-  # `grep | head -1` exits non-zero when head closes the pipe on grep mid-write.
-  # The address had already been extracted correctly; discarding it on exit
-  # status alone silently demoted a VIP.
   local from json
   from="bob@example.com$(printf ', x%s@filler.invalid' $(seq 1 5000))"
   json="$(jq -nc --arg f "$from" \
@@ -96,8 +67,6 @@ should_keep_a_correct_sender_when_the_header_is_long_enough_to_fill_a_pipe() {
   case_end
 }
 
-# An id that cannot key the seen-message file means a message that cannot be
-# tracked between runs. Reported, not dropped.
 should_report_an_unreadable_message_when_it_has_no_id() {
   case_start "${FUNCNAME[0]}"
   run_check --vip 'boss@example.com' gmail-missing-id.json calendar-empty.json
@@ -119,8 +88,6 @@ should_report_an_unreadable_message_when_its_id_contains_a_newline() {
   case_end
 }
 
-# The seen file is one id per line. A multi-line id written into it evicted the
-# real ids under the 200-line cap, so messages already notified came back.
 should_not_evict_the_seen_file_when_an_id_contains_many_newlines() {
   case_start "${FUNCNAME[0]}"
   local home flood

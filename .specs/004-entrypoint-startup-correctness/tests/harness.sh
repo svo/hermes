@@ -1,21 +1,7 @@
 #!/usr/bin/env bash
-#
-# Shared assertions and the hermetic runner for 004's checks. Sourced, not run.
-#
-# The plan's verification is container-level — docker run with a variable
-# omitted, then `docker exec hermes openclaw config get`. That needs the image
-# and an Anthropic key, so it stays a manual acceptance step (see README.md).
-# What runs here is the same assertion against the same artefact: the real
-# entrypoint.sh is executed against a stub openclaw, and the openclaw.json it
-# writes — or conspicuously does not write — is what the cases read.
-#
-# Assertion style follows the plan: one behaviour per case, named
-# should_<behaviour>_when_<condition>.
 
 TESTS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${TESTS_DIR}/../../.." && pwd)"
-# Overridable so a case can be pointed at another copy — which is how these
-# were shown to fail against the pre-change entrypoint.
 ENTRYPOINT="${ENTRYPOINT:-${REPO_ROOT}/infrastructure/ansible/roles/openclaw/files/entrypoint.sh}"
 
 TESTS_PASSED=0
@@ -32,9 +18,6 @@ chmod +x "${BIN_DIR}/openclaw"
 cleanup() { rm -rf "$TMP_ROOT"; }
 trap cleanup EXIT
 
-# The variables a correct start supplies. A case names the ones it wants
-# *omitted*, which is what `docker run` without a -e actually does — an empty
-# value is a different input, and the two used to fail in different ways.
 DEFAULT_ENV=(
   ANTHROPIC_API_KEY=sk-ant-stub
   HERMES_VIBE=calm
@@ -47,12 +30,6 @@ DEFAULT_ENV=(
   HERMES_QUIET_HOURS_END=08:00
 )
 
-# Every variable the entrypoint requires unconditionally. The permutation
-# matrix walks this list, and it is deliberately a separate declaration from
-# DEFAULT_ENV so that a variable added to one and not the other shows up as a
-# failing case rather than as silently reduced coverage.
-#
-# Consumed by the suites that source this file; shellcheck cannot see them.
 # shellcheck disable=SC2034
 REQUIRED_VARS=(
   ANTHROPIC_API_KEY
@@ -89,7 +66,6 @@ fail() {
 }
 
 assert_equals() {
-  # assert_equals <what> <expected> <actual>
   if [ "$2" != "$3" ]; then
     fail "$1"
     printf '       expected: %s\n' "$2" >&2
@@ -98,7 +74,6 @@ assert_equals() {
 }
 
 assert_contains() {
-  # assert_contains <what> <haystack> <needle>
   case "$2" in
     *"$3"*) ;;
     *)
@@ -110,7 +85,6 @@ assert_contains() {
 }
 
 assert_not_contains() {
-  # assert_not_contains <what> <haystack> <needle>
   case "$2" in
     *"$3"*)
       fail "$1"
@@ -121,15 +95,12 @@ assert_not_contains() {
 }
 
 assert_file_absent() {
-  # assert_file_absent <what> <path>
   if [ -e "$2" ]; then
     fail "$1"
     printf '       expected absent: %s\n' "$2" >&2
   fi
 }
 
-# A HOME several runs can share, so a case can ask what a *restart* does to a
-# config volume that already holds a configured container's state.
 new_home() {
   local dir
   dir="$(mktemp -d "${TMP_ROOT}/home.XXXXXX")"
@@ -137,14 +108,6 @@ new_home() {
   printf '%s\n' "$dir"
 }
 
-# Run the real entrypoint in a clean environment: empty env, a private HOME so
-# no persisted config carries between cases, and a stub openclaw ahead of
-# anything real on PATH.
-#
-#   run_entrypoint [--home DIR] [--omit VAR]... [VAR=VALUE ...]
-#
-# --omit drops one of DEFAULT_ENV entirely rather than blanking it. Sets
-# RUN_OUT, RUN_ERR, RUN_STATUS, RUN_HOME, RUN_CONFIG, RUN_DIR.
 run_entrypoint() {
   local run_dir home="" errexit_was_set="" entry name candidate skip
   local -a omit=() env_args=()
@@ -183,20 +146,14 @@ run_entrypoint() {
     "${env_args[@]}" \
     "$@" \
     bash "$ENTRYPOINT" >"${run_dir}/stdout" 2>"${run_dir}/stderr"
-  # A comment does not disturb $?, so the disable can sit here.
   # shellcheck disable=SC2034
   RUN_STATUS=$?
   [ -n "$errexit_was_set" ] && set -e
 
-  # The briefing registrar is 003's, forked just before `exec`. It outlives the
-  # entrypoint and keeps writing to these files, so a successful run waits for
-  # its one line before anything reads them.
   if [ "$RUN_STATUS" -eq 0 ]; then
     wait_for_registrar "$run_dir"
   fi
 
-  # RUN_* are the contract with the suites that source this file; shellcheck
-  # cannot see those consumers from here.
   # shellcheck disable=SC2034
   RUN_DIR="${run_dir}"
   # shellcheck disable=SC2034
@@ -209,10 +166,6 @@ run_entrypoint() {
   RUN_ERR="$(cat "${run_dir}/stderr")"
 }
 
-# Bounded wait for the registrar's single terminal line. A run that never
-# forked one falls through after the timeout rather than hanging; that is not
-# an error here, because most of these cases are about what happens long before
-# the fork.
 wait_for_registrar() {
   local run_dir="$1" waited=0 limit="${HARNESS_REGISTRAR_TIMEOUT:-200}"
   while [ "$waited" -lt "$limit" ]; do
@@ -226,32 +179,22 @@ wait_for_registrar() {
   return 1
 }
 
-# Did the entrypoint reach `exec openclaw gateway`?
 gateway_started() {
   [ -f "${RUN_DIR}/gateway-started" ]
 }
 
-# Did it get as far as onboarding — the first thing that writes?
 onboarding_ran() {
   [ -f "${RUN_DIR}/onboarded" ]
 }
 
-# Did the phase 3 gate run?
 config_validated() {
   [ -f "${RUN_DIR}/config-validated" ]
 }
 
-# Did the approvals migration run? 008 replaced this container's
-# exec-approvals.json heredoc with a one-off `openclaw doctor --fix`, guarded on
-# a legacy file being present -- so "it ran" and "it did not run" are both
-# assertions, and neither is visible in the config.
 doctor_ran() {
   [ -f "${RUN_DIR}/doctor-ran" ]
 }
 
-# A value out of the config the last run wrote, by jq path expression. An
-# absent file reads as an empty config: a run rejected in phase 1 writes
-# nothing at all, and that is the answer, not a jq failure.
 config_get() {
   if [ -f "$RUN_CONFIG" ]; then
     jq -c -r "$1" "$RUN_CONFIG"
@@ -260,9 +203,6 @@ config_get() {
   fi
 }
 
-# The fingerprint of a file, or the word `absent`. The permutation matrix
-# compares this either side of a rejected start: identical means phase 1 really
-# did precede every write, rather than merely appearing earlier in the file.
 fingerprint() {
   if [ -f "$1" ]; then
     sha256sum "$1" | cut -d' ' -f1

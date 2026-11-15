@@ -1,33 +1,4 @@
 #!/usr/bin/env bash
-#
-# Stand-in for `openclaw`, placed ahead of any real binary on PATH so that
-# `entrypoint.sh` can be run end to end with no credentials, no network, and no
-# gateway process.
-#
-# 006's config check exists to prove that the configuration the entrypoint
-# *writes* is one the gateway can *read*. Getting to that file means onboarding,
-# a readiness probe, an automations round-trip and a final `exec` — so this stub
-# models each of those calls rather than the entrypoint being refactored into
-# something more convenient to test. Running the real code path is the whole
-# point; a fixture checked in beside it would drift the first time the
-# entrypoint gained a key.
-#
-#   OPENCLAW_ARGV_LOG    file to append this invocation's argv to
-#   STUB_OPENCLAW_STATE  directory for the automations store and the pristine
-#                        copy of the seed (default: $HOME/.stub-openclaw)
-#
-# Deliberately STRICT: an invocation this does not model exits non-zero and says
-# so. A permissive stub would answer a future `openclaw <something>` with
-# success and the check would then report a green verdict on a configuration the
-# container never really produced — the same "gate exists but checks nothing"
-# failure the whole spec is fixing. 005's `stub-gog` is permissive for the
-# opposite and equally deliberate reason: it has to answer whatever
-# `hermes-check` asks so that a fixture can drive the reply.
-#
-# It never validates anything. `config validate` here always succeeds, because
-# the verdict that matters comes from the real `openclaw` the check runs itself,
-# against the file this stub let the entrypoint write. A stub that returned a
-# verdict would be a gate marking its own homework.
 
 set -euo pipefail
 
@@ -36,14 +7,6 @@ automations_dir="${state_dir}/automations"
 config_path="${HOME}/.openclaw/openclaw.json"
 seed_path="${state_dir}/seed.json"
 
-# argv, in the shape 005's stub-gog logs it, so that a reader who knows one log
-# knows both. Each argument is bracketed so an empty one is visible as `ARG []`
-# rather than as nothing at all.
-#
-# The command name is the leading one or two non-flag words. Every call the
-# entrypoint makes is named by at most two — `config validate`,
-# `automations create` — and stopping at two keeps a cron expression and a
-# multi-line prompt out of the name.
 log_invocation() {
   if [ -z "${OPENCLAW_ARGV_LOG:-}" ]; then
     return 0
@@ -79,21 +42,9 @@ unimplemented() {
   exit 64
 }
 
-# What onboarding leaves behind, trimmed to the keys that matter here: the ones
-# the entrypoint goes on to read or overwrite. It is shaped after a real
-# `openclaw onboard --non-interactive` run, and deliberately does NOT carry the
-# Anthropic key — the real wizard stores that outside the config, which is why
-# the entrypoint writes `env.vars.ANTHROPIC_API_KEY` itself and why that key
-# vanishing is a silent failure nothing else would notice.
-#
-# A copy is kept so the check can tell what the entrypoint changed from what it
-# was given. Without the copy, "every key the entrypoint sets is correct" could
-# still be true of a config that had also grown a key nobody accounted for.
 cmd_onboard() {
   local port=3000 bind=lan
 
-  # One shift per iteration: a flag's value is consumed by the next pass, so a
-  # trailing `--gateway-port` with no value cannot shift past the end.
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --gateway-port) port="${2:-$port}" ;;
@@ -104,9 +55,6 @@ cmd_onboard() {
 
   mkdir -p "${HOME}/.openclaw/workspace" "$state_dir"
 
-  # Only when absent, matching the real command's place in the entrypoint: it
-  # is called once, on a container with no configuration yet. Overwriting here
-  # would hide a second call that should not be happening.
   if [ -f "$config_path" ]; then
     printf 'stub-openclaw: onboard skipped, %s already exists\n' "$config_path"
     return 0
@@ -172,25 +120,10 @@ SEED
   printf 'stub-openclaw: onboarded, wrote %s\n' "$config_path"
 }
 
-# The automations store. `create` then `list` has to round-trip, because the
-# entrypoint's registrar treats "created but not listed" as a failure it must
-# not retry — a store that forgot would turn one create into an error path the
-# check would then be measuring instead of the config.
-#
-# One file per job, named after the job, holding the two fields a listing
-# reports beyond the name: `enabled`, and the declaration key when there is
-# one. 011's registrar declares the briefing under a key and tells its own job
-# from an older one by that key alone, so the key has to round-trip too. A
-# keyed create is an upsert by key, as upstream's is; what a declaration
-# converges is not modelled, because nothing here asks. 003's stub models it.
-#
-# A name is a filename here, so two jobs cannot share one. Upstream allows it,
-# and a create that would need it is refused rather than overwriting the first.
 automation_id() {
   printf 'stub-job-%s' "$1"
 }
 
-# automation_field <name> <field>. Empty when the job does not carry it.
 automation_field() {
   local field value
   while IFS='=' read -r field value; do
@@ -201,10 +134,6 @@ automation_field() {
   done < "${automations_dir}/$1"
 }
 
-# One row, in the shape `list --json` and `create` print it. Hand-built rather
-# than piped through a JSON tool: the stub has to run in the builder image,
-# which carries no guarantee of `jq`. The name and key are checked for JSON's
-# two special characters when they are stored, so nothing here needs escaping.
 automation_json() {
   local name="$1" key
   key="$(automation_field "$name" declarationKey)"
@@ -228,9 +157,6 @@ cmd_automations_list() {
     shift
   done
 
-  # A glob rather than `ls`: a job name is a filename here, and parsing a
-  # listing would be one more place for a name to be mangled. Disabled jobs
-  # are listed only with --all, as upstream's are.
   for path in "${automations_dir}"/*; do
     if [ -e "$path" ]; then
       name="${path##*/}"
@@ -241,7 +167,6 @@ cmd_automations_list() {
   done
 
   if [ "$json" = 'yes' ]; then
-    # The envelope the pinned CLI prints, which 011's probe recorded.
     printf '{"jobs":['
     for name in "${names[@]}"; do
       if [ "$first" = 'no' ]; then
@@ -266,9 +191,6 @@ cmd_automations_list() {
 cmd_automations_create() {
   local name='' key='' enabled='true' existing_key
 
-  # One shift per iteration, as in cmd_onboard: a flag's value is read here
-  # and passed over on the next pass, and the schedule and prompt are
-  # positionals nothing here needs.
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --name) name="${2:-}" ;;
@@ -281,10 +203,6 @@ cmd_automations_create() {
   if [ -z "$name" ]; then
     unimplemented 'automations create with no --name'
   fi
-  # A name is a filename here, so a separator in it would write outside the
-  # store, and a quote or backslash would break the hand-built JSON. The
-  # entrypoint's name and key are constants; anything else is a bug worth
-  # stopping on rather than silently mangling.
   case "$name" in
     */*|.|..|*'"'*|*\\*) unimplemented "automations create with unusable --name '${name}'" ;;
   esac
@@ -295,8 +213,6 @@ cmd_automations_create() {
   mkdir -p "$automations_dir"
   if [ -e "${automations_dir}/${name}" ]; then
     existing_key="$(automation_field "$name" declarationKey)"
-    # The declared job already exists, so the upsert converges onto it.
-    # Nothing it converges is stored here, so nothing changes.
     if [ -n "$key" ] && [ "$key" = "$existing_key" ]; then
       printf '{"created":false,"updated":false,"job":%s}\n' "$(automation_json "$name")"
       return 0
@@ -311,8 +227,6 @@ cmd_automations_create() {
     printf 'enabled=%s\n' "$enabled"
   } > "${automations_dir}/${name}"
 
-  # Upstream prints the job itself for an undeclared create, and an outcome
-  # wrapping it for a declared one.
   if [ -n "$key" ]; then
     printf '{"created":true,"job":%s}\n' "$(automation_json "$name")"
   else
@@ -335,14 +249,9 @@ cmd_automations() {
 
 cmd_gateway() {
   case "${1:-}" in
-    # The registrar's readiness probe. Ready on the first ask, so the run is
-    # bounded by the entrypoint's own retry budget rather than by wall clock.
     health)
       printf 'stub-openclaw: gateway healthy\n'
       ;;
-    # The `exec` at the end of the entrypoint. Returning immediately is what
-    # makes the whole startup path finite: the process the container would keep
-    # forever is the one thing a check cannot wait for.
     ''|-*)
       printf 'stub-openclaw: gateway started and exiting (stub)\n'
       ;;
@@ -352,10 +261,6 @@ cmd_gateway() {
   esac
 }
 
-# `config set <path> <value> --expect-current-absent`, the write-if-absent shape
-# 008 uses for tools.exec.security so that a restart cannot revert an operator's
-# tightened exec policy (004's finding B6). Strict about the flag: a stub that
-# ignored it would perform an unconditional write and hide the regression.
 cmd_config_set() {
   local path="${1:-}" value="${2:-}"
   if [ -z "$path" ] || [ -z "$value" ]; then
@@ -397,35 +302,15 @@ cmd_config_set() {
   "
 }
 
-# `config patch`, which 008 made the entrypoint's only route to openclaw.json.
-#
-# Upstream's contract, from `openclaw config patch --help`: objects merge
-# recursively, arrays and scalars replace, and null deletes a path. The
-# entrypoint emits strict JSON — the JSON5 subset the real command accepts — so
-# JSON.parse is enough here and no JSON5 parser is needed.
-#
-# It judges nothing, for the same reason `config validate` below judges nothing:
-# the verdict that matters comes from the real `openclaw` this check runs itself,
-# against the file this stub let the entrypoint write. A stub that validated
-# would be a gate marking its own homework. What it must get right is the
-# *merge*, because that is what decides which keys reach the real validator.
 cmd_config_patch() {
   local stdin_only='no'
   local arg
   for arg in "$@"; do
     case "$arg" in
       --stdin) stdin_only='yes' ;;
-      # Rejected rather than ignored. A stub that shrugged at an unrecognised
-      # flag let two real regressions through 008's mutation check: `--dry-run`
-      # writes nothing at all, and `--replace-path agents.defaults.models`
-      # restores the whole-object clobber 008 exists to remove. This is the
-      # check `bin/test` actually runs, so it is the one that must not be kind.
       *) unimplemented "config patch ${arg}" ;;
     esac
   done
-  # The entrypoint pipes its payload in. A call that named a file instead would
-  # be a different contract, and this stub would be modelling something the
-  # container does not do.
   if [ "$stdin_only" != 'yes' ]; then
     unimplemented "config patch (without --stdin)"
   fi

@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-#
-# Runs every check for 011. Accumulates failures rather than stopping at the
-# first, so one run reveals every problem.
-#
-#   .specs/011-briefing-converges/tests/run
-#
-# Not a `bin/test` check, following 002–004 and 007–009: adding one would run
-# this whole suite inside every disposable repository 006's own cases build.
-# The scripts here are still linted by the gate, which discovers by shebang
-# rather than by extension.
 
 set -uo pipefail
 

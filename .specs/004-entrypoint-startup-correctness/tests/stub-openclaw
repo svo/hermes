@@ -1,32 +1,4 @@
 #!/usr/bin/env bash
-#
-# Fake `openclaw`, standing in for the subcommands the entrypoint and these
-# cases use. No network, no credentials, no image.
-#
-#   onboard          writes what onboarding leaves behind — by default WITHOUT a
-#                    `tools` key, which is the shape that exposed B2
-#   gateway          records that it was reached, then exits 0 instead of serving
-#   gateway health   the readiness probe 003's registrar polls
-#   config validate  a transcription of the upstream schema, for the keys this
-#                    entrypoint writes
-#   config get       one dotted path out of the config
-#   automations ...  just enough that the registrar finishes and gets out of the
-#                    way; 003's stub is the one that tests registration
-#
-# Behaviour switches, all defaulting to the happy path:
-#
-#   OPENCLAW_STUB_ONBOARD_TOOLS   yes  -> onboarding also writes "tools": {}
-#   OPENCLAW_STUB_ONBOARD_EXTRA   json -> merged into the onboarded config, which
-#                                         is how a case injects a key the
-#                                         validator must reject
-#   OPENCLAW_STUB_VALIDATE_ERROR  text -> validate rejects with this message
-#                                         whatever the config says
-#
-# The onboarded config omits `tools` on purpose. Real onboarding's output is not
-# documented, and the entrypoint used to write config.tools.loopDetection
-# thirteen lines above the guard that created config.tools — a TypeError that
-# only appears when the key is absent. A stub that always supplied it would have
-# made B2 untestable, which is how the defect survived this long.
 
 set -uo pipefail
 
@@ -68,9 +40,6 @@ case "${1:-}" in
         exit 0
         ;;
       *)
-        # `exec openclaw gateway` is the last line of the entrypoint, so this
-        # marker is how a case asserts that a rejected configuration never got
-        # that far.
         if [ -n "$markers" ]; then
           : > "${markers}/gateway-started"
         fi
@@ -80,9 +49,6 @@ case "${1:-}" in
     ;;
 
   doctor)
-    # 008's approvals migration. The entrypoint calls this only when a legacy
-    # exec-approvals.json is on the volume, so a case that never seeds one must
-    # never reach here -- which is itself an assertion, made by the marker.
     case " $* " in
       *" --fix "*) ;;
       *) usage "$@" ;;
@@ -90,21 +56,12 @@ case "${1:-}" in
     if [ -n "$markers" ]; then
       : > "${markers}/doctor-ran"
     fi
-    # What the real one does with a legacy file carrying a policy: import it into
-    # SQLite and retire the file. The entrypoint depends on the file going away;
-    # one left behind means the next start tries again.
     rm -f "${HOME}/.openclaw/exec-approvals.json"
     printf 'Imported legacy exec approvals into shared SQLite state.\n'
     exit 0
     ;;
 
   automations | cron)
-    # The registrar is 003's; it only has to finish quietly here. The briefing
-    # is listed as already declared, under the key 011 declares it with, so
-    # the registrar logs one line and exits instead of retrying against a
-    # store this stub does not keep. A declaration converges onto that job and
-    # changes nothing. Without --json the listing is the plain one, as the
-    # real CLI's is.
     briefing_job='{"id":"job-0001","name":"morning-briefing","declarationKey":"hermes:morning-briefing","enabled":true}'
     case "${2:-}" in
       list)
@@ -124,14 +81,6 @@ case "${1:-}" in
   config)
     case "${2:-}" in
       set)
-        # Write-if-absent, which is the only shape the entrypoint uses. 008 sets
-        # tools.exec.security this way so that a restart cannot revert an
-        # operator's tightened exec policy -- 004's finding B6, which used to be
-        # held by the `[ ! -f ]` guard on exec-approvals.json.
-        #
-        # Strict about the flag for the same reason 008's `config patch` is: a
-        # stub that ignored --expect-current-absent would perform an
-        # unconditional write and turn the case that pins this green.
         stub_path="${3:-}"
         stub_value="${4:-}"
         if [ -z "$stub_path" ] || [ -z "$stub_value" ]; then usage "$@"; fi
@@ -162,7 +111,6 @@ case "${1:-}" in
           }
           const leaf = parts[parts.length - 1];
           if (Object.prototype.hasOwnProperty.call(node, leaf)) {
-            // The refusal upstream gives, and the exit code the entrypoint reads.
             console.error('conditional config set expectation did not match the ' +
               'authored config, so nothing was changed');
             process.exit(1);
@@ -174,39 +122,10 @@ case "${1:-}" in
         ;;
 
       patch)
-        # 008 routes the main config block through `openclaw config patch`
-        # rather than letting the entrypoint open openclaw.json itself. The
-        # merge is modelled here; the verdict is not.
-        #
-        # Upstream's contract, from `openclaw config patch --help`: objects
-        # merge recursively, arrays and scalars replace, and null deletes a
-        # path. The entrypoint emits strict JSON, which is the JSON5 subset the
-        # real command accepts, so JSON.parse is enough and no JSON5 parser is
-        # needed here.
-        #
-        # It validates nothing on purpose. A stub with a schema opinion would be
-        # a third transcription to keep in step with upstream; 006's
-        # config-schema-check runs the REAL validator over the file this
-        # produces, which is the check that decides whether the payload is
-        # legal. This decides only what the file looks like.
-        #
-        #   OPENCLAW_STUB_PATCH_ERROR  text -> `config patch` rejects with this
-        #                              message and writes nothing, the way a
-        #                              schema violation does. The entrypoint
-        #                              redacts that message before it reaches
-        #                              the log, so a case has to be able to make
-        #                              it quote a credential.
         if [ -n "${OPENCLAW_STUB_PATCH_ERROR:-}" ]; then
           printf '%s\n' "$OPENCLAW_STUB_PATCH_ERROR" >&2
           exit 1
         fi
-        # Strict about its flags, and that is load-bearing rather than tidy.
-        # A stub that shrugged at an unrecognised flag let two real regressions
-        # through 008's mutation check: `--dry-run` writes nothing at all, and
-        # `--replace-path agents.defaults.models` restores the whole-object
-        # clobber 008 exists to remove. Both produced a green run against a
-        # permissive stub, because the merge it performed was its own rather
-        # than the one it was asked for.
         shift 2
         while [ "$#" -gt 0 ]; do
           case "$1" in
@@ -238,9 +157,6 @@ case "${1:-}" in
             config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
           } catch {}
 
-          // null deletes; a plain object merges into a plain object; anything
-          // else — array, scalar, or an object landing on a non-object —
-          // replaces. That is upstream's rule, restated.
           const isPlainObject = (value) =>
             value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -291,12 +207,6 @@ case "${1:-}" in
         STUB_CONFIG="$config" STUB_JSON="${3:-}" node -e "
           const fs = require('fs');
 
-          // Transcribed from docs.openclaw.ai, and deliberately narrow: it
-          // rejects unknown keys only INSIDE the objects it has evidence for,
-          // and says nothing about top-level keys onboarding may write that
-          // this transcription has never seen. Upstream is strict everywhere;
-          // a stub that guessed at the parts it could not read would reject
-          // configurations that are fine.
           const AGENT_DEFAULT_KEYS = [
             'workspace', 'cwd', 'repoRoot', 'skills', 'skipBootstrap',
             'skipOptionalBootstrapFiles', 'contextInjection', 'bootstrapMaxChars',
@@ -326,13 +236,6 @@ case "${1:-}" in
             'backgroundMs', 'timeoutSeconds', 'cleanupMs', 'approvalRunningNoticeMs',
             'notifyOnExit', 'notifyOnExitEmptySuccess', 'commandHighlighting',
             'applyPatch', 'grantExpiryDays',
-            // Added when 008 emptied UNVERIFIED below. It had been held out of
-            // this list and named there instead, because the documentation page
-            // this transcription came from does not mention it. 008 asked the
-            // schema itself, which does: type string, enum
-            // deny|allowlist|full. Without this entry an empty UNVERIFIED list
-            // turns the key from unreviewed into rejected, which would fail the
-            // phase 3 gate over a key upstream accepts.
             'security'
           ];
           const TELEGRAM_KEYS = [
@@ -346,25 +249,6 @@ case "${1:-}" in
           const DM_POLICIES = ['pairing', 'allowlist', 'open', 'disabled'];
           const HEARTBEAT_TARGETS = ['owner', 'last', 'none'];
 
-          // Keys this entrypoint writes that the published docs do not list.
-          // They are NOT rejected: 'absent from one page' is weaker evidence
-          // than 'documented as something else', and removing working
-          // configuration on that basis would be a guess. They are reported
-          // instead, so a new hand-written key cannot be added without someone
-          // noticing that nothing has verified it.
-          //
-          // The list is empty, and getting it there is what 008 was for. It
-          // held four entries. Three were the loopDetection thresholds, which
-          // 78ba48e removed from the entrypoint once the schema stopped
-          // accepting them. The fourth was tools.exec.security, and 008 did the
-          // thing this list exists to prompt: ran 'openclaw config schema'
-          // against the pinned version and looked. It is there --
-          // type string, enum deny|allowlist|full -- so it is verified, not
-          // unverified, and the finding that called it absent is falsified.
-          //
-          // Keep the mechanism. A key added here that upstream does not
-          // document should still show up in this list rather than in a
-          // container.
           const UNVERIFIED = [];
 
           const problems = [];
@@ -394,9 +278,6 @@ case "${1:-}" in
             }
           };
 
-          // env — the one this entrypoint used to get wrong. An inline
-          // environment variable lives at env.vars.<NAME>; a bare env.<NAME> is
-          // an unrecognised key, and upstream rejects it.
           if (config.env !== undefined) checkKeys(config.env, 'env', ENV_KEYS);
 
           if (config.commands !== undefined) {
@@ -434,7 +315,6 @@ case "${1:-}" in
             const heartbeat = defaults.heartbeat;
             if (heartbeat !== undefined) {
               checkKeys(heartbeat, 'agents.defaults.heartbeat', HEARTBEAT_KEYS);
-              // owner | last | none, or an explicit channel id.
               if (typeof heartbeat.target === 'string' &&
                   HEARTBEAT_TARGETS.includes(heartbeat.target) === false &&
                   /^[a-z][a-z0-9-]*\$/.test(heartbeat.target) === false) {
@@ -457,9 +337,6 @@ case "${1:-}" in
           if (telegram !== undefined) {
             checkKeys(telegram, 'channels.telegram', TELEGRAM_KEYS);
             enumCheck(telegram.dmPolicy, 'channels.telegram.dmPolicy', DM_POLICIES);
-            // Documented cross-field rule: an allowlist policy with nothing in
-            // the allowlist admits nobody and is rejected rather than accepted
-            // as a bot that silently never answers.
             if (telegram.dmPolicy === 'allowlist') {
               const allow = Array.isArray(telegram.allowFrom) ? telegram.allowFrom : [];
               if (allow.filter((entry) => String(entry).trim() !== '').length === 0) {

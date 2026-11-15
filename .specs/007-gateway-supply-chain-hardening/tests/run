@@ -1,15 +1,4 @@
 #!/usr/bin/env bash
-#
-# Runs every check for 007. Accumulates failures rather than stopping at the
-# first, so one run reveals every problem.
-#
-#   .specs/007-gateway-supply-chain-hardening/tests/run
-#
-# Not a `bin/test` check, and see README.md for why: 002's, 003's and 004's
-# entrypoint suites are not either, and adding one would run this whole suite
-# inside every disposable repository 006's own cases build. The scripts here
-# are still linted by the gate, which discovers by shebang rather than by
-# extension.
 
 set -uo pipefail
 
@@ -21,17 +10,6 @@ failed=()
 skipped=()
 ran=0
 
-# Output is captured rather than streamed so that the skip notices inside it
-# can be relayed, then printed in full either way.
-#
-# A check that passes can still have skipped part of itself, and here that is
-# not hypothetical: provisioning-test skips its entire body when python3 or
-# PyYAML is absent, and skips its upstream digest comparison unless
-# HERMES_CHECK_UPSTREAM is set. Without this, a run in which track 2 asserted
-# nothing at all would print "All 007 checks passed." — a green verdict over a
-# suite that never opened a role. `bin/test` relays skips for exactly this
-# reason; a suite it does not run needs its own copy of the discipline rather
-# than an exemption from it.
 check() {
   local name="$1" output status=0
   shift
@@ -66,8 +44,6 @@ printf '\n========================================\n'
 printf '%d checks passed, %d failed, %d skip notice(s)\n' \
   "$(( ran - ${#failed[@]} ))" "${#failed[@]}" "${#skipped[@]}"
 
-# Repeated at the end on purpose. One scrolled past the top of a long run is a
-# thing that did not happen, and the reader has no other way to notice.
 if [ ${#skipped[@]} -gt 0 ]; then
   printf '\nSkipped:\n'
   printf '  %s\n' "${skipped[@]}"

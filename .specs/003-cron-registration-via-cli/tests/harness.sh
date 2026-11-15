@@ -1,20 +1,7 @@
 #!/usr/bin/env bash
-#
-# Shared assertions and the hermetic runner for 003's checks. Sourced, not run.
-#
-# The plan's verification is container-level — docker restart, docker exec
-# openclaw cron list. That needs an image and an Anthropic key, so it stays a
-# manual acceptance step (see README.md). What runs here is the same assertion
-# against the same artefact: the real entrypoint.sh is executed against a stub
-# openclaw, and the automation store that stub keeps is what the cases read.
-#
-# Assertion style follows the plan: one behaviour per case, named
-# should_<behaviour>_when_<condition>.
 
 TESTS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${TESTS_DIR}/../../.." && pwd)"
-# Overridable so a case can be pointed at another copy — which is how these
-# were shown to fail against the pre-change entrypoint.
 ENTRYPOINT="${ENTRYPOINT:-${REPO_ROOT}/infrastructure/ansible/roles/openclaw/files/entrypoint.sh}"
 
 TESTS_PASSED=0
@@ -54,7 +41,6 @@ fail() {
 }
 
 assert_equals() {
-  # assert_equals <what> <expected> <actual>
   if [ "$2" != "$3" ]; then
     fail "$1"
     printf '       expected: %s\n' "$2" >&2
@@ -63,7 +49,6 @@ assert_equals() {
 }
 
 assert_contains() {
-  # assert_contains <what> <haystack> <needle>
   case "$2" in
     *"$3"*) ;;
     *)
@@ -75,7 +60,6 @@ assert_contains() {
 }
 
 assert_not_contains() {
-  # assert_not_contains <what> <haystack> <needle>
   case "$2" in
     *"$3"*)
       fail "$1"
@@ -86,17 +70,12 @@ assert_not_contains() {
 }
 
 assert_file_absent() {
-  # assert_file_absent <what> <path>
   if [ -e "$2" ]; then
     fail "$1"
     printf '       expected absent: %s\n' "$2" >&2
   fi
 }
 
-# A shared automation store, so a case can run the entrypoint several times
-# against the same "volume" — which is what the restart-idempotency case needs.
-#
-#   store="$(new_store)"
 new_store() {
   local dir
   dir="$(mktemp -d "${TMP_ROOT}/store.XXXXXX")"
@@ -104,18 +83,6 @@ new_store() {
   printf '%s\n' "$dir"
 }
 
-# Run the real entrypoint in a clean environment: empty env, a private HOME so
-# no persisted config carries between cases, and a stub openclaw ahead of
-# anything real on PATH. The HERMES_* variables are the ones the entrypoint
-# already requires; only the briefing ones vary between cases.
-#
-#   run_entrypoint [--store DIR] [--home DIR] [VAR=VALUE ...]
-#
-# Sets RUN_OUT, RUN_ERR, RUN_STATUS, RUN_HOME, RUN_STORE, RUN_DIR.
-#
-# The registrar is a detached subshell that outlives `exec openclaw gateway`,
-# so this returns once the entrypoint has finished *and* the registrar has
-# logged a terminal line — see wait_for_registrar.
 run_entrypoint() {
   local run_dir store="" home="" errexit_was_set=""
 
@@ -154,13 +121,10 @@ run_entrypoint() {
     HERMES_CRON_CALL_TIMEOUT=2 \
     "$@" \
     bash "$ENTRYPOINT" >"${run_dir}/stdout" 2>"${run_dir}/stderr"
-  # A comment does not disturb $?, so the disable can sit here.
   # shellcheck disable=SC2034
   RUN_STATUS=$?
   [ -n "$errexit_was_set" ] && set -e
 
-  # RUN_* are the contract with the suites that source this file; shellcheck
-  # cannot see those consumers from here.
   # shellcheck disable=SC2034
   RUN_DIR="${run_dir}"
   # shellcheck disable=SC2034
@@ -168,12 +132,6 @@ run_entrypoint() {
   # shellcheck disable=SC2034
   RUN_STORE="${store}"
 
-  # The registrar is forked on the second-to-last line, so a non-zero exit
-  # means it was never started and there is nothing to wait for.
-  #
-  # A timeout is reported rather than discarded. Silently reading a half-
-  # written log is how a suite goes green while every case waits out the full
-  # budget — and the assertions that follow would be racing the registrar.
   if [ "$RUN_STATUS" -eq 0 ] && ! wait_for_registrar "${run_dir}"; then
     fail "the registrar logged no terminal line within the budget"
   fi
@@ -184,16 +142,6 @@ run_entrypoint() {
   RUN_ERR="$(cat "${run_dir}/stderr")"
 }
 
-# The registrar is forked before `exec`, so it keeps writing to the run's
-# stdout and stderr after the entrypoint process is gone. Every terminal path
-# emits exactly one of these lines, so waiting for one is waiting for the
-# registrar to finish. Bounded: a case that never starts a registrar (a
-# configuration error exits before the fork) falls through after the timeout
-# rather than hanging.
-#
-# HARNESS_REGISTRAR_TIMEOUT bounds the wait in twentieths of a second. The
-# default is generous; the sensitivity run lowers it, because an entrypoint
-# with no registrar in it waits out the whole budget on every case.
 wait_for_registrar() {
   local run_dir="$1" waited=0 limit="${HARNESS_REGISTRAR_TIMEOUT:-600}"
   while [ "$waited" -lt "$limit" ]; do
@@ -207,32 +155,19 @@ wait_for_registrar() {
   return 1
 }
 
-# Everything the registrar logged, whichever stream it chose. Success is
-# stdout, failure is stderr, and most assertions do not care which.
 run_log() {
   cat "${RUN_DIR}/stdout" "${RUN_DIR}/stderr" 2>/dev/null
 }
 
-# Did the entrypoint reach `exec openclaw gateway`? The stub records it, so a
-# case can assert that a rejected configuration never started the gateway —
-# and that a failed registration did not stop it.
 gateway_started() {
   [ -f "${RUN_DIR}/gateway-started" ]
 }
 
-# The account `gog` resolves from the gateway's environment, which is the one
-# every command the agent runs inherits. Prints it; returns 1, printing
-# nothing, when the gateway was started with no GOG_ACCOUNT at all.
 gateway_gog_account() {
   [ -f "${RUN_DIR}/gateway-gog-account" ] || return 1
   cat "${RUN_DIR}/gateway-gog-account"
 }
 
-# A `gog` that records its argv and succeeds, installed ahead of anything real
-# on PATH. Only the service-account branch of the entrypoint calls gog, and
-# only the cases that take that branch need this, so it is installed on demand
-# rather than for every run. One line per call, in `calls-gog` beside the
-# stub's other markers.
 install_gog_stub() {
   cat > "${BIN_DIR}/gog" <<'STUB'
 #!/usr/bin/env bash
@@ -244,33 +179,25 @@ STUB
   chmod +x "${BIN_DIR}/gog"
 }
 
-# The automations the stub holds, as JSON.
 store_jobs() {
   cat "${RUN_STORE}/jobs.json"
 }
 
-# How many automations carry this name.
 store_count_named() {
   jq --arg name "$1" '[.[] | select(.name == $name)] | length' "${RUN_STORE}/jobs.json"
 }
 
-# One field of the single automation with this name.
 store_job_field() {
-  # store_job_field <name> <jq-path-expression>
   jq -r --arg name "$1" "[.[] | select(.name == \$name)][0] | $2" "${RUN_STORE}/jobs.json"
 }
 
-# The argv the stub recorded for each `openclaw automations <verb>` call, one
-# NUL-free line per call, so a case can assert on the flags actually passed.
 stub_calls() {
-  # stub_calls <verb>
   if [ -f "${RUN_DIR}/calls-$1" ]; then
     cat "${RUN_DIR}/calls-$1"
   fi
 }
 
 stub_call_count() {
-  # stub_call_count <verb>
   if [ -f "${RUN_DIR}/calls-$1" ]; then
     wc -l < "${RUN_DIR}/calls-$1" | tr -d ' '
   else
@@ -278,18 +205,12 @@ stub_call_count() {
   fi
 }
 
-# Every `openclaw automations` call this run made, in order, one per line as
-# `<verb> <json-argv>`. Ordering is what "declare before remove" is about, and
-# the per-verb files above cannot show it.
 stub_call_order() {
   if [ -f "${RUN_DIR}/call-order" ]; then
     cat "${RUN_DIR}/call-order"
   fi
 }
 
-# How many times the stub has written to the store, across every run that
-# shared it. The stub counts a write only when one really happened, so an
-# unchanged declaration leaves this where it was.
 store_write_count() {
   if [ -f "${RUN_STORE}/writes" ]; then
     wc -l < "${RUN_STORE}/writes" | tr -d ' '

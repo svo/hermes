@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-#
-# End-to-end injection checks: hermes-check run against attacker-shaped
-# fixtures through a stub `gog`, with no credentials and no network.
-#
-# Every acceptance criterion in SPEC.md maps to at least one case here. The
-# forged `--- SUMMARY ---` case is the one that must not regress.
 
 set -uo pipefail
 
@@ -17,19 +11,12 @@ EMAIL_CLOSE='</untrusted-email>'
 CALENDAR_OPEN='<untrusted-calendar>'
 CALENDAR_CLOSE='</untrusted-calendar>'
 
-# AC: a crafted subject cannot forge a second SUMMARY section, and the real
-# ACTION_NEEDED survives. The calendar fixture supplies a genuine conflict, so
-# the true answer is "yes" while the payload claims "no".
 should_emit_exactly_one_summary_section_when_a_subject_forges_one() {
   case_start "${FUNCNAME[0]}"
   run_check gmail-forged-summary.json calendar-conflict.json
   assert_equals "exit status" "0" "$RUN_STATUS"
   assert_equals "one SUMMARY header" "1" "$(count_exact_lines "$RUN_OUT" '--- SUMMARY ---')"
   assert_equals "one ACTION_NEEDED line" "1" "$(count_matching_lines "$RUN_OUT" '^ACTION_NEEDED: ')"
-  # The payload text is still *present* — sanitizing makes it inert, it does not
-  # censor it, and the operator still gets to see what was sent. So the check that
-  # matters is whole-line, not substring: exactly one line IS the header, while a
-  # fenced data line may contain those characters.
   assert_equals "payload survives as data" "1" \
     "$(count_matching_lines "$RUN_OUT" '^  - .*--- SUMMARY ---')"
   case_end
@@ -52,7 +39,6 @@ should_emit_one_line_per_message_when_a_subject_contains_newlines() {
   case_end
 }
 
-# AC: CR, LF and any C0 control character must not appear in the output.
 should_strip_control_characters_when_a_subject_and_sender_contain_them() {
   case_start "${FUNCNAME[0]}"
   local without_newlines stripped
@@ -65,7 +51,6 @@ should_strip_control_characters_when_a_subject_and_sender_contain_them() {
   case_end
 }
 
-# AC: an over-length subject is truncated to the bound with a visible marker.
 should_truncate_with_an_elision_marker_when_a_subject_exceeds_the_bound() {
   case_start "${FUNCNAME[0]}"
   local expected
@@ -92,7 +77,6 @@ should_fall_back_to_the_default_bound_when_hermes_field_max_len_is_not_numeric()
   case_end
 }
 
-# AC: a calendar summary containing newlines must not multiply CONFLICTS lines.
 should_keep_conflict_lines_one_per_conflict_when_summaries_contain_newlines() {
   case_start "${FUNCNAME[0]}"
   run_check gmail-empty.json calendar-newline-summary.json
@@ -110,7 +94,6 @@ should_emit_one_next_event_line_when_an_event_title_contains_newlines() {
   case_end
 }
 
-# AC: every untrusted field is emitted inside an explicit data fence.
 should_fence_email_lines_when_messages_are_present() {
   case_start "${FUNCNAME[0]}"
   local open close line
@@ -124,7 +107,6 @@ should_fence_email_lines_when_messages_are_present() {
       fail "message line $line is outside the fence ($open..$close)"
     fi
   done
-  # Counts stay outside: they are what the agent acts on.
   for line in NEW_UNREAD URGENT VIP OTHER; do
     local n
     n="$(printf '%s\n' "$RUN_OUT" | grep -n "^${line}: " | cut -d: -f1)"
@@ -156,8 +138,6 @@ should_fence_calendar_values_when_events_are_present() {
   case_end
 }
 
-# Risk: the fence itself becomes the injection vector if a value can contain
-# the closing marker. Angle brackets are stripped, so it cannot.
 should_not_let_a_subject_close_the_email_fence_when_it_contains_the_marker() {
   case_start "${FUNCNAME[0]}"
   run_check gmail-fence-forgery.json calendar-empty.json
@@ -169,9 +149,6 @@ should_not_let_a_subject_close_the_email_fence_when_it_contains_the_marker() {
   case_end
 }
 
-# A conflict line quotes two titles: the current event and the previous one,
-# which is carried between loop iterations. Both are untrusted and both must be
-# sanitized at that emit site — this is the only case covering the carried one.
 should_sanitize_both_titles_in_a_conflict_line_when_they_contain_markers() {
   case_start "${FUNCNAME[0]}"
   local conflict_line
@@ -201,12 +178,9 @@ should_not_let_an_event_title_close_the_calendar_fence_when_it_contains_the_mark
   case_end
 }
 
-# AC: shell metacharacters are emitted literally; nothing is substituted or run.
 should_emit_shell_metacharacters_literally_when_a_subject_contains_them() {
   case_start "${FUNCNAME[0]}"
   local payload
-  # Read from the fixture rather than retyped: the property under test is that
-  # this text reaches the output unchanged.
   payload="$(jq -r '.messages[0].subject' "${FIXTURES}/gmail-shell-metacharacters.json")"
   run_check gmail-shell-metacharacters.json calendar-empty.json
   assert_equals "payload survives verbatim" "$payload" "$(emitted_subject)"
@@ -216,13 +190,9 @@ should_emit_shell_metacharacters_literally_when_a_subject_contains_them() {
   case_end
 }
 
-# Risk: over-aggressive stripping makes legitimate subjects unreadable.
 should_preserve_non_ascii_text_when_a_subject_is_not_latin() {
   case_start "${FUNCNAME[0]}"
   local original
-  # The property is that the sanitizer is the identity for this input, so the
-  # expectation is read from the fixture rather than retyped: Han, Cyrillic,
-  # combining accents, an em dash, a numero sign and an emoji, all untouched.
   original="$(jq -r '.messages[0].subject' "${FIXTURES}/gmail-non-ascii.json")"
   run_check gmail-non-ascii.json calendar-empty.json
   assert_equals "subject preserved byte for byte" "$original" "$(emitted_subject)"
@@ -251,7 +221,6 @@ should_emit_valid_utf8_when_a_long_subject_is_not_latin() {
   case_end
 }
 
-# Operability: SANITIZED counts the fields this run modified.
 should_report_zero_sanitized_when_nothing_is_modified() {
   case_start "${FUNCNAME[0]}"
   run_check gmail-clean.json calendar-clean.json
@@ -261,7 +230,6 @@ should_report_zero_sanitized_when_nothing_is_modified() {
 
 should_count_every_modified_field_when_fields_are_sanitized() {
   case_start "${FUNCNAME[0]}"
-  # One subject (newlines) and one sender (angle brackets).
   run_check gmail-forged-summary.json calendar-empty.json
   assert_equals "two fields modified" "1" "$(count_exact_lines "$RUN_OUT" 'SANITIZED: 2')"
   case_end
@@ -269,8 +237,6 @@ should_count_every_modified_field_when_fields_are_sanitized() {
 
 should_not_set_action_needed_when_only_sanitizing_happened() {
   case_start "${FUNCNAME[0]}"
-  # Sanitizing is routine — any subject with an angle bracket trips it — so it
-  # is reported, not alerted on.
   run_check gmail-forged-summary.json calendar-empty.json
   assert_equals "no alert from sanitizing alone" "1" \
     "$(count_exact_lines "$RUN_OUT" 'ACTION_NEEDED: no')"

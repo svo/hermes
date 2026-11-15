@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-#
-# Adoption: a briefing registered before it had a key is replaced, once, by
-# the declared one, and a store that held a briefing is never left without one.
-#
-# A key cannot be added to an existing job (R5), so the only way under the
-# declaration is to declare beside the old job and then remove it. Each case
-# seeds the store an older image left behind. One behaviour per case, named
-# should_<behaviour>_when_<condition>.
 
 set -uo pipefail
 # shellcheck source=harness.sh
@@ -15,8 +7,6 @@ set -uo pipefail
 BRIEFING='morning-briefing'
 KEY='hermes:morning-briefing'
 
-# What an older image left: one morning-briefing with no key.
-#   seed_unkeyed <store> [enabled]
 seed_unkeyed() {
   seed_store "$1" <<SEEDED
 [
@@ -25,7 +15,6 @@ seed_unkeyed() {
 SEEDED
 }
 
-# How many morning-briefing jobs carry the key, and how many carry none.
 count_keyed() {
   jq --arg name "$BRIEFING" --arg key "$KEY" \
     '[.[] | select(.name == $name and .declarationKey == $key)] | length' "${RUN_STORE}/jobs.json"
@@ -35,12 +24,9 @@ count_unkeyed() {
     '[.[] | select(.name == $name and (has("declarationKey") | not))] | length' "${RUN_STORE}/jobs.json"
 }
 
-# The automations verbs this run called, in order, on one line.
 call_verbs() {
   stub_call_order | cut -d ' ' -f 1 | tr '\n' ' ' | sed 's/ $//'
 }
-
-# --- SPEC § Adopting a job registered before this change ------------------
 
 case_start "should_replace_an_unkeyed_briefing_with_a_declared_one"
 store="$(new_store)"
@@ -63,7 +49,6 @@ assert_contains "declared disabled" "$(stub_calls create)" '"--disabled"'
 case_end
 
 case_start "should_replace_every_unkeyed_briefing_with_one_when_there_are_several"
-# The duplicate 003 does not defend against: two containers sharing a volume.
 store="$(new_store)"
 seed_store "$store" <<'SEEDED'
 [
@@ -81,8 +66,6 @@ assert_contains "declared disabled" "$(stub_calls create)" '"--disabled"'
 case_end
 
 case_start "should_enable_the_declared_briefing_when_any_unkeyed_one_was_enabled"
-# The enabled one is in the middle, so neither the first nor the last row
-# decides.
 store="$(new_store)"
 seed_store "$store" <<'SEEDED'
 [
@@ -98,9 +81,6 @@ assert_not_contains "not declared disabled" "$(stub_calls create)" '"--disabled"
 case_end
 
 case_start "should_keep_the_declared_briefing_enabled_when_a_leftover_unkeyed_one_is_disabled"
-# --disabled carries an operator's "off" across adoption, and only adoption.
-# Beside a job that already carries the key, a disabled leftover says nothing
-# about the briefing, and passing --disabled would switch it off.
 store="$(new_store)"
 seed_store "$store" <<'SEEDED'
 [
@@ -116,8 +96,6 @@ assert_not_contains "not declared disabled" "$(stub_calls create)" '"--disabled"
 case_end
 
 case_start "should_declare_before_removing_when_adopting"
-# SPEC Open Question 2: declare first, remove second, so the store never holds
-# no briefing. The removal also waits for a listing that shows the key.
 store="$(new_store)"
 seed_unkeyed "$store"
 run_entrypoint --store "$store"
@@ -150,9 +128,6 @@ assert_contains "the declared job was already right" "$RUN_OUT" "cron: ${BRIEFIN
 case_end
 
 case_start "should_not_remove_the_unkeyed_briefing_when_the_declared_one_is_not_listed"
-# The "never zero" case. create reports success and stores nothing, so the
-# listing never shows the key. Removing the old job on create's word would
-# leave the store with no briefing at all.
 store="$(new_store)"
 seed_unkeyed "$store"
 run_entrypoint --store "$store" OPENCLAW_STUB_CREATE_SILENT=yes
@@ -164,9 +139,6 @@ assert_contains "the discrepancy is named" "$RUN_ERR" \
 case_end
 
 case_start "should_leave_the_unkeyed_briefing_running_when_the_declaration_fails"
-# The other half of "never zero": a start that fails before anything is
-# declared removes nothing, and says the briefing was left as it was — the
-# older job is still there, and still runs.
 store="$(new_store)"
 seed_unkeyed "$store"
 run_entrypoint --store "$store" OPENCLAW_STUB_CREATE_FAILS=yes
@@ -237,8 +209,6 @@ assert_contains "the timeout is named" "$RUN_ERR" "could not list automations: t
 case_end
 
 case_start "should_write_nothing_when_the_listing_is_one_page_of_several"
-# The unkeyed briefing is on a page this listing does not include, so it
-# shows no briefing at all. Read as complete, it would declare a second one.
 store="$(new_store)"
 seed_store "$store" <<'SEEDED'
 [

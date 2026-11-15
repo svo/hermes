@@ -1,18 +1,4 @@
 #!/usr/bin/env bash
-#
-# Fake `openclaw`, standing in for the four subcommands the entrypoint and these
-# cases use. No network, no credentials, no image.
-#
-#   onboard          writes the minimal config real onboarding leaves behind
-#   gateway          records that it was reached, then exits 0 instead of serving
-#   config get       prints one dotted path out of the config
-#   config validate  checks channels.slack against the upstream schema
-#
-# The validator is a local transcription of the upstream zod schema for
-# channels.slack, not the real thing. It exists to catch the failure mode that
-# produced finding A2d — a key that looks right, validates nowhere, and gates
-# nothing (Telegram's `groups` under Slack). `openclaw config validate` against
-# a real image stays the manual acceptance step; see README.md.
 
 set -uo pipefail
 
@@ -44,8 +30,6 @@ ONBOARDED
     ;;
 
   gateway)
-    # `exec openclaw gateway` is the last line of the entrypoint, so this marker
-    # is how a case asserts that a rejected configuration never got that far.
     if [ -n "${OPENCLAW_STUB_MARKERS:-}" ]; then
       : > "${OPENCLAW_STUB_MARKERS}/gateway-started"
     fi
@@ -55,14 +39,6 @@ ONBOARDED
   config)
     case "${2:-}" in
       set)
-        # Write-if-absent, which is the only shape the entrypoint uses. 008 sets
-        # tools.exec.security this way so that a restart cannot revert an
-        # operator's tightened exec policy -- 004's finding B6, which used to be
-        # held by the `[ ! -f ]` guard on exec-approvals.json.
-        #
-        # Strict about the flag for the same reason 008's `config patch` is: a
-        # stub that ignored --expect-current-absent would perform an
-        # unconditional write and turn the case that pins this green.
         stub_path="${3:-}"
         stub_value="${4:-}"
         if [ -z "$stub_path" ] || [ -z "$stub_value" ]; then usage "$@"; fi
@@ -93,7 +69,6 @@ ONBOARDED
           }
           const leaf = parts[parts.length - 1];
           if (Object.prototype.hasOwnProperty.call(node, leaf)) {
-            // The refusal upstream gives, and the exit code the entrypoint reads.
             console.error('conditional config set expectation did not match the ' +
               'authored config, so nothing was changed');
             process.exit(1);
@@ -105,39 +80,10 @@ ONBOARDED
         ;;
 
       patch)
-        # 008 routes the main config block through `openclaw config patch`
-        # rather than letting the entrypoint open openclaw.json itself. The
-        # merge is modelled here; the verdict is not.
-        #
-        # Upstream's contract, from `openclaw config patch --help`: objects
-        # merge recursively, arrays and scalars replace, and null deletes a
-        # path. The entrypoint emits strict JSON, which is the JSON5 subset the
-        # real command accepts, so JSON.parse is enough and no JSON5 parser is
-        # needed here.
-        #
-        # It validates nothing on purpose. A stub with a schema opinion would be
-        # a third transcription to keep in step with upstream; 006's
-        # config-schema-check runs the REAL validator over the file this
-        # produces, which is the check that decides whether the payload is
-        # legal. This decides only what the file looks like.
-        #
-        #   OPENCLAW_STUB_PATCH_ERROR  text -> `config patch` rejects with this
-        #                              message and writes nothing, the way a
-        #                              schema violation does. The entrypoint
-        #                              redacts that message before it reaches
-        #                              the log, so a case has to be able to make
-        #                              it quote a credential.
         if [ -n "${OPENCLAW_STUB_PATCH_ERROR:-}" ]; then
           printf '%s\n' "$OPENCLAW_STUB_PATCH_ERROR" >&2
           exit 1
         fi
-        # Strict about its flags, and that is load-bearing rather than tidy.
-        # A stub that shrugged at an unrecognised flag let two real regressions
-        # through 008's mutation check: `--dry-run` writes nothing at all, and
-        # `--replace-path agents.defaults.models` restores the whole-object
-        # clobber 008 exists to remove. Both produced a green run against a
-        # permissive stub, because the merge it performed was its own rather
-        # than the one it was asked for.
         shift 2
         while [ "$#" -gt 0 ]; do
           case "$1" in
@@ -169,9 +115,6 @@ ONBOARDED
             config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
           } catch {}
 
-          // null deletes; a plain object merges into a plain object; anything
-          // else — array, scalar, or an object landing on a non-object —
-          // replaces. That is upstream's rule, restated.
           const isPlainObject = (value) =>
             value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -214,10 +157,6 @@ ONBOARDED
         CONFIG_PATH="$config" node -e "
           const fs = require('fs');
 
-          // Transcribed from upstream: extensions/slack/src/config-schema.ts and
-          // docs/gateway/config-channels.md. Unknown keys are the point — a
-          // Telegram-shaped 'groups' key must be rejected here, because upstream
-          // rejects it too and nothing else in this repository would notice.
           const SLACK_KEYS = [
             'enabled', 'mode', 'botToken', 'appToken', 'signingSecret', 'socketMode',
             'enterpriseOrgInstall', 'webhookPath', 'dmPolicy', 'allowFrom', 'dm',
@@ -242,9 +181,6 @@ ONBOARDED
           if (slack !== undefined) {
             for (const key of Object.keys(slack)) {
               if (SLACK_KEYS.includes(key) === false) {
-                // groupAllowFrom lands here on purpose: it is valid on telegram,
-                // whatsapp, signal, imessage, msteams and matrix, and Slack is the
-                // one channel that omits it. So is 'groups'.
                 problems.push('channels.slack.' + key + ': unrecognised key');
               }
             }
@@ -284,8 +220,6 @@ ONBOARDED
                     continue;
                   }
                   for (const key of Object.keys(entry)) {
-                    // allowFrom is valid at the Slack root and omitted from the
-                    // per-channel entry schema, so it is rejected here.
                     if (CHANNEL_KEYS.includes(key) === false) {
                       problems.push('channels.slack.channels.' + id + '.' + key + ': unrecognised key');
                     }

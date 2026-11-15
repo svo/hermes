@@ -1,31 +1,14 @@
 - name: Install OpenClaw
-  # Pinned, not `state: latest`. See defaults/main.yml for why, and for how to
-  # bump it.
   community.general.npm:
     name: openclaw
     version: "{{ openclaw_version }}"
     global: true
   become: true
 
-# The download URL interpolates both the release tag and the architecture, and
-# inline it ran to 283 characters -- well over the 160-character limit. Lifting
-# the pieces out follows this repository's own precedent: roles/claude-code
-# does the same with claude_code_gh_deb_arch, for the same reason.
-#
-# Only the architecture is resolved here now. The version and the stable half
-# of the URL are pinned values in defaults/main.yml rather than facts, because
-# a build must not discover either of them at build time.
 - name: Resolve the gog release asset for this architecture
   ansible.builtin.set_fact:
     openclaw_gog_arch: "{{ ansible_facts['architecture'] | regex_replace('^aarch64$', 'arm64') | regex_replace('^x86_64$', 'amd64') }}"
 
-# Which gog is installed, if any. The old task keyed idempotence on
-# `creates: /usr/local/bin/gog` -- the existence of *a* binary, not of the
-# *pinned* one -- so on a host that already had gog, bumping
-# openclaw_gog_version would have been a silent no-op: the download would run,
-# the install would skip, and the build would report a version it had not
-# installed. That is the failure mode this whole spec is about, reintroduced by
-# an idempotence guard.
 - name: Read the installed gog version
   ansible.builtin.command:
     cmd: gog --version
@@ -34,9 +17,6 @@
   failed_when: false
   become: true
 
-# True when the pinned version is already the installed one. `gog --version`
-# prints `v0.39.1 (<sha> <date>)`, so the tag is matched as a word rather than
-# as a substring: `v0.3` must not satisfy a pin of `0.39.1`.
 - name: Decide whether gog needs installing
   ansible.builtin.set_fact:
     openclaw_gog_present: "{{ openclaw_gog_installed.rc == 0 and openclaw_gog_installed.stdout is search(openclaw_gog_version_pattern) }}"
@@ -44,19 +24,6 @@
     openclaw_gog_version_pattern: "(^|[^0-9.])v?{{ openclaw_gog_version | regex_escape }}([^0-9.]|$)"
 
 - name: Download the pinned gog release
-  # Fetched and verified in one step, then unpacked separately below.
-  #
-  # `unarchive` cannot do this: it has no `checksum` option, and its own module
-  # documentation says to use `get_url` with `remote_src=yes` when checksum
-  # validation is wanted. So the download is its own task, and a tarball whose
-  # digest does not match `openclaw_gog_checksums` fails the build here rather
-  # than being extracted and shipped.
-  #
-  # Skipped when the pinned version is already installed, which is what stops a
-  # re-provision fetching fourteen megabytes to throw it away. The archive is
-  # deleted at the end of every run, so without this the download would be
-  # unconditional -- the old `creates:` guard used to prevent it by skipping the
-  # whole task, and it can no longer be trusted to mean what it said.
   ansible.builtin.get_url:
     url: "{{ openclaw_gog_base }}/v{{ openclaw_gog_version }}/gogcli_{{ openclaw_gog_version }}_linux_{{ openclaw_gog_arch }}.tar.gz"
     dest: "{{ openclaw_gog_archive }}"
@@ -66,29 +33,6 @@
   become: true
 
 - name: Install gog (Google Suite CLI)
-  # This was `curl -L <url> | tar -xz -C /usr/local/bin gog`, which had one
-  # problem that is already live and one that is latent.
-  #
-  # Live: the release tarball's members are `./` and `./gog`, and GNU tar does
-  # not match a bare `gog` against `./gog`. Run against gogcli v0.39.1 the old
-  # command fails outright -- "tar: gog: Not found in archive", exit 2, nothing
-  # installed -- so the service image build breaks here. That is also why
-  # `include` below says `./gog` and not `gog`: unarchive appends these entries
-  # to its tar command line verbatim, so the bare name reproduces the bug.
-  #
-  # Latent: the pipeline discarded curl's exit status, and `curl -L` without
-  # `-f` exits 0 even on an HTTP 404, writing the error page to stdout. Nothing
-  # in the task noticed a bad download; only tar's refusal to parse non-gzip
-  # data did, so its correctness rested on a coincidence.
-  #
-  # Both are gone: the fetch above fails closed on an HTTP error and on a
-  # digest mismatch, and this task reads a local file whose contents are
-  # already known.
-  #
-  # `creates:` is gone with it. It named the binary rather than the version, so
-  # it would have skipped the install that a version bump exists to perform.
-  # `when:` above and here keys on the version instead, which is the thing that
-  # actually varies.
   ansible.builtin.unarchive:
     src: "{{ openclaw_gog_archive }}"
     dest: /usr/local/bin

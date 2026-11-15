@@ -1,25 +1,4 @@
 #!/usr/bin/env bash
-#
-# PLAN.md task 1: "confirm it fails on current main for the five known
-# findings. **The gate must be seen to fail before it is trusted.**"
-#
-# A gate that has only ever passed is indistinguishable from one that checks
-# nothing — which is exactly how bin/test came to be missing for as long as it
-# was. So this file makes the gate go red on a defect that was really in this
-# repository, and then green on the fix.
-#
-# THE BASELINE COMES FROM HISTORY, NOT FROM THE WORKING TREE, and that is not
-# a shortcut. PLAN task 1 was written when the five findings were still live;
-# 005 has since landed and fixed them (commit 6e8932a). Writing five fresh
-# violations by hand would prove only that shellcheck reports what a case just
-# planted. Taking the actual pre-005 `hermes-check` out of git and running the
-# real gate over it proves the thing task 1 asked for: this gate, unmodified,
-# rejects the code that shipped.
-#
-# The one thing it cannot survive is a checkout with no history — a shallow CI
-# clone has no object for the parent commit. That case is announced as a skip
-# rather than passed over, because a red baseline nobody ran is worth exactly
-# as much as a gate nobody ran.
 
 set -uo pipefail
 
@@ -34,16 +13,9 @@ if ! command -v shellcheck >/dev/null 2>&1; then
   exit 0
 fi
 
-# The commit that fixed the five findings. Its parent is the last tree in which
-# they were live. Named rather than derived from `git log -1` on the path, so
-# that a later commit touching hermes-check cannot silently move the baseline
-# to a different file.
 readonly FIX_COMMIT='6e8932a'
 readonly HERMES_CHECK_PATH='infrastructure/ansible/roles/openclaw/files/hermes-check'
 
-# SPEC finding E4. Two SC2086 (an unquoted account flag) and three SC2106
-# (`continue` inside a command substitution, which is C4 — shellcheck had been
-# reporting a real defect for as long as the file existed).
 readonly EXPECTED_FINDINGS=5
 readonly EXPECTED_SC2086=2
 readonly EXPECTED_SC2106=3
@@ -51,21 +23,9 @@ readonly EXPECTED_SC2106=3
 BASELINE_FILE="${TMP_ROOT}/hermes-check-pre-005"
 BASELINE_REASON=""
 
-# The three ways this can be unavailable are distinguished rather than lumped
-# together, because they need different fixes and the wrong reason sends a
-# reader after the wrong one. "A shallow clone?" was reported for a checkout
-# with complete history, when the real cause was git refusing a repository
-# whose files belong to another user — the shape CI takes, where the runner
-# owns the checkout and the container runs as root. Someone would have spent
-# the afternoon on fetch-depth.
 if ! command -v git >/dev/null 2>&1; then
   BASELINE_REASON='git is not installed'
 elif ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-  # Captured, then matched. `git ... | grep -q` would be the obvious spelling
-  # and would be wrong here: under `pipefail` the pipeline reports git's 128
-  # rather than grep's 0, so the branch that recognises the message could never
-  # be taken. That is the same class of defect as the `curl | tar` this spec's
-  # ansible fixes deleted, which is a good enough reason to spell it out.
   git_error="$(git -C "$REPO_ROOT" rev-parse --git-dir 2>&1)" || true
   case "$git_error" in
     *'dubious ownership'*)
@@ -86,8 +46,6 @@ baseline_available() {
   [ -z "$BASELINE_REASON" ]
 }
 
-# One gate run over a tree carrying the pre-005 file, shared by the cases that
-# ask different questions about it.
 RED_OUT=""
 RED_STATUS=0
 if baseline_available; then
@@ -104,10 +62,6 @@ should_report_five_findings_when_shellcheck_reads_the_pre_005_script() {
     skip_case "${FUNCNAME[0]}" "$BASELINE_REASON"
     return
   fi
-  # `-f gcc` here, and only here: this case counts findings, and one line per
-  # finding is the format that makes counting honest. The gate itself is left
-  # to choose its own format, and the cases that read its output count rule
-  # codes instead.
   local out
   out="$(shellcheck -s bash -f gcc "$BASELINE_FILE" 2>&1 || true)"
   assert_equals "findings in the pre-005 script" "$EXPECTED_FINDINGS" \
@@ -139,9 +93,6 @@ should_name_the_offending_file_when_the_gate_fails() {
     skip_case "${FUNCNAME[0]}" "$BASELINE_REASON"
     return
   fi
-  # Naming the check is not enough to act on. SPEC AC 2 asks for the failing
-  # check; an operator also needs the file, and the reviewer who filed E4
-  # needed the rule codes.
   assert_contains "the gate names hermes-check" "$RED_OUT" "$HERMES_CHECK_PATH"
   assert_contains "and the unquoted-expansion rule" "$RED_OUT" "SC2086"
   assert_contains "and the misplaced-continue rule" "$RED_OUT" "SC2106"
@@ -154,9 +105,6 @@ should_fail_no_other_check_when_only_the_old_script_is_restored() {
     skip_case "${FUNCNAME[0]}" "$BASELINE_REASON"
     return
   fi
-  # A red baseline is only evidence if it is attributable. If restoring one
-  # file turned three checks red, the run would prove that the sandbox is
-  # broken rather than that the gate found E4.
   assert_equals "failing checks" "1" \
     "$(count_matching_lines "$RED_OUT" '^FAIL ')"
   case_end
@@ -164,8 +112,6 @@ should_fail_no_other_check_when_only_the_old_script_is_restored() {
 
 should_pass_when_the_gate_runs_over_the_current_script() {
   case_start "${FUNCNAME[0]}"
-  # The green half. Same gate, same tree, one file different — so the red
-  # above is a statement about that file and not about the gate's mood.
   local sandbox
   sandbox="$(make_sandbox)"
   run_gate --dir "$sandbox"

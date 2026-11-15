@@ -1,21 +1,4 @@
 #!/usr/bin/env bash
-#
-# The hermes-check harness. One entry point for everything that verifies the
-# script, so 006's `bin/test` has a single thing to call and there is no second
-# harness to drift from this one.
-#
-#   bin/hermes-check-test
-#
-# No credentials, no network, no Google account: a stub `gog` earlier on PATH
-# serves fixture JSON, and a stub `fasttext` makes urgency classification
-# deterministic. Fixtures live in
-# .specs/005-hermes-check-correctness/fixtures/ and are shared by every suite.
-#
-#   HERMES_CHECK  point the suites at another copy of the script — which is how
-#                 every case was shown to fail before the fixes landed.
-#
-# Exits zero only when every suite passes, and names each failing one; a run
-# should reveal every problem rather than the first.
 
 set -uo pipefail
 
@@ -50,8 +33,6 @@ suite() {
   failed+=("$name")
 }
 
-# 005 owns the harness; 001's cases verify the same script through it, so both
-# run here.
 suite "005 hermes-check correctness" \
   "${repo_root}/.specs/005-hermes-check-correctness/tests/run"
 suite "001 sanitize untrusted content" \

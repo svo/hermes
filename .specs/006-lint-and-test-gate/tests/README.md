@@ -123,7 +123,7 @@ everywhere it was tried and fails in the one place it matters.
 | `bin/test` failed its `hermes-check` check on every CI run | `bin/hermes-check-test` refuses to start without `jq`, and no builder role installed it. `matrix` waits on `needs: [lint]` in all three workflows, so nothing could build — and `builder.yml` could not publish a fixed builder either, because its own build waits on the same gate. | `roles/jq`, wired into `playbook-builder.yml` |
 | three of 005's classification cases failed in the builder image | `hermes-check` gates the urgency classifier on `[ -f /opt/hermes/urgency.bin ]`, so stubbing `fasttext` on `PATH` was never enough. The 800 MB model is provisioned on a developer machine and absent from the builder, so the suites silently depended on a file they never mentioned. | `MODEL_FILE` is now `${HERMES_MODEL_FILE:-...}`, and 005's `harness.sh` points it at an empty stub |
 
-The second is worth naming for what it says about hermetic tests. 005's `stub-fasttext` carries
+The second is worth naming for what it says about hermetic tests. 005's `stub-fasttext` carried
 the comment "the real model is 800 MB … present on a developer machine and absent in CI" — the
 dependency was *known* and the stub still only replaced the binary, because the file test sat
 in a different part of the script from the call it guarded. Stubbing the executable and leaving

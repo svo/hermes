@@ -65,10 +65,10 @@ homework.
 
 That check was run with the real validator on PATH while this change was made — all ten cases
 pass, zero skips, including the red half that asserts an unrecognised key really is rejected.
-Two of its expectations moved, and both are recorded in the file itself:
+Two of its expectations moved:
 
 - `agents.defaults.models` now merges rather than being replaced, so the entry onboarding seeded
-  survives. Its comment used to say the opposite.
+  survives.
 - The emptiness sweep skips leaves that are byte-identical to the seed. The entrypoint patches
   rather than rewrites now, so the file it leaves behind also holds keys it never touched, and
   blaming it for an upstream `{}` would be blaming it for not deleting something.

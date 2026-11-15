@@ -1,24 +1,5 @@
 #!/usr/bin/env bash
-#
-# Sensitivity check. Not part of `run`: it is slow, and it is a check on the
-# cases rather than on the entrypoint.
-#
-# Each mutation changes exactly one behaviour of the registrar in a copy of
-# entrypoint.sh and asserts that at least one case notices. A mutation nothing
-# catches is a hole in the suite.
-#
-#   .specs/003-cron-registration-via-cli/tests/mutation-check [name-substring]
-#
-# With an argument, only mutations whose name contains it are run — the whole
-# set takes a while, and this is how you re-check one after editing its anchor.
-#
-# Every mutation's anchor is asserted to match exactly once first. 002 learned
-# that the hard way: two of its mutations anchored on a string that also
-# occurred in a neighbouring block, so they mutated code nothing there tested
-# and read as uncaught.
 
-# The anchors below are literal lines of entrypoint.sh, so every $ in them is
-# meant to stay a $. Single quotes are the point.
 # shellcheck disable=SC2016
 
 set -uo pipefail
@@ -36,7 +17,6 @@ caught=0
 missed=()
 skipped=0
 
-# Nothing is mutated for a name the filter excludes.
 selected() {
   if [ -z "$only" ]; then
     return 0
@@ -47,11 +27,6 @@ selected() {
   esac
 }
 
-# mutate <name> <anchor> <replacement>
-#
-# The anchor is a fixed string matched whole-line-substring; the replacement is
-# substituted for the whole line, or the line is deleted when it is the literal
-# DELETE.
 mutate() {
   local name="$1" anchor="$2" replacement="$3"
   local mutant="${work}/entrypoint.sh" hits
@@ -91,9 +66,6 @@ run_mutant() {
     return
   fi
 
-  # registration-test first, and failure-test only if nothing has caught it
-  # yet. A mutation is caught when any case catches it, and failure-test is
-  # much the slower of the two — it spends most of its time in give-up paths.
   local output
   output="$(ENTRYPOINT="$mutant" bash "${tests_dir}/registration-test" 2>&1)"
   if ! printf '%s' "$output" | grep -q '^FAIL '; then
@@ -101,8 +73,6 @@ run_mutant() {
 $(ENTRYPOINT="$mutant" bash "${tests_dir}/failure-test" 2>&1)"
   fi
 
-  # A mutant that never terminates leaves its registrar polling after the run.
-  # The mutant's path is unique to this iteration, so this matches only it.
   pkill -f "$mutant" 2>/dev/null || true
 
   if printf '%s' "$output" | grep -q '^FAIL '; then
@@ -115,12 +85,6 @@ $(ENTRYPOINT="$mutant" bash "${tests_dir}/failure-test" 2>&1)"
   fi
 }
 
-# mutate_text <name> <expected-occurrences> <find> <replace>
-#
-# Whole-text replacement rather than whole-line, for a behaviour that is not one
-# distinct line: a flag carried by two calls, or a block whose opening line also
-# opens another block. The occurrence count is asserted for the same reason
-# `mutate` asserts uniqueness.
 mutate_text() {
   local name="$1" expected="$2" find="$3" replace="$4"
   local mutant="${work}/entrypoint.sh" hits
@@ -149,10 +113,6 @@ mutate_text() {
   run_mutant "$name" "$mutant"
 }
 
-# Mutation scoring reads FAIL lines out of the mutant run, so a suite that is
-# already failing would credit every mutation — including one that changes
-# nothing — as caught, and the script would exit 0. The baseline is asserted
-# green first, under the same budget the mutants get.
 printf 'Checking the baseline is green before mutating anything.\n'
 if ! baseline="$(ENTRYPOINT="$original" bash "${tests_dir}/registration-test" 2>&1
                  ENTRYPOINT="$original" bash "${tests_dir}/failure-test" 2>&1)" ||
@@ -167,16 +127,9 @@ printf 'Baseline is green.\n\n'
 printf 'Mutating the registrar one behaviour at a time.\n'
 printf 'Each mutation must be caught by at least one case.\n\n'
 
-# The trailing space matters: it excludes the AGENTS.md pointer, which names
-# the same command inside a heredoc and is not a call the registrar makes.
 mutate_text 'lists only enabled automations' 1 \
   'openclaw automations list --all ' \
   'openclaw automations list '
-
-# 011 retired three mutations here with the code they mutated: the plain-
-# listing fallback, the bare-array walk, and the unrecognised envelope read as
-# a definite absence. The strict read that replaced them has its own, in 011's
-# mutation-check.
 
 mutate 'creates without looking first' \
   'read_briefing_jobs || read_status=$?' \
@@ -207,9 +160,6 @@ mutate 'accepts a target with no channel' \
   'if [ -n "${HERMES_BRIEFING_TO:-}" ] && [ -z "${HERMES_BRIEFING_CHANNEL:-}" ]; then' \
   'if false; then'
 
-# The obvious anchor — "Text between <untrusted-email>" — also matches the
-# heartbeat prompt at :44, which belongs to 001. The guard above catches that,
-# and the clause naming the briefing is the part unique to this prompt.
 mutate 'drops the untrusted-content boundary from the prompt' \
   'report that fact in the briefing instead of doing it' \
   'DELETE'
@@ -222,8 +172,6 @@ mutate 'waits for the gateway forever' \
   'while [ "$attempt" -le "$briefing_ready_attempts" ]; do' \
   '  while true; do'
 
-# Since 011, a declaration rather than a create, and the flag is cleared where
-# the confirming read comes up empty — the one place a retry would duplicate.
 mutate 'creates again after a create that already succeeded' \
   '        reason="declaration reported success but no automation carries ${briefing_declaration_key}"' \
   "        declared='no'; reason=\"declaration reported success but no automation carries \${briefing_declaration_key}\""
@@ -244,8 +192,6 @@ mutate 'hard-codes the gateway port instead of reading the config' \
   '    const port = config.gateway && config.gateway.port;' \
   '    const port = 3000;'
 
-# Backticks and $ are left out of the replacement on purpose: this line lands
-# inside an unquoted heredoc, where either would be expanded.
 mutate 'lets AGENTS.md repeat the briefing instructions' \
   'not something to run from here, and its instructions are not repeated here' \
   '1. Run hermes-check and read its structured output. 2. Run gog calendar events primary --today. 3. Run gog gmail search for newer_than:12h.'
@@ -253,10 +199,6 @@ mutate 'lets AGENTS.md repeat the briefing instructions' \
 mutate 'never names the job' \
   '  --name "$briefing_job_name"' \
   '  --name briefing'
-
-# The briefing's own gog commands, which had never run: one named a flag the
-# pinned gog does not have, and neither was given an account. Nothing here
-# executes gog, so these are held by name and by the gateway's environment.
 
 mutate 'restores the calendar flag gog does not have' \
   '2. Run gog calendar events primary --today --max 50' \
@@ -282,9 +224,6 @@ mutate 'lets a disagreeing GOG_ACCOUNT stand' \
   '  export GOG_ACCOUNT="$GOG_GOOGLE_ACCOUNT"' \
   '  export GOG_ACCOUNT="${GOG_ACCOUNT:-$GOG_GOOGLE_ACCOUNT}"'
 
-# An assignment is a condition that is always true, and it leaves the variable
-# set to nothing — so the block runs with no account configured and exports an
-# empty one, without tripping `set -u` on the way.
 mutate 'exports an empty GOG_ACCOUNT when no account is configured' \
   'if [ -n "${GOG_GOOGLE_ACCOUNT:-}" ]; then' \
   'if GOG_GOOGLE_ACCOUNT="${GOG_GOOGLE_ACCOUNT:-}"; then'

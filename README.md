@@ -1303,8 +1303,14 @@ the service image actually carries.
 That last part is true of the *next* builder image, not the one on Docker Hub today: the role
 arrives with this change, and `builder.yml` cannot publish it until this gate passes. Until a
 builder built from this commit is pushed, CI prints the validator skip rather than running it.
-The comment above the `Docker:Pull` step in `.github/workflows/lint.yml` documents how to
-break that bootstrap by hand; the same procedure applies to a stale image as to a missing one.
+To break that bootstrap by hand, run packer over `infrastructure/packer/builder.pkr.hcl` on a
+host that has packer and docker, push `svanosselaer/hermes-builder:amd64` and `:arm64`, run
+`./create-latest.sh builder`, then re-run the job. The same procedure applies to a stale image
+as to a missing one.
+
+The `Docker:Pull` step in `.github/workflows/lint.yml` fails rather than skips when it cannot
+pull the builder image, and its message points here. When Docker Hub is rate limiting or down,
+re-running the job is enough.
 
 The `entrypoint-contract` check skips in CI as well, and that is by design rather than a gap.
 CI runs `bin/test` *inside* the builder container, and `lint.yml` deliberately does not mount
