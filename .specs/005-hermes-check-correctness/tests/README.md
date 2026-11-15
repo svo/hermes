@@ -20,14 +20,15 @@ bin/hermes-check-test          # everything that verifies hermes-check
 | `calendar-dates-test` | C4 and C11 — unreadable dates, all-day events, ordering. |
 | `upstream-shape-test` | SPEC Open Question 2 — the response shape `gog` really emits. |
 | `gog-invocation-test` | C10 — what `gog` is actually called with. |
+| `lookback-test` | How far back the mail fetch looks, and what it remembers between runs. Not a 005 finding; see below. |
 | `lint-test` | The shellcheck gate 006 depends on. |
 | `mutation-check` | Sensitivity check. Not part of `run`; see below. |
 | `stub-gog` | Fake `gog`: prints a fixture, exits with a chosen status, logs its argv. |
 | `stub-fasttext` | Fake urgency classifier, so bucket assignment is identical everywhere. |
 
-Ninety-seven cases: 20 in `vip-matching-test`, 8 in `classification-test`, 11 in
+One hundred and nineteen cases: 20 in `vip-matching-test`, 8 in `classification-test`, 11 in
 `message-identity-test`, 11 in `data-source-test`, 21 in `calendar-dates-test`, 14 in
-`upstream-shape-test`, 6 in `gog-invocation-test`, 6 in `lint-test`.
+`upstream-shape-test`, 6 in `gog-invocation-test`, 22 in `lookback-test`, 6 in `lint-test`.
 
 Fixtures live in [`../fixtures/`](../fixtures/README.md), shared with 001 and 006.
 
@@ -170,7 +171,7 @@ Chasing the third also turned up a latent bug in the extraction itself: `read` w
 have adopted its end as its start. Every field is now sentinelled, and
 `should_count_an_unparseable_event_when_it_has_no_start_at_all` holds it.
 
-All 37 mutations are caught, and `mutation-check` also fails loudly if an anchor stops
+All 52 mutations are caught, and `mutation-check` also fails loudly if an anchor stops
 matching exactly once — which it did, twice, when a variable was renamed under one and when
 a block it anchored on was rewritten.
 
@@ -195,6 +196,68 @@ cases:
 Both are named here rather than left out silently: a reader who wonders why the obvious
 mutation is missing deserves the answer, and if either ever *becomes* observable this note is
 where the mistake will show.
+
+## The look-back
+
+`lookback-test` is not one of 005's findings. It arrived later, with the change that made the
+mail window follow the last fetch that worked, and it lives here because this is the harness
+`hermes-check` has.
+
+**The defect.** The fetch asked for `is:unread newer_than:2h`, against a heartbeat every 59
+minutes. The heartbeat does not run in quiet hours, so the first run of the morning looked
+back two hours and mail from the evening before never reached the urgency or VIP checks. A
+container that was down for an afternoon lost that afternoon. The report gave no sign of it:
+`NEW_UNREAD: 0` after a night of mail reads exactly like a quiet night.
+
+**What holds it now.** Each run reads back to the last fetch that worked: two hours, plus
+every whole hour since that fetch began, up to a week. The rule has cases, and so do three
+things that follow from a longer window:
+
+| Concern | Cases |
+|---|---|
+| the window: two hours at the usual cadence, back to the evening before in the morning, a week at most | the five `should_look_back_…`, `should_cover_…` and `should_stop_…` cases |
+| the record: written when a fetch works, left alone when it fails or the run is killed part-way, replaced when it is bad | `should_record_…`, the two `should_keep_the_earlier_record_…` cases, `should_narrow_the_window_again_…`, `should_replace_a_bad_record_…` |
+| a record that cannot be trusted: text, empty, in the future, too long for arithmetic | the four `should_ignore_the_record_…` cases |
+| more mail than one fetch returns: `FETCH_TRUNCATED` and `ACTION_NEEDED` | the four `should_say_so_…` / `should_not_say_so_…` cases |
+| ids remembered between runs: 1000, where it was 200 | `should_not_report_a_message_again_when_many_were_seen_since`, `should_forget_the_oldest_ids_when_more_than_a_thousand_are_remembered` |
+
+The query is not in the report, so the window cases read what `gog` was called with, through
+the stub's argv log. They seed the record at a part hour (twelve and a half hours ago, not
+twelve) so that a case cannot change its answer because a second ticked over mid-run.
+
+The record is written last, after the run has remembered the ids it reported. A run that is
+killed while it classifies the mail has reported nothing, so it must not leave a record
+saying the mailbox was read. The case for that has the stub classifier kill the script, with
+`FASTTEXT_KILLS_CALLER=yes`, and then checks that the next run asks for the long window
+again.
+
+**Red before green.** Against the script as it was, 17 of the 22 fail. The five that pass are
+the four `should_ignore_the_record_…` cases and `should_record_nothing_when_the_first_fetch_fails`.
+They pass because the old script never read or wrote a record. They are there so that the new
+rule cannot be talked into a wrong window by a bad file.
+
+**Mutation-checked.** Fifteen mutations cover it, which makes 52 in `mutation-check`, and
+all are caught. One was not at first, for two reasons that are both worth knowing. The case
+for a record that is not a number seeded seventeen characters of text, and the rule against
+over-long records turned it away before the rule under test was reached. With a shorter word
+the mutant still passed: handed text, the shell's arithmetic complains, abandons the statement
+and carries on, so the window stays at two hours by accident. The case had been looking only
+at the window. It now also requires an empty stderr, which is where that failure shows, and
+which the agent running the script reads along with the report.
+
+**Not shown here.** Two things, both because the stub is not Gmail:
+
+- That Gmail accepts `newer_than:14h` the way it accepts `newer_than:2h`. Hours are not in
+  Gmail's documented units, which are days, months and years; `2h` is known to work because
+  this script has always sent it. The first morning after a deploy settles it:
+  `LOOKBACK_HOURS` will be well above 2 and `NEW_UNREAD` should match the mailbox.
+- That `gog` sets `nextPageToken` when it stops at `--max`. Its `--results-only` flag is
+  documented as dropping "envelope fields like nextPageToken", and the fixture notes record
+  the field from its source. No case can show a real mailbox doing it.
+
+And one that has no case at all: the record is the time the fetch *began*, so that mail
+arriving during the fetch falls inside the next window. The stub answers instantly, so a run
+that recorded the end instead would pass every case here.
 
 ## Linting
 

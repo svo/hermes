@@ -1,0 +1,347 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+record_path() {
+  printf '%s/.openclaw/hermes-check/last-mail-fetch' "$1"
+}
+
+seen_path() {
+  printf '%s/.openclaw/hermes-check/seen-messages.txt' "$1"
+}
+
+seed_record() {
+  mkdir -p "$1/.openclaw/hermes-check"
+  printf '%s\n' "$2" > "$(record_path "$1")"
+}
+
+seconds_ago() {
+  printf '%s' "$(($(date +%s) - $1))"
+}
+
+queries() {
+  grep '^ARG \[is:unread ' "$1" || true
+}
+
+should_look_back_two_hours_when_no_fetch_is_recorded() {
+  case_start "${FUNCNAME[0]}"
+  local log
+  log="$(new_log)"
+  run_check --argv-log "$log" gmail-clean.json calendar-clean.json
+  assert_equals "query" 'ARG [is:unread newer_than:2h]' "$(queries "$log")"
+  assert_equals "reported" "2" "$(field LOOKBACK_HOURS)"
+  assert_universal_invariants
+  case_end
+}
+
+should_look_back_two_hours_when_the_last_fetch_was_one_heartbeat_ago() {
+  case_start "${FUNCNAME[0]}"
+  local home log
+  home="$(new_home)"
+  log="$(new_log)"
+  seed_record "$home" "$(seconds_ago $((59 * 60)))"
+  run_check --home "$home" --argv-log "$log" gmail-clean.json calendar-clean.json
+  assert_equals "query" 'ARG [is:unread newer_than:2h]' "$(queries "$log")"
+  assert_equals "reported" "2" "$(field LOOKBACK_HOURS)"
+  assert_universal_invariants
+  case_end
+}
+
+should_look_back_to_the_last_fetch_when_it_was_the_evening_before() {
+  case_start "${FUNCNAME[0]}"
+  local home log
+  home="$(new_home)"
+  log="$(new_log)"
+  seed_record "$home" "$(seconds_ago $((12 * 3600 + 1800)))"
+  run_check --home "$home" --argv-log "$log" gmail-clean.json calendar-clean.json
+  assert_equals "query" 'ARG [is:unread newer_than:14h]' "$(queries "$log")"
+  assert_equals "reported" "14" "$(field LOOKBACK_HOURS)"
+  assert_universal_invariants
+  case_end
+}
+
+should_cover_a_part_hour_when_the_last_fetch_was_just_over_two_hours_ago() {
+  case_start "${FUNCNAME[0]}"
+  local home log
+  home="$(new_home)"
+  log="$(new_log)"
+  seed_record "$home" "$(seconds_ago $((2 * 3600 + 600)))"
+  run_check --home "$home" --argv-log "$log" gmail-clean.json calendar-clean.json
+  assert_equals "query" 'ARG [is:unread newer_than:4h]' "$(queries "$log")"
+  assert_universal_invariants
+  case_end
+}
+
+should_stop_at_a_week_when_the_last_fetch_was_a_month_ago() {
+  case_start "${FUNCNAME[0]}"
+  local home log
+  home="$(new_home)"
+  log="$(new_log)"
+  seed_record "$home" "$(seconds_ago $((30 * 86400)))"
+  run_check --home "$home" --argv-log "$log" gmail-clean.json calendar-clean.json
+  assert_equals "query" 'ARG [is:unread newer_than:168h]' "$(queries "$log")"
+  assert_equals "reported" "168" "$(field LOOKBACK_HOURS)"
+  assert_universal_invariants
+  case_end
+}
+
+should_record_when_the_fetch_began_when_the_fetch_works() {
+  case_start "${FUNCNAME[0]}"
+  local home before after recorded
+  home="$(new_home)"
+  before="$(date +%s)"
+  run_check --home "$home" gmail-clean.json calendar-clean.json
+  after="$(date +%s)"
+  recorded="$(cat "$(record_path "$home")" 2>/dev/null)"
+  case "$recorded" in
+    '' | *[!0-9]*) fail "the record is not a whole number of seconds: '${recorded}'" ;;
+    *)
+      if [ "$recorded" -lt "$before" ] || [ "$recorded" -gt "$after" ]; then
+        fail "recorded ${recorded}, outside the run (${before}..${after})"
+      fi
+      ;;
+  esac
+  assert_universal_invariants
+  case_end
+}
+
+should_narrow_the_window_again_when_the_long_fetch_worked() {
+  case_start "${FUNCNAME[0]}"
+  local home log
+  home="$(new_home)"
+  log="$(new_log)"
+  seed_record "$home" "$(seconds_ago $((12 * 3600 + 1800)))"
+  run_check --home "$home" --argv-log "$log" gmail-clean.json calendar-clean.json
+  run_check --home "$home" --argv-log "$log" gmail-clean.json calendar-clean.json
+  assert_equals "first long, second short" \
+    'ARG [is:unread newer_than:14h]
+ARG [is:unread newer_than:2h]' "$(queries "$log")"
+  assert_universal_invariants
+  case_end
+}
+
+should_keep_the_earlier_record_when_the_fetch_fails() {
+  case_start "${FUNCNAME[0]}"
+  local home log earlier
+  home="$(new_home)"
+  log="$(new_log)"
+  earlier="$(seconds_ago $((5 * 3600 + 1800)))"
+  seed_record "$home" "$earlier"
+  run_check --home "$home" --argv-log "$log" gmail-not-json.html calendar-clean.json
+  assert_equals "the fetch did fail" "1" "$(field DATA_SOURCE_ERRORS)"
+  assert_equals "record untouched" "$earlier" "$(cat "$(record_path "$home")")"
+  run_check --home "$home" --argv-log "$log" gmail-clean.json calendar-clean.json
+  assert_equals "both runs reach back to the same fetch" \
+    'ARG [is:unread newer_than:7h]
+ARG [is:unread newer_than:7h]' "$(queries "$log")"
+  assert_universal_invariants
+  case_end
+}
+
+should_record_nothing_when_the_first_fetch_fails() {
+  case_start "${FUNCNAME[0]}"
+  local home
+  home="$(new_home)"
+  run_check --home "$home" gmail-not-json.html calendar-clean.json
+  assert_equals "the fetch did fail" "1" "$(field DATA_SOURCE_ERRORS)"
+  if [ -e "$(record_path "$home")" ]; then
+    fail "a failed fetch left a record: $(cat "$(record_path "$home")")"
+  fi
+  assert_universal_invariants
+  case_end
+}
+
+should_record_the_fetch_when_only_the_calendar_fails() {
+  case_start "${FUNCNAME[0]}"
+  local home
+  home="$(new_home)"
+  run_check --home "$home" gmail-clean.json 'not json at all'
+  assert_equals "the calendar did fail" "1" "$(field DATA_SOURCE_ERRORS)"
+  if [ ! -s "$(record_path "$home")" ]; then
+    fail "the mail fetch worked and was not recorded"
+  fi
+  assert_universal_invariants
+  case_end
+}
+
+should_keep_the_earlier_record_when_the_run_is_killed_while_reading_the_mail() {
+  case_start "${FUNCNAME[0]}"
+  local home log earlier
+  home="$(new_home)"
+  log="$(new_log)"
+  earlier="$(seconds_ago $((12 * 3600 + 1800)))"
+  seed_record "$home" "$earlier"
+  run_check --home "$home" gmail-clean.json calendar-clean.json FASTTEXT_KILLS_CALLER=yes 2>/dev/null
+  assert_equals "the run was killed" "137" "$RUN_STATUS"
+  assert_equals "record" "$earlier" "$(cat "$(record_path "$home")")"
+  run_check --home "$home" --argv-log "$log" gmail-clean.json calendar-clean.json
+  assert_equals "the next run looks back again" \
+    'ARG [is:unread newer_than:14h]' "$(queries "$log")"
+  assert_universal_invariants
+  case_end
+}
+
+should_ignore_the_record_when_it_is_not_a_number() {
+  case_start "${FUNCNAME[0]}"
+  local home log
+  home="$(new_home)"
+  log="$(new_log)"
+  seed_record "$home" "yesterday"
+  run_check --home "$home" --argv-log "$log" gmail-clean.json calendar-clean.json
+  assert_equals "query" 'ARG [is:unread newer_than:2h]' "$(queries "$log")"
+  assert_equals "nothing on stderr" "" "$RUN_ERR"
+  assert_universal_invariants
+  case_end
+}
+
+should_ignore_the_record_when_it_is_empty() {
+  case_start "${FUNCNAME[0]}"
+  local home log
+  home="$(new_home)"
+  log="$(new_log)"
+  seed_record "$home" ""
+  run_check --home "$home" --argv-log "$log" gmail-clean.json calendar-clean.json
+  assert_equals "query" 'ARG [is:unread newer_than:2h]' "$(queries "$log")"
+  assert_universal_invariants
+  case_end
+}
+
+should_ignore_the_record_when_it_is_in_the_future() {
+  case_start "${FUNCNAME[0]}"
+  local home log
+  home="$(new_home)"
+  log="$(new_log)"
+  seed_record "$home" "$(($(date +%s) + 86400))"
+  run_check --home "$home" --argv-log "$log" gmail-clean.json calendar-clean.json
+  assert_equals "query" 'ARG [is:unread newer_than:2h]' "$(queries "$log")"
+  assert_universal_invariants
+  case_end
+}
+
+should_ignore_the_record_when_it_is_too_long_to_be_a_time() {
+  case_start "${FUNCNAME[0]}"
+  local home log
+  home="$(new_home)"
+  log="$(new_log)"
+  seed_record "$home" "18446744073709551617"
+  run_check --home "$home" --argv-log "$log" gmail-clean.json calendar-clean.json
+  assert_equals "query" 'ARG [is:unread newer_than:2h]' "$(queries "$log")"
+  assert_universal_invariants
+  case_end
+}
+
+should_replace_a_bad_record_when_the_fetch_works() {
+  case_start "${FUNCNAME[0]}"
+  local home
+  home="$(new_home)"
+  seed_record "$home" "yesterday"
+  run_check --home "$home" gmail-clean.json calendar-clean.json
+  case "$(cat "$(record_path "$home")")" in
+    '' | *[!0-9]*) fail "the bad record was left in place: $(cat "$(record_path "$home")")" ;;
+  esac
+  assert_universal_invariants
+  case_end
+}
+
+should_say_so_when_gog_had_more_mail_than_it_returned() {
+  case_start "${FUNCNAME[0]}"
+  run_check \
+    '{"messages":[{"id":"m-1","subject":"Lunch","from":"alice@example.net"}],"nextPageToken":"08157432"}' \
+    calendar-empty.json
+  assert_equals "flagged" "yes" "$(field FETCH_TRUNCATED)"
+  assert_equals "worth a message" "yes" "$(field ACTION_NEEDED)"
+  assert_contains "and says why" "$(field REASONS)" "more unread mail than was checked"
+  assert_universal_invariants
+  case_end
+}
+
+should_not_say_so_when_gog_returned_everything() {
+  case_start "${FUNCNAME[0]}"
+  run_check \
+    '{"messages":[{"id":"m-1","subject":"Lunch","from":"alice@example.net"}]}' \
+    calendar-empty.json
+  assert_equals "not flagged" "no" "$(field FETCH_TRUNCATED)"
+  assert_not_contains "no reason given" "$RUN_OUT" "more unread mail than was checked"
+  assert_universal_invariants
+  case_end
+}
+
+should_not_say_so_when_the_next_page_is_empty() {
+  case_start "${FUNCNAME[0]}"
+  run_check \
+    '{"messages":[{"id":"m-1","subject":"Lunch","from":"alice@example.net"}],"nextPageToken":""}' \
+    calendar-empty.json
+  assert_equals "not flagged" "no" "$(field FETCH_TRUNCATED)"
+  assert_universal_invariants
+  case_end
+}
+
+should_not_say_so_when_the_fetch_failed() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-not-json.html calendar-empty.json
+  assert_equals "not flagged" "no" "$(field FETCH_TRUNCATED)"
+  assert_universal_invariants
+  case_end
+}
+
+should_not_report_a_message_again_when_many_were_seen_since() {
+  case_start "${FUNCNAME[0]}"
+  local home
+  home="$(new_home)"
+  mkdir -p "$home/.openclaw/hermes-check"
+  {
+    printf 'msg-clean-1\n'
+    seq -f 'filler-%g' 1 600
+  } > "$(seen_path "$home")"
+  run_check --home "$home" gmail-clean.json calendar-clean.json
+  assert_equals "first run: only the unseen one" "1" "$(field NEW_UNREAD)"
+  run_check --home "$home" gmail-clean.json calendar-clean.json
+  assert_equals "second run: nothing new" "0" "$(field NEW_UNREAD)"
+  assert_universal_invariants
+  case_end
+}
+
+should_forget_the_oldest_ids_when_more_than_a_thousand_are_remembered() {
+  case_start "${FUNCNAME[0]}"
+  local home
+  home="$(new_home)"
+  mkdir -p "$home/.openclaw/hermes-check"
+  seq -f 'filler-%g' 1 1500 > "$(seen_path "$home")"
+  run_check --home "$home" gmail-clean.json calendar-clean.json
+  assert_equals "kept" "1000" "$(wc -l < "$(seen_path "$home")" | tr -d ' ')"
+  assert_equals "the newest survive" "1" \
+    "$(grep -cxF 'msg-clean-2' "$(seen_path "$home")")"
+  assert_equals "the oldest do not" "0" \
+    "$(grep -cxF 'filler-1' "$(seen_path "$home")")"
+  assert_universal_invariants
+  case_end
+}
+
+should_look_back_two_hours_when_no_fetch_is_recorded
+should_look_back_two_hours_when_the_last_fetch_was_one_heartbeat_ago
+should_look_back_to_the_last_fetch_when_it_was_the_evening_before
+should_cover_a_part_hour_when_the_last_fetch_was_just_over_two_hours_ago
+should_stop_at_a_week_when_the_last_fetch_was_a_month_ago
+should_record_when_the_fetch_began_when_the_fetch_works
+should_narrow_the_window_again_when_the_long_fetch_worked
+should_keep_the_earlier_record_when_the_fetch_fails
+should_record_nothing_when_the_first_fetch_fails
+should_record_the_fetch_when_only_the_calendar_fails
+should_keep_the_earlier_record_when_the_run_is_killed_while_reading_the_mail
+should_ignore_the_record_when_it_is_not_a_number
+should_ignore_the_record_when_it_is_empty
+should_ignore_the_record_when_it_is_in_the_future
+should_ignore_the_record_when_it_is_too_long_to_be_a_time
+should_replace_a_bad_record_when_the_fetch_works
+should_say_so_when_gog_had_more_mail_than_it_returned
+should_not_say_so_when_gog_returned_everything
+should_not_say_so_when_the_next_page_is_empty
+should_not_say_so_when_the_fetch_failed
+should_not_report_a_message_again_when_many_were_seen_since
+should_forget_the_oldest_ids_when_more_than_a_thousand_are_remembered
+
+report_totals "lookback-test"

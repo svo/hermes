@@ -95,7 +95,7 @@ should_keep_the_query_intact_when_the_account_is_unset() {
   log="$(new_log)"
   run_check --argv-log "$log" gmail-clean.json calendar-clean.json
   assert_contains "search query preserved" "$(cat "$log")" 'ARG [is:unread newer_than:2h]'
-  assert_contains "max preserved" "$(cat "$log")" 'ARG [50]'
+  assert_contains "max preserved" "$(cat "$log")" 'ARG [100]'
   assert_contains "json flag preserved" "$(cat "$log")" 'ARG [--json]'
   assert_contains "calendar target preserved" "$(cat "$log")" 'ARG [primary]'
   assert_contains "today flag preserved" "$(cat "$log")" 'ARG [--today]'

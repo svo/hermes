@@ -4,6 +4,11 @@ set -euo pipefail
 STATE_DIR="${HOME}/.openclaw/hermes-check"
 SEEN_FILE="${STATE_DIR}/seen-messages.txt"
 VIP_FILE="${STATE_DIR}/vip-senders.txt"
+LAST_FETCH_FILE="${STATE_DIR}/last-mail-fetch"
+BASE_LOOKBACK_HOURS=2
+MAX_LOOKBACK_HOURS=168
+FETCH_MAX=100
+SEEN_MAX=1000
 # Overridable so the checks can point at a stub. The urgency classifier is
 # gated on this file *existing*, so stubbing `fasttext` on PATH is not enough:
 # on an image without the 800 MB model — the builder image, where the gate runs
@@ -58,6 +63,7 @@ sanitized_count=0
 SANITIZED_VALUE=""
 data_source_errors=0
 FETCHED_JSON=""
+FETCHED_OK="no"
 
 # The single choke point for attacker-controlled text: email subjects, sender
 # headers, calendar titles. Pure — stdin to stdout, no state, no globals beyond
@@ -158,9 +164,11 @@ fetch_json() {
        and ((has($k) | not) or .[$k] == null or (.[$k] | type) == "array"))' \
     >/dev/null 2>&1; then
     FETCHED_JSON="$raw"
+    FETCHED_OK="yes"
     return 0
   fi
 
+  FETCHED_OK="no"
   FETCHED_JSON="$(printf '{"%s":[]}' "$key")"
   data_source_errors=$((data_source_errors + 1))
   # Named, and emitted in the section it belongs to: broken monitoring has to be
@@ -234,9 +242,37 @@ echo ""
 
 echo "--- EMAIL ---"
 
+fetch_started=$(date +%s)
+lookback_hours="$BASE_LOOKBACK_HOURS"
+last_fetch=""
+if [ -f "$LAST_FETCH_FILE" ]; then
+  IFS= read -r last_fetch < "$LAST_FETCH_FILE" || true
+fi
+case "$last_fetch" in
+  '' | *[!0-9]* | ????????????????*) ;;
+  *)
+    last_fetch=$((10#$last_fetch))
+    if [ "$last_fetch" -le "$fetch_started" ]; then
+      lookback_hours=$((BASE_LOOKBACK_HOURS + (fetch_started - last_fetch) / 3600))
+    fi
+    ;;
+esac
+if [ "$lookback_hours" -gt "$MAX_LOOKBACK_HOURS" ]; then
+  lookback_hours="$MAX_LOOKBACK_HOURS"
+fi
+echo "LOOKBACK_HOURS: ${lookback_hours}"
+
 fetch_json gmail messages \
-  gog gmail messages search 'is:unread newer_than:2h' --max 50 --json "${gog_args[@]}"
+  gog gmail messages search "is:unread newer_than:${lookback_hours}h" \
+  --max "$FETCH_MAX" --json "${gog_args[@]}"
 email_json="$FETCHED_JSON"
+mail_fetched="$FETCHED_OK"
+
+fetch_truncated="no"
+if printf '%s' "$email_json" | jq -e \
+  '(.nextPageToken // "") | type == "string" and length > 0' >/dev/null 2>&1; then
+  fetch_truncated="yes"
+fi
 
 message_count=$(printf '%s' "$email_json" | jq '(.messages // []) | length')
 
@@ -361,17 +397,22 @@ while [ "$msg_index" -lt "$message_count" ]; do
   fi
 done
 
-# Update seen file (keep last 200)
 if [ -n "$new_ids" ]; then
   printf '%s' "$new_ids" >> "$SEEN_FILE"
 fi
-tail -200 "$SEEN_FILE" > "${SEEN_FILE}.tmp" && mv "${SEEN_FILE}.tmp" "$SEEN_FILE"
+tail -n "$SEEN_MAX" "$SEEN_FILE" > "${SEEN_FILE}.tmp" && mv "${SEEN_FILE}.tmp" "$SEEN_FILE"
+
+if [ "$mail_fetched" = "yes" ]; then
+  printf '%s\n' "$fetch_started" > "${LAST_FETCH_FILE}.tmp" \
+    && mv "${LAST_FETCH_FILE}.tmp" "$LAST_FETCH_FILE"
+fi
 
 echo "NEW_UNREAD: ${new_count}"
 echo "URGENT: ${urgent_count}"
 echo "VIP: ${vip_count}"
 echo "OTHER: ${other_count}"
 echo "UNREADABLE_MESSAGES: ${unreadable_messages}"
+echo "FETCH_TRUNCATED: ${fetch_truncated}"
 
 # The operator can add these three up against NEW_UNREAD directly from the
 # output; this asserts the same invariant from the inside. It cannot fire while
@@ -392,6 +433,8 @@ echo "$UNTRUSTED_EMAIL_CLOSE"
 [ "$urgent_count" -gt 0 ] && add_reason "${urgent_count} urgent email(s)"
 [ "$vip_count" -gt 0 ] && add_reason "${vip_count} VIP email(s)"
 [ "$unreadable_messages" -gt 0 ] && add_reason "${unreadable_messages} unreadable message(s)"
+[ "$fetch_truncated" = "yes" ] \
+  && add_reason "more unread mail than was checked (newest ${FETCH_MAX} only)"
 
 echo ""
 

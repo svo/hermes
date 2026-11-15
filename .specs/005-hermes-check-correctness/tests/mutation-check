@@ -45,6 +45,7 @@ suites=(
   data-source-test
   upstream-shape-test
   gog-invocation-test
+  lookback-test
 )
 
 selected() {
@@ -333,6 +334,69 @@ if [ -n "$GOG_ACCOUNT" ]; then
   gog_args=(--account "$GOG_ACCOUNT")
 fi' \
   'gog_args=(--account "$GOG_ACCOUNT")'
+
+mutate 'the window ignores the last fetch' \
+  '      lookback_hours=$((BASE_LOOKBACK_HOURS + (fetch_started - last_fetch) / 3600))' \
+  '      lookback_hours="$BASE_LOOKBACK_HOURS"'
+
+mutate 'the window has no overlap' \
+  '      lookback_hours=$((BASE_LOOKBACK_HOURS + (fetch_started - last_fetch) / 3600))' \
+  '      lookback_hours=$(((fetch_started - last_fetch) / 3600))'
+
+mutate 'the window has no upper end' \
+  'if [ "$lookback_hours" -gt "$MAX_LOOKBACK_HOURS" ]; then
+  lookback_hours="$MAX_LOOKBACK_HOURS"
+fi' \
+  ':'
+
+mutate 'a record from the future is believed' \
+  '    if [ "$last_fetch" -le "$fetch_started" ]; then' \
+  '    if true; then'
+
+mutate 'a record that is not a number reaches arithmetic' \
+  "  '' | *[!0-9]* | ????????????????*) ;;" \
+  "  '' | ????????????????*) ;;"
+
+mutate 'a record too long for arithmetic reaches it' \
+  "  '' | *[!0-9]* | ????????????????*) ;;" \
+  "  '' | *[!0-9]*) ;;"
+
+mutate 'a failed fetch moves the record' \
+  'if [ "$mail_fetched" = "yes" ]; then' \
+  'if true; then'
+
+mutate 'the record moves before the mail is remembered' \
+  'mail_fetched="$FETCHED_OK"' \
+  'mail_fetched="no"
+if [ "$FETCHED_OK" = "yes" ]; then echo "$fetch_started" > "$LAST_FETCH_FILE"; fi'
+
+mutate 'the record is never written' \
+  '    && mv "${LAST_FETCH_FILE}.tmp" "$LAST_FETCH_FILE"' \
+  '    && true'
+
+mutate 'the fetch asks for fifty again' \
+  'FETCH_MAX=100' \
+  'FETCH_MAX=50'
+
+mutate 'more mail than was returned is never flagged' \
+  '  fetch_truncated="yes"' \
+  '  fetch_truncated="no"'
+
+mutate 'an empty page token counts as more mail' \
+  '  '"'"'(.nextPageToken // "") | type == "string" and length > 0'"'"' >/dev/null 2>&1; then' \
+  '  '"'"'(.nextPageToken // "") | type == "string"'"'"' >/dev/null 2>&1; then'
+
+mutate 'more mail is flagged and nothing asks for action' \
+  '  && add_reason "more unread mail than was checked (newest ${FETCH_MAX} only)"' \
+  '  && true'
+
+mutate 'only two hundred ids are remembered' \
+  'SEEN_MAX=1000' \
+  'SEEN_MAX=200'
+
+mutate 'the seen file is never trimmed' \
+  'tail -n "$SEEN_MAX" "$SEEN_FILE" > "${SEEN_FILE}.tmp" && mv "${SEEN_FILE}.tmp" "$SEEN_FILE"' \
+  ':'
 
 printf '\n'
 if [ "$skipped" -gt 0 ]; then

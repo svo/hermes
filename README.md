@@ -1003,11 +1003,13 @@ Sanitised values are then emitted inside explicit fences:
 
 ```
 --- EMAIL ---
+LOOKBACK_HOURS: 2
 NEW_UNREAD: 2
 URGENT: 0
 VIP: 0
 OTHER: 2
 UNREADABLE_MESSAGES: 0
+FETCH_TRUNCATED: no
 <untrusted-email>
   - From: alice@example.net | Subject: Q3 planning notes
   - From: bob@example.net | Subject: Re: invoice 4471
@@ -1055,6 +1057,37 @@ still runs with a full tool profile and an unrestricted shell.
 `hermes-check` is the pre-processing pipeline the heartbeat runs. Its report is a
 line-oriented summary, and the counts outside the fences are what the agent acts on.
 
+### How far back the mail check looks
+
+Each run reads unread mail back to the last run whose mail fetch worked: two hours, plus
+every whole hour since that fetch began. `LOOKBACK_HOURS` in the report is the window it used.
+
+| Since the last fetch that worked | Window |
+|---|---|
+| under an hour, which is every ordinary heartbeat | 2 hours |
+| a night of quiet hours, say 12½ hours | 14 hours |
+| a container that was down for three days | 74 hours |
+| more than a week | 168 hours, the limit |
+| never, on a new volume | 2 hours |
+
+The window was a fixed two hours. The heartbeat does not run in quiet hours, so the first run
+of the morning looked back two hours and mail from the evening before never reached the
+urgency or VIP checks. The briefing listed it, as ordinary rows. Now whichever of the two runs
+first in the morning reports it with its flags.
+
+A longer window does not repeat anything. A message already reported is skipped by its id, and
+the last 1000 ids are remembered in `seen-messages.txt`.
+
+One fetch reads the newest 100 unread messages. When the mailbox held more, the report says
+`FETCH_TRUNCATED: yes` and asks for attention, because the ones left out are the oldest and a
+later run is not certain to reach back for them.
+
+The time is kept in `~/.openclaw/hermes-check/last-mail-fetch`, as seconds since the epoch, on
+the volume. It moves only when a fetch works, and only once the run has remembered what it
+reported, so a run of failures, or a run stopped part-way, keeps reaching back to the last
+success. A value that is not a time, or is in the future, is ignored and then replaced.
+Delete the file to go back to two hours.
+
 ### VIP senders
 
 `~/.openclaw/hermes-check/vip-senders.txt`, one entry per line. An entry matches only when
@@ -1096,19 +1129,20 @@ counted once, as urgent. (It used to be counted in both and subtracted twice, wh
 
 ### When monitoring itself is degraded
 
-Three counters report what the run could not see. Any of them being non-zero sets
-`ACTION_NEEDED`, because a check that ran but saw less than it should have is worth saying
-out loud rather than reporting as a quiet day. A fourth line reports all-day events, which
-are ordinary rather than a problem.
+Four lines report what the run could not see: three counters and `FETCH_TRUNCATED`. A
+non-zero counter, or `FETCH_TRUNCATED: yes`, sets `ACTION_NEEDED`, because a check that ran
+but saw less than it should have is worth saying out loud rather than reporting as a quiet
+day. A fifth line reports all-day events, which are ordinary rather than a problem.
 
 | Line | Meaning |
 |---|---|
 | `DATA_SOURCE_ERRORS: <n>` | upstream calls that failed or returned unusable data |
 | `UNPARSEABLE_EVENTS: <n>` | calendar events excluded because their dates could not be read |
 | `UNREADABLE_MESSAGES: <n>` | messages with no usable id, which cannot be tracked between runs |
+| `FETCH_TRUNCATED: yes` | the mailbox held more unread mail than one fetch reads; only the newest 100 were checked |
 | `ALL_DAY_EVENTS: <n>` | all-day events, reported separately and excluded from conflicts |
 
-`ALL_DAY_EVENTS` is ordinary and does not raise `ACTION_NEEDED`; the other three do.
+`ALL_DAY_EVENTS` is ordinary and does not raise `ACTION_NEEDED`; the other four do.
 
 A failing upstream also names itself where it happened, as `DATA_SOURCE_ERROR: gmail` or
 `DATA_SOURCE_ERROR: calendar`. The report is always complete: every section is emitted on
@@ -1120,13 +1154,13 @@ All-day events are reported rather than folded into conflict detection. An all-d
 no start time and its end date is exclusive, so treating it as a timed event running from
 midnight made it overlap every other event that day.
 
-Operator check — the counts should reconcile and both error lines should be zero. `tail` will
-not do here: the counts and the error lines sit in different sections, so ask for them by
-name.
+Operator check — the counts should reconcile, both error lines should be zero and
+`FETCH_TRUNCATED` should be `no`. `tail` will not do here: the counts and the error lines sit
+in different sections, so ask for them by name.
 
 ```bash
 docker exec hermes hermes-check \
-  | grep -E '^(NEW_UNREAD|URGENT|VIP|OTHER|UNREADABLE_MESSAGES|UNPARSEABLE_EVENTS|DATA_SOURCE_ERRORS):'
+  | grep -E '^(LOOKBACK_HOURS|NEW_UNREAD|URGENT|VIP|OTHER|UNREADABLE_MESSAGES|FETCH_TRUNCATED|UNPARSEABLE_EVENTS|DATA_SOURCE_ERRORS):'
 ```
 
 ### Testing it

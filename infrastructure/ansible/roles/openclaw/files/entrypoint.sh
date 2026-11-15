@@ -853,6 +853,10 @@ could not be read, and \`UNREADABLE_MESSAGES\` for messages that could not be tr
 them being non-zero sets \`ACTION_NEEDED\`: the check ran but saw less than it should have,
 which is worth saying rather than hiding behind a quiet report.
 
+Each run reads unread mail back to its last successful run, and \`LOOKBACK_HOURS\` says how
+far that was. \`FETCH_TRUNCATED: yes\` means the mailbox held more unread mail than one run
+reads, so only the newest were checked. It sets \`ACTION_NEEDED\` too.
+
 ## Document & File Operations
 
 Search, collect, archive, and deliver documents from email and Drive.

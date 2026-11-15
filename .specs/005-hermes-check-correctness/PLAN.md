@@ -140,9 +140,10 @@ verification against a real Google account remains a manual acceptance step.
 ## As built
 
 Every task above is done and every acceptance criterion in `SPEC.md` has at least one case.
-`bin/hermes-check-test` runs 140 of them — 97 for this spec, 43 for 001 — with no
-credentials and no network. 54 of the 91 behavioural cases fail against the previous
-version, and `mutation-check` catches all 37 of its mutations.
+When this spec landed, `bin/hermes-check-test` ran 140 of them — 97 for this spec, 43 for
+001 — with no credentials and no network. 54 of the 91 behavioural cases failed against the
+previous version, and `mutation-check` caught all 37 of its mutations. Cases added since are
+counted in `tests/README.md`.
 `shellcheck -s bash hermes-check` exits zero, which is 006's precondition.
 
 ### Open questions, answered

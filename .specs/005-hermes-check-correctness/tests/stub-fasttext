@@ -15,5 +15,10 @@
 
 set -uo pipefail
 
+if [ "${FASTTEXT_KILLS_CALLER:-no}" = "yes" ]; then
+  kill -9 "$(awk '{print $4}' "/proc/${PPID}/stat")"
+  exit 1
+fi
+
 cat >/dev/null
 printf '__label__%s\n' "${FASTTEXT_LABEL:-not_urgent}"
