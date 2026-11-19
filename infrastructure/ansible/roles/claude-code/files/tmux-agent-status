@@ -4,6 +4,7 @@ exec >/dev/null 2>&1
 
 case $1 in
 waiting) signal="waiting ${2:-Agent}" ;;
+working) signal=working ;;
 clear) signal=clear ;;
 *) exit 0 ;;
 esac
