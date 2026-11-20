@@ -28,6 +28,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     end
 
     development.vm.hostname = 'hermes-vagrant'
+    development.vm.network :forwarded_port, id: 'ssh', guest: 22, host: 2213, host_ip: '127.0.0.1'
 
     development.vm.provision :ansible do |ansible|
       ansible.playbook = PLAYBOOK
