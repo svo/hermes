@@ -162,7 +162,16 @@ should_not_configure_slack_when_no_bot_token_is_set() {
   case_end
 }
 
+should_trust_the_slack_plugin_when_the_channel_is_configured() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint "${SLACK_ENV[@]}" SLACK_ALLOW_FROM=U0123ABCDE
+  assert_equals "entrypoint succeeded" "0" "$RUN_STATUS"
+  assert_equals "plugin trusted" "true" "$(config_get '.plugins.entries.slack.enabled')"
+  case_end
+}
+
 should_set_dm_policy_to_allowlist_when_slack_allow_from_is_set
+should_trust_the_slack_plugin_when_the_channel_is_configured
 should_trim_entries_when_slack_allow_from_has_surrounding_whitespace
 should_pass_access_group_entries_through_untouched_when_allow_from_contains_them
 should_disable_group_policy_when_no_channels_are_supplied

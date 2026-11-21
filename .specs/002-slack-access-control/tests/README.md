@@ -110,11 +110,12 @@ behaviour it names:
 .specs/002-slack-access-control/tests/mutation-check
 ```
 
-Seventeen mutations, one behaviour each — trimming, empty-entry filtering, the closed
+Nineteen mutations, one behaviour each — trimming, empty-entry filtering, the closed
 `groupPolicy` default, `requireMention`, the `allowFrom` guard, the channel-ID pattern, the
 DM policy, `enabled`, `mode`, the startup log line and its counts, the empty-channel-list
-check, writing the config before validating the input, exiting zero on failure, and adding
-Telegram's `groups: {'*': …}` alongside the `channels` map. All seventeen are caught.
+check, writing the config before validating the input, exiting zero on failure, adding
+Telegram's `groups: {'*': …}` alongside the `channels` map, and trusting the Slack plugin
+(left out, or set to `false`). All nineteen are caught.
 
 Three of them were wrong before they were right, and the corrections are the useful part:
 

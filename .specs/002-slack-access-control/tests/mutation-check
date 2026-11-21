@@ -64,6 +64,9 @@ run_mutation writes-before-validating "    const allowFrom = entries(process.env
 run_mutation no-empty-channels-check "if (requested !== '' && channelIds.length === 0) {" "if (false) {"
 run_mutation no-mode "      mode: 'socket'," "" 
 run_mutation exit-zero-on-failure "process.exit(1);" "process.exit(0);"
+run_mutation no-plugin-trust "    config.plugins.entries.slack = Object.assign({}, config.plugins.entries.slack, { enabled: true });
+" ""
+run_mutation plugin-trust-false "Object.assign({}, config.plugins.entries.slack, { enabled: true })" "Object.assign({}, config.plugins.entries.slack, { enabled: false })"
 
 printf '\n'
 if [ "$uncaught" -eq 0 ]; then

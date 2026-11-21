@@ -420,6 +420,14 @@ Google Workspace credential.
 | `channels.slack.allowFrom` | the trimmed, comma-separated contents of `SLACK_ALLOW_FROM` |
 | `channels.slack.groupPolicy` | `disabled`, or `allowlist` when `SLACK_ALLOW_CHANNELS` is set |
 | `channels.slack.channels` | each listed ID mapped to `{enabled: true, requireMention: true}` |
+| `plugins.entries.slack.enabled` | `true` — trusts the Slack plugin; other keys in the entry are kept |
+
+Slack is an external plugin, `@openclaw/slack`, installed into `~/.openclaw/npm` on the volume,
+and OpenClaw does not load an external plugin it has not been told to trust. Without that key
+the gateway logs `external plugin "slack" is installed without explicit trust` and does not
+start the channel. `openclaw doctor --fix` adds it, but doctor runs before the channel is
+written, so the first start that configured Slack would go without it. Removing the channel
+leaves the entry as it is: it trusts the plugin, and the channel itself stays disabled.
 
 Removing `SLACK_BOT_TOKEN` from your `docker run` removes the channel. On the next start the
 container sets `channels.slack.enabled` to `false`, deletes **both** `botToken` and `appToken`

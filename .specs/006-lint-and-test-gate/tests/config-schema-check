@@ -230,7 +230,8 @@ const expected = new Map([
   ['channels.slack.dmPolicy', 'allowlist'],
   ['channels.slack.allowFrom', entries(env.SLACK_ALLOW_FROM)],
   ['channels.slack.groupPolicy', 'allowlist'],
-  ['channels.slack.channels', slackChannels]
+  ['channels.slack.channels', slackChannels],
+  ['plugins.entries.slack.enabled', true]
 ]);
 
 const nonEmptyStrings = ['agents.defaults.heartbeat.prompt'];

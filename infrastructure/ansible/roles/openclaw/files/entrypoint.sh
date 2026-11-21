@@ -601,6 +601,9 @@ if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
       groupPolicy: channelIds.length > 0 ? 'allowlist' : 'disabled',
       channels
     };
+    config.plugins = config.plugins || {};
+    config.plugins.entries = config.plugins.entries || {};
+    config.plugins.entries.slack = Object.assign({}, config.plugins.entries.slack, { enabled: true });
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
 
     console.log(
