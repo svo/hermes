@@ -142,8 +142,8 @@ them describe behaviour the patch still has — the owner is written, the API ke
   it was first assigned to. The patch is one literal; there is no guard to misplace.
 - `approvals are rewritten on every start` was about `exec-approvals.json` being written when
   it already existed. Nothing writes that file any more. 008's mutation-check holds what
-  replaced it: `the retired approvals file is written again` and `the migration runs on
-  every start`.
+  replaced it: `the retired approvals file is written again` and `the migration is announced
+  on every start`.
 
 The first mutation is the one worth knowing about. `validation runs after the writes` moves
 onboarding above the required-variable block, which is where it was — and four cases catch it,

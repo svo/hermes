@@ -11,6 +11,31 @@ doctor_ran() {
   [ -f "${RUN_DIR}/doctor-ran" ]
 }
 
+first_invocation_line() {
+  awk -v want_command="$1" -v want_arg="$2" '
+    /^INVOCATION \[/ {
+      header = NR
+      name = $0
+      sub(/^INVOCATION \[/, "", name)
+      sub(/\] [0-9]+$/, "", name)
+      position = 0
+      next
+    }
+    /^ARG \[/ {
+      position++
+      if (position == 2 && name == want_command) {
+        value = $0
+        sub(/^ARG \[/, "", value)
+        sub(/\]$/, "", value)
+        if (value == want_arg) {
+          print header
+          exit
+        }
+      }
+    }
+  ' "${RUN_DIR}/argv"
+}
+
 should_write_no_approvals_file_when_the_container_is_new() {
   case_start "${FUNCNAME[0]}"
   run_entrypoint
@@ -36,12 +61,65 @@ should_write_no_approvals_file_when_the_container_restarts() {
   case_end
 }
 
-should_not_run_the_migration_when_no_legacy_file_exists() {
+should_run_doctor_when_the_container_is_new() {
   case_start "${FUNCNAME[0]}"
   run_entrypoint
-  if doctor_ran; then
-    fail "doctor ran on a container that has no legacy approvals file"
+  if ! doctor_ran; then fail "doctor did not run on a new container"; fi
+  case_end
+}
+
+should_run_doctor_again_when_the_container_restarts() {
+  case_start "${FUNCNAME[0]}"
+  local home; home="$(new_home)"
+  run_entrypoint --home "$home"
+  run_entrypoint --home "$home"
+  assert_equals "the restart succeeded" "0" "$RUN_STATUS"
+  if ! doctor_ran; then fail "doctor did not run on the restart"; fi
+  case_end
+}
+
+should_run_doctor_before_the_configuration_is_written() {
+  case_start "${FUNCNAME[0]}"
+  local doctor_at patch_at
+  run_entrypoint
+  doctor_at="$(first_invocation_line doctor --fix)"
+  patch_at="$(first_invocation_line config patch)"
+  if [ -z "$doctor_at" ] || [ -z "$patch_at" ]; then
+    fail "expected both a doctor and a config patch call (doctor '${doctor_at}', patch '${patch_at}')"
+  elif [ "$doctor_at" -gt "$patch_at" ]; then
+    fail "doctor ran after the configuration was written"
   fi
+  case_end
+}
+
+should_say_nothing_about_doctor_when_it_succeeds() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint
+  assert_not_contains "no doctor notice" "$RUN_ALL" "doctor:"
+  assert_not_contains "no approvals notice" "$RUN_ALL" "approvals:"
+  case_end
+}
+
+should_start_anyway_when_doctor_fails_on_an_ordinary_start() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint OPENCLAW_STUB_DOCTOR_FAILS=yes
+  assert_equals "the run succeeded anyway" "0" "$RUN_STATUS"
+  if ! gateway_started; then fail "a failed doctor stopped the gateway"; fi
+  assert_contains "it says doctor failed" "$RUN_ERR" "openclaw doctor --fix exited 1"
+  assert_contains "and quotes it" "$RUN_ERR" "could not repair the state directory"
+  assert_not_contains "it tells no approvals story" "$RUN_ALL" "approvals:"
+  case_end
+}
+
+should_not_log_a_credential_when_a_failed_doctor_is_quoted() {
+  case_start "${FUNCNAME[0]}"
+  run_entrypoint \
+    ANTHROPIC_API_KEY=sk-ant-secret \
+    OPENCLAW_STUB_DOCTOR_NOISY_EXIT=yes \
+    OPENCLAW_STUB_DOCTOR_ECHO='doctor saw env.vars.ANTHROPIC_API_KEY=sk-ant-secret'
+  assert_contains "the failure is reported" "$RUN_ERR" "openclaw doctor --fix exited 1"
+  assert_not_contains "the anthropic key" "$RUN_ALL" "sk-ant-secret"
+  assert_contains "and the redaction is visible" "$RUN_ERR" "[redacted]"
   case_end
 }
 
@@ -72,16 +150,16 @@ should_migrate_rather_than_delete_when_the_operator_tightened_the_policy() {
   case_end
 }
 
-should_run_the_migration_once_when_the_container_restarts() {
+should_report_the_migration_once_when_the_container_restarts() {
   case_start "${FUNCNAME[0]}"
   local home; home="$(new_home)"
   printf '%s\n' '{"version":1,"defaults":{"security":"full"}}' \
     > "${home}/${LEGACY_APPROVALS}"
   run_entrypoint --home "$home"
-  if ! doctor_ran; then fail "the first start did not migrate"; fi
+  assert_contains "the first start migrates" "$RUN_OUT" "approvals: migrating"
   run_entrypoint --home "$home"
   assert_equals "the restart succeeded" "0" "$RUN_STATUS"
-  if doctor_ran; then fail "doctor ran again on a volume it had already migrated"; fi
+  assert_not_contains "the restart has nothing to migrate" "$RUN_ALL" "approvals: migrat"
   case_end
 }
 
@@ -163,10 +241,15 @@ should_not_log_a_credential_when_doctor_is_quoted() {
 should_write_no_approvals_file_when_the_container_is_new
 should_set_the_policy_where_it_lives_now_when_the_container_is_new
 should_write_no_approvals_file_when_the_container_restarts
-should_not_run_the_migration_when_no_legacy_file_exists
+should_run_doctor_when_the_container_is_new
+should_run_doctor_again_when_the_container_restarts
+should_run_doctor_before_the_configuration_is_written
+should_say_nothing_about_doctor_when_it_succeeds
+should_start_anyway_when_doctor_fails_on_an_ordinary_start
+should_not_log_a_credential_when_a_failed_doctor_is_quoted
 should_migrate_the_legacy_file_when_a_volume_carries_one
 should_migrate_rather_than_delete_when_the_operator_tightened_the_policy
-should_run_the_migration_once_when_the_container_restarts
+should_report_the_migration_once_when_the_container_restarts
 should_start_anyway_when_the_migration_fails
 should_say_what_is_broken_when_the_migration_fails
 should_report_no_migration_when_doctor_succeeds_but_keeps_the_file

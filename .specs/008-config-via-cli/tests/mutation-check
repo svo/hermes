@@ -183,21 +183,49 @@ mutate 'a rejection says nothing useful' \
     redact_secrets ""'
 
 mutate 'the retired approvals file is written again' \
-  'if [ -f "$HOME/.openclaw/exec-approvals.json" ]; then
-  echo '"'"'approvals: migrating the retired exec-approvals.json into SQLite state.'"'"'' \
+  'legacy_approvals='"'"'no'"'"'
+if [ -f "$HOME/.openclaw/exec-approvals.json" ]; then' \
   'printf '"'"'{"version":1,"defaults":{"security":"full"}}\n'"'"' > "$HOME/.openclaw/exec-approvals.json"
-if [ -f "$HOME/.openclaw/exec-approvals.json" ]; then
-  echo '"'"'approvals: migrating the retired exec-approvals.json into SQLite state.'"'"''
+legacy_approvals='"'"'no'"'"'
+if [ -f "$HOME/.openclaw/exec-approvals.json" ]; then'
 
-mutate 'the migration runs on every start' \
+mutate 'the migration is announced on every start' \
   'if [ -f "$HOME/.openclaw/exec-approvals.json" ]; then
-  echo '"'"'approvals: migrating' \
+  legacy_approvals='"'"'yes'"'"'' \
   'if true; then
-  echo '"'"'approvals: migrating'
+  legacy_approvals='"'"'yes'"'"''
 
 mutate 'the legacy file is deleted rather than migrated' \
-  '  doctor_output="$(openclaw doctor --fix --non-interactive 2>&1)" || true' \
-  '  doctor_output="$(rm -f "$HOME/.openclaw/exec-approvals.json" 2>&1)" || true'
+  'doctor_output="$(openclaw doctor --fix --non-interactive 2>&1)" || doctor_status=$?' \
+  'doctor_output="$(rm -f "$HOME/.openclaw/exec-approvals.json" 2>&1)" || doctor_status=$?'
+
+mutate 'doctor runs only when a legacy file exists' \
+  'doctor_output="$(openclaw doctor --fix --non-interactive 2>&1)" || doctor_status=$?' \
+  'doctor_output='"'"''"'"'
+if [ "$legacy_approvals" = '"'"'yes'"'"' ]; then
+  doctor_output="$(openclaw doctor --fix --non-interactive 2>&1)" || doctor_status=$?
+fi'
+
+mutate 'a failed doctor is not mentioned' \
+  'if [ "$doctor_status" -ne 0 ]; then
+  {
+    echo "doctor:' \
+  'if false; then
+  {
+    echo "doctor:'
+
+mutate 'a failed doctor takes the container down' \
+  '    redact_secrets "$doctor_output" | tail -n 5 | sed '"'"'s/^/    /'"'"'
+  } >&2
+fi' \
+  '    redact_secrets "$doctor_output" | tail -n 5 | sed '"'"'s/^/    /'"'"'
+  } >&2
+  exit 1
+fi'
+
+mutate "a failed doctor's report is printed without redacting it" \
+  '    redact_secrets "$doctor_output" | tail -n 5 | sed' \
+  '    printf '"'"'%s\n'"'"' "$doctor_output" | tail -n 5 | sed'
 
 mutate 'a failed migration takes the container down' \
   "      echo '  Otherwise fix what doctor reported above and restart.'" \
@@ -205,17 +233,18 @@ mutate 'a failed migration takes the container down' \
       exit 1"
 
 mutate 'the migration verdict is taken from the exit code' \
-  '  doctor_output="$(openclaw doctor --fix --non-interactive 2>&1)" || true
-
-  if [ ! -f "$HOME/.openclaw/exec-approvals.json" ]; then' \
-  '  doctor_status=0
-  doctor_output="$(openclaw doctor --fix --non-interactive 2>&1)" || doctor_status=$?
-
-  if [ "$doctor_status" -eq 0 ]; then'
+  '  if [ ! -f "$HOME/.openclaw/exec-approvals.json" ]; then
+    echo '"'"'approvals: migrated' \
+  '  if [ "$doctor_status" -eq 0 ]; then
+    echo '"'"'approvals: migrated'
 
 mutate "doctor's report is printed without redacting it" \
   '        redact_secrets "$doctor_output" | tail -n 5' \
   '        printf '"'"'%s\n'"'"' "$doctor_output" | tail -n 5'
+
+mutate 'the tool profile is set to full, which now adds plugin tools' \
+  "        profile: null," \
+  "        profile: 'full',"
 
 mutate 'messages are answered by the small model again' \
   "    const chatModel = 'anthropic/claude-opus-5';" \

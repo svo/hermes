@@ -14,7 +14,7 @@ should_create_the_tools_object_when_onboarding_omitted_it() {
   assert_equals "the entrypoint survived" "0" "$RUN_STATUS"
   assert_not_contains "no TypeError" "$RUN_ERR" "TypeError"
   assert_equals "loop detection landed" "true" "$(config_get '.tools.loopDetection.enabled')"
-  assert_equals "profile landed" "full" "$(config_get '.tools.profile')"
+  assert_equals "profile left unset" "null" "$(config_get '.tools.profile')"
   case_end
 }
 
@@ -127,7 +127,7 @@ should_not_write_an_owner_when_no_channel_is_configured() {
   run_entrypoint
   assert_equals "the entrypoint succeeded" "0" "$RUN_STATUS"
   assert_equals "no commands key" "null" "$(config_get '.commands')"
-  assert_equals "the rest of the config landed" "full" "$(config_get '.tools.profile')"
+  assert_equals "the rest of the config landed" "true" "$(config_get '.tools.loopDetection.enabled')"
   case_end
 }
 

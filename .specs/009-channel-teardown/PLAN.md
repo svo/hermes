@@ -11,7 +11,8 @@ block that has had its token deleted is still a *legal* channel block. If `botTo
 brick — the exact failure 004 exists to end, arriving through the door 009 opens.
 
 So it was run first, against `openclaw@2026.9.2` — the version
-`roles/openclaw/defaults/main.yml` pins, so the schema consulted is the one the container loads.
+`roles/openclaw/defaults/main.yml` pinned then, so the schema consulted was the one the container
+loaded.
 
 **`botToken` is not required, and the torn-down block validates.**
 

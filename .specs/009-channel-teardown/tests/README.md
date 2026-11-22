@@ -38,7 +38,7 @@ token deleted is still a *legal* channel block. If `botToken` were required, "di
 token" would produce a config the phase 3 gate refuses — an operator would remove a token and get a
 container that will not start, which is worse than the bug being fixed.
 
-Run against `openclaw@2026.9.2`, the version `roles/openclaw/defaults/main.yml` pins:
+Run against `openclaw@2026.9.2`, the version `roles/openclaw/defaults/main.yml` pinned then:
 
 ```
 channels.telegram  required: ["dmPolicy","groupPolicy"]

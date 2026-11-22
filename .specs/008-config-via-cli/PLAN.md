@@ -7,8 +7,8 @@
 
 `SPEC.md` opens with a *verify-locally* check and the instruction to **run that before anything
 else**, because its answer decides whether this spec is a tidy-up or a live problem. It was run
-against `openclaw@2026.9.2` — the version `roles/openclaw/defaults/main.yml` pins, so the schema
-consulted is the one the container actually loads.
+against `openclaw@2026.9.2` — the version `roles/openclaw/defaults/main.yml` pinned then, so the
+schema consulted was the one the container actually loaded.
 
 **The answer is: mostly a tidy-up, with one live problem that is not the one the spec expected.**
 

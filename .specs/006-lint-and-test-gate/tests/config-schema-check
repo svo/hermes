@@ -209,7 +209,6 @@ const expected = new Map([
     'anthropic/claude-haiku-4-5': { params: { cacheRetention: 'long' } }
   }],
   ['tools.loopDetection.enabled', true],
-  ['tools.profile', 'full'],
   ['tools.deny', ['gateway']],
   ['tools.exec.security', 'full'],
   ['cron.enabled', true],
@@ -236,7 +235,7 @@ const expected = new Map([
 
 const nonEmptyStrings = ['agents.defaults.heartbeat.prompt'];
 
-const absent = ['tools.allow', 'env.ANTHROPIC_API_KEY', 'agent', 'heartbeat'];
+const absent = ['tools.profile', 'tools.allow', 'env.ANTHROPIC_API_KEY', 'agent', 'heartbeat'];
 
 const lookup = (root, path) => {
   let node = root;

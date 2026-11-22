@@ -1,0 +1,5 @@
+---
+node_major: 26
+node_minimum_version: 26.12.1
+node_retired_majors:
+  - 22

@@ -46,8 +46,9 @@ quietly covers.
 
 | What | Where | Currently |
 |---|---|---|
-| OpenClaw (service image) | `roles/openclaw/defaults/main.yml` → `openclaw_version` | `2026.9.2` |
-| OpenClaw CLI (builder image) | `roles/openclaw-cli/defaults/main.yml` → `openclaw_cli_version` | `2026.9.2` |
+| OpenClaw (service image) | `roles/openclaw/defaults/main.yml` → `openclaw_version` | `2026.9.37` |
+| OpenClaw CLI (builder image) | `roles/openclaw-cli/defaults/main.yml` → `openclaw_cli_version` | `2026.9.37` |
+| Node.js major (all three images) | `roles/node/defaults/main.yml` → `node_major` + `node_minimum_version` | `26`, at least `26.12.1` |
 | gog | `roles/openclaw/defaults/main.yml` → `openclaw_gog_version` + `openclaw_gog_checksums` | `0.39.1` |
 | fastText | `roles/fasttext/defaults/main.yml` → `fasttext_version` + `fasttext_checksum` | `0.9.2` |
 
@@ -90,9 +91,15 @@ bricked every running container shows up as a red gate you are looking at, inste
 assistant on Friday.
 
 Check the Node version the new release wants before any of that: `npm view openclaw@<version>
-engines`. 2026.9.2 accepts Node 22. 2026.9.37 wants `>=24.22.1 <25 || >=26.12.1` and exits at
-startup on anything else, and `roles/node` installs Node 22 for the service, builder and
-development images alike.
+engines`. OpenClaw checks it at startup and exits on anything else; 2026.9.37 wants
+`>=24.22.1 <25 || >=26.12.1`. `roles/node` installs one major for the service, builder and
+development images alike, from NodeSource's `node_<major>.x` repository, and the build fails
+if the Node it installed is older than `node_minimum_version` or outside that major.
+
+To move Node to another major, set `node_major` and `node_minimum_version`, and add the major
+being left to `node_retired_majors` so a machine provisioned again drops its repository. A
+machine that already has Node keeps it when the repository changes; the check then fails the
+provisioning and says to run `apt-get install nodejs`.
 
 ### Bumping gog
 
@@ -760,8 +767,9 @@ and it means the stored value wins over the key. `exec-policy show` is the comma
 which of the two you have, and `openclaw approvals get` shows what is stored.
 
 **Upgrading is automatic and normally happens once.** A volume created by an older image still
-carries the file, so the first start after upgrading runs `openclaw doctor --fix` to import it
-into SQLite and retire it, then never again — the step is guarded on the file being there. It is a
+carries the file, and `openclaw doctor --fix`, which runs on every start (see
+[Doctor runs on every start](#doctor-runs-on-every-start)), imports it into SQLite and retires
+it. The container says `approvals: migrating` only on the start that finds the file. It is a
 migration rather than a delete on purpose: an operator who tightened `defaults.security` keeps
 that setting, where deleting the file would silently widen it.
 
@@ -788,11 +796,6 @@ docker restart hermes
 Until it is gone, exec approvals stay blocked and the container repeats the message on every
 start — which is deliberate: a live problem that stopped being mentioned would be worse.
 
-`doctor --fix` is a maintenance pass over the whole configuration, not just the approvals import,
-which is why it runs only while that file is present and never on a container created after this
-change. If you would rather it did not run at all, do the migration yourself before upgrading —
-read the file, set the key, delete it — and the container will find nothing to do.
-
 To change the policy now, set the key rather than editing a file. `tools.exec.security` takes
 `deny`, `allowlist` or `full`; prompting is a separate key, `tools.exec.ask`, which takes `off`,
 `on-miss` or `always`:
@@ -815,6 +818,42 @@ exec: policy left as it was found; this start did not change it.
 `tools.exec.ask` is never written by the container, and everything else under `tools.exec` —
 `timeoutSeconds`, `grantExpiryDays`, `applyPatch` — survives a restart too, because the config is
 merged rather than replaced.
+
+### Doctor runs on every start
+
+`openclaw doctor --fix --non-interactive` runs on every start, after onboarding and before the
+container writes its configuration. From 2026.9.37 the gateway no longer repairs state left by
+an older release when it starts: it checks the state, and exits with code 78 if a store it
+needs is unsafe. OpenClaw's own container image runs doctor before every gateway start for that
+reason, and its documentation says a custom entrypoint has to do the same. This is a custom
+entrypoint.
+
+Doctor is a maintenance pass over the whole state directory and configuration: legacy files
+imported into SQLite, database schemas upgraded with a copy kept first, retired keys removed.
+Running it on a volume that needs nothing is a no-op. When it exits non-zero the container
+starts anyway and prints the last lines it wrote, with secrets redacted:
+
+```
+doctor: openclaw doctor --fix exited 1. The gateway checks the state it
+  left and refuses to start if a store it needs is unsafe. openclaw doctor said:
+```
+
+If the gateway then starts, whatever doctor could not do did not block it. If it exits with
+code 78, its own message names the store; run `docker exec hermes openclaw doctor --fix` to
+see doctor's full report.
+
+### The tool profile is left unset
+
+`tools.profile` chooses which tools the agent may call before `tools.allow` and `tools.deny`
+narrow it. The container deletes it on every start. Unset means no filtering of OpenClaw's core
+tools. Until 2026.9.37, `full` meant the same, and the container used to write `full`. From
+2026.9.37, `full` also turns on the optional tools of every enabled plugin, and onboarding
+writes `full` on a new volume. An agent that reads third-party mail with an unrestricted shell
+should not gain tools because a release changed what a word means, so the key is removed
+rather than kept. `tools.deny: ["gateway"]` still applies either way.
+
+To give the agent plugin tools, set `profile: 'full'` in `build_openclaw_config_payload`; a
+value set with `openclaw config set` lasts only until the next start.
 
 ### Credentials on disk are mode 0600
 
@@ -882,20 +921,16 @@ To change a model, edit `chatModel` or `utilityModel` in `entrypoint.sh`. A mode
 the container with `openclaw config set` lasts until the next start, because these keys are
 written on every start. An entry you add under `agents.defaults.models` is kept.
 
-### Newer models need a newer OpenClaw, and that needs a newer Node
+### Which models the pinned OpenClaw knows
 
-The pinned OpenClaw does not know the Claude 5.5 models:
+A model id has to be one the pinned OpenClaw carries in its catalog:
 
 ```bash
 docker exec hermes openclaw models list --provider anthropic --all
 ```
 
-On 2026.9.2 that lists Opus 5, Sonnet 5 and Haiku 4.5, among others, and no 5.5 model.
-2026.9.37, npm's `extended-stable`, carries `anthropic/claude-opus-5-5` and
-`anthropic/claude-haiku-5-5`. It also requires Node 24, at 24.22.1 or later, or Node 26.12.1
-or later, and refuses to start on Node 22, which is what `roles/node` installs in all three
-images. So moving to those models is a Node upgrade and an OpenClaw upgrade together — see
-[Bumping OpenClaw](#bumping-openclaw) — and neither has been done.
+The 5.5 models arrived with 2026.9.37. 2026.9.2 did not know them, and 2026.9.37 needs a
+newer Node than that release did; see [Bumping OpenClaw](#bumping-openclaw).
 
 ## Heartbeat delivery
 
@@ -1114,7 +1149,7 @@ happen is a second line that **is** that header. Without `-x` the count rises wh
 someone is probing, and the check reads as a breach when it is the design working.
 
 This reduces the efficacy of prompt injection; it does not eliminate it. The heartbeat agent
-still runs with a full tool profile and an unrestricted shell.
+still runs with every core tool and an unrestricted shell.
 
 ## Monitoring Output
 

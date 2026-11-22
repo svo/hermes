@@ -17,14 +17,14 @@ Anthropic key: the real `entrypoint.sh` runs against stub `openclaw` and `gog` b
 | `stub-openclaw` | Fake `openclaw`: `onboard`, `gateway`, `gateway health`, `config patch`, `config set`, `config get`, `config validate`, `doctor`, `automations list`. |
 | `stub-gog` | Fake `gog`. Records and succeeds. |
 
-Thirty-six cases: 23 in `setter-test`, 13 in `approvals-test`. Nothing skips.
+Forty-two cases: 24 in `setter-test`, 18 in `approvals-test`. Nothing skips.
 
 ## The probe came first
 
 `SPEC.md` opens with a `verify-locally` check and the instruction to run it **before anything
 else in this spec**, because its answer decides whether 008 is a tidy-up or a live problem. It
-was run against `openclaw@2026.9.2` — the version `roles/openclaw/defaults/main.yml` pins, so the
-schema consulted is the one the container loads. `PLAN.md` § The probe, first records it in full.
+was run against `openclaw@2026.9.2` — the version `roles/openclaw/defaults/main.yml` pinned then,
+so the schema consulted was the one the container loaded. `PLAN.md` § The probe, first records it in full.
 
 Two of the five findings changed verdict:
 
@@ -112,14 +112,25 @@ exit code reports a migration that did not happen in the first case and warns ab
 in the second. The block asks whether the file is gone. `OPENCLAW_STUB_DOCTOR_ECHO` makes doctor
 quote a credential back, which is why its output is redacted like everything else here.
 
+**`doctor` runs on every start, and before the configuration is written.** It used to run only
+while the legacy approvals file was there. From OpenClaw 2026.9.37 the gateway leaves the repair
+of an older release's state to doctor, and OpenClaw's own image runs it before every gateway
+start; see the root README, Doctor runs on every start. The cases that pin it read the stub's
+argv log for the position of the first `doctor --fix` and the first `config patch`. A failed
+doctor on an ordinary start is reported, with its output redacted, and the start carries on.
+
 ## Mutations
 
 ```bash
 .specs/008-config-via-cli/tests/mutation-check
 ```
 
-Thirty-one mutations, one behaviour each, all against a copy of `entrypoint.sh`. Every one is
-caught. It is not part of `run` because it re-runs the suites up to thirty-one times.
+Thirty-six mutations, one behaviour each, all against a copy of `entrypoint.sh`. Every one is
+caught. It is not part of `run` because it re-runs the suites up to thirty-six times.
+
+One behaviour has a case and no mutation: doctor running after the configuration is written.
+Moving the call takes two edits, and a mutation here makes one. Done by hand, moving it below
+the patch fails `should_run_doctor_before_the_configuration_is_written` and ten other cases.
 
 Each mutation asserts its anchor occurs exactly once in the file, and that the mutant still
 parses as bash, before it is applied; a bad anchor is reported as a bad anchor rather than as a
@@ -167,7 +178,8 @@ Five are worth knowing about, because each one found a hole rather than confirmi
   after which `exec-policy show` said `Approvals State: stored`. What the suite asserts is the
   route — that the file was handed to the importer rather than unlinked — because SQLite is
   upstream's and this suite has no window into it.
-- **The breadth of `doctor --fix`.** In the probe it also altered
-  `browser.extensionRelay.allowLegacyAuth` and rebuilt the agent roster. The guard keeps it to at
-  most one run per volume, and `should_not_run_the_migration_when_no_legacy_file_exists` pins
-  that, but what it does on a real config is not something a stub can model.
+- **The breadth of `doctor --fix`.** In the probe against 2026.9.2 it also altered
+  `browser.extensionRelay.allowLegacyAuth` and rebuilt the agent roster. It now runs on every
+  start, as it does in OpenClaw's own image, and the configuration the container writes is
+  patched in after it. What it does to a real configuration on 2026.9.37 is not something a
+  stub can model.

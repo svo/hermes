@@ -255,12 +255,12 @@ mutate_role 'openclaw is installed at latest again' \
 
 mutate_role 'the openclaw pin becomes a dist-tag' \
   roles/openclaw/defaults/main.yml \
-  'openclaw_version: 2026.9.2' \
+  'openclaw_version: 2026.9.37' \
   'openclaw_version: latest'
 
 mutate_role 'the builder validator drifts from the service' \
   roles/openclaw-cli/defaults/main.yml \
-  'openclaw_cli_version: 2026.9.2' \
+  'openclaw_cli_version: 2026.9.37' \
   'openclaw_cli_version: 2026.6.34'
 
 mutate_role 'the gog download is no longer verified' \

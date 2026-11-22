@@ -47,6 +47,12 @@ refuse() {
 agent_warning='No --agent specified; the job will run with the configured default agent. Specify --agent to choose a specific agent, or set agents.defaults.systemAgent.agentId.'
 
 case "${1:-}" in
+  doctor)
+    case " $* " in
+      *" --fix "*) ;;
+      *) usage "$@" ;;
+    esac
+    ;;
   onboard)
     mkdir -p "$(dirname "$config")"
     cat > "$config" <<'ONBOARDED'
@@ -340,7 +346,7 @@ ONBOARDED
               process.exit(3);
             };
 
-            const reserved = ['heartbeat-task:', 'skill-collection-review:']
+            const reserved = ['heartbeat:', 'heartbeat-task:', 'skill-collection-review:']
               .find((prefix) => declarationKey !== null && declarationKey.startsWith(prefix));
             if (reserved) {
               refuse('invalid cron.add params: cron declarationKey namespace \"' + reserved +

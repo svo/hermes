@@ -99,7 +99,7 @@ cmd_onboard() {
     }
   },
   "tools": {
-    "profile": "coding"
+    "profile": "full"
   },
   "plugins": {
     "entries": {
@@ -372,6 +372,12 @@ fi
 
 case "$command" in
   onboard) cmd_onboard "$@" ;;
+  doctor)
+    case " $* " in
+      *" --fix "*) ;;
+      *) unimplemented "$command" "$@" ;;
+    esac
+    ;;
   config)
     sub="${1:-}"
     if [ "$#" -gt 0 ]; then

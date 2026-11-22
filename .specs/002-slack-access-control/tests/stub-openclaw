@@ -10,6 +10,12 @@ usage() {
 }
 
 case "${1:-}" in
+  doctor)
+    case " $* " in
+      *" --fix "*) ;;
+      *) usage "$@" ;;
+    esac
+    ;;
   onboard)
     mkdir -p "$(dirname "$config")"
     cat > "$config" <<'ONBOARDED'

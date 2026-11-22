@@ -248,10 +248,23 @@ if [ -n "${GOG_GOOGLE_ACCOUNT:-}" ]; then
   export GOG_ACCOUNT="$GOG_GOOGLE_ACCOUNT"
 fi
 
+legacy_approvals='no'
 if [ -f "$HOME/.openclaw/exec-approvals.json" ]; then
+  legacy_approvals='yes'
   echo 'approvals: migrating the retired exec-approvals.json into SQLite state.'
-  doctor_output="$(openclaw doctor --fix --non-interactive 2>&1)" || true
+fi
 
+doctor_status=0
+doctor_output="$(openclaw doctor --fix --non-interactive 2>&1)" || doctor_status=$?
+if [ "$doctor_status" -ne 0 ]; then
+  {
+    echo "doctor: openclaw doctor --fix exited ${doctor_status}. The gateway checks the state it"
+    echo '  left and refuses to start if a store it needs is unsafe. openclaw doctor said:'
+    redact_secrets "$doctor_output" | tail -n 5 | sed 's/^/    /'
+  } >&2
+fi
+
+if [ "$legacy_approvals" = 'yes' ]; then
   if [ ! -f "$HOME/.openclaw/exec-approvals.json" ]; then
     echo 'approvals: migrated; exec policy now comes from tools.exec.security.'
   else
@@ -309,7 +322,7 @@ build_openclaw_config_payload() {
         }
       },
       tools: {
-        profile: 'full',
+        profile: null,
         allow: null,
         deny: ['gateway'],
         loopDetection: {
