@@ -30,6 +30,7 @@ check "calendar-dates-test" bash "${tests_dir}/calendar-dates-test"
 check "upstream-shape-test" bash "${tests_dir}/upstream-shape-test"
 check "gog-invocation-test" bash "${tests_dir}/gog-invocation-test"
 check "lookback-test" bash "${tests_dir}/lookback-test"
+check "state-files-test" bash "${tests_dir}/state-files-test"
 check "lint-test" bash "${tests_dir}/lint-test"
 
 printf '\n'

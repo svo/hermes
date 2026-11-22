@@ -25,6 +25,7 @@ suites=(
   upstream-shape-test
   gog-invocation-test
   lookback-test
+  state-files-test
 )
 
 selected() {
@@ -320,8 +321,8 @@ mutate 'the record moves before the mail is remembered' \
 if [ "$FETCHED_OK" = "yes" ]; then echo "$fetch_started" > "$LAST_FETCH_FILE"; fi'
 
 mutate 'the record is never written' \
-  '    && mv "${LAST_FETCH_FILE}.tmp" "$LAST_FETCH_FILE"' \
-  '    && true'
+  '    && mv -T "${LAST_FETCH_FILE}.tmp" "$LAST_FETCH_FILE"; }; then' \
+  '    && true; }; then'
 
 mutate 'the fetch asks for fifty again' \
   'FETCH_MAX=100' \
@@ -344,8 +345,34 @@ mutate 'only two hundred ids are remembered' \
   'SEEN_MAX=200'
 
 mutate 'the seen file is never trimmed' \
-  'tail -n "$SEEN_MAX" "$SEEN_FILE" > "${SEEN_FILE}.tmp" && mv "${SEEN_FILE}.tmp" "$SEEN_FILE"' \
-  ':'
+  'if ! { tail -n "$SEEN_MAX" "$SEEN_FILE" > "${SEEN_FILE}.tmp" \
+  && mv "${SEEN_FILE}.tmp" "$SEEN_FILE"; }; then' \
+  'if false; then'
+
+mutate 'a state directory that cannot be made ends the run' \
+  '{ mkdir -p "$STATE_DIR" && touch "$SEEN_FILE" "$VIP_FILE"; } || true' \
+  'mkdir -p "$STATE_DIR"
+touch "$SEEN_FILE" "$VIP_FILE"'
+
+mutate 'a seen list that cannot be appended to ends the run' \
+  'if [ -n "$new_ids" ] && ! printf '"'"'%s'"'"' "$new_ids" >> "$SEEN_FILE"; then
+  seen_saved="no"
+fi' \
+  'if [ -n "$new_ids" ]; then
+  printf '"'"'%s'"'"' "$new_ids" >> "$SEEN_FILE"
+fi'
+
+mutate 'an unsaved seen list is not mentioned' \
+  '  add_reason "the list of reported messages could not be saved"' \
+  '  :'
+
+mutate 'an unsaved record is not mentioned' \
+  '    add_reason "the time of this mail check could not be saved"' \
+  '    :'
+
+mutate 'a directory where the record goes swallows it' \
+  '    && mv -T "${LAST_FETCH_FILE}.tmp" "$LAST_FETCH_FILE"; }; then' \
+  '    && mv "${LAST_FETCH_FILE}.tmp" "$LAST_FETCH_FILE"; }; then'
 
 printf '\n'
 if [ "$skipped" -gt 0 ]; then

@@ -23,8 +23,7 @@ UNTRUSTED_EMAIL_CLOSE="</untrusted-email>"
 UNTRUSTED_CALENDAR_OPEN="<untrusted-calendar>"
 UNTRUSTED_CALENDAR_CLOSE="</untrusted-calendar>"
 
-mkdir -p "$STATE_DIR"
-touch "$SEEN_FILE" "$VIP_FILE"
+{ mkdir -p "$STATE_DIR" && touch "$SEEN_FILE" "$VIP_FILE"; } || true
 
 gog_args=()
 if [ -n "$GOG_ACCOUNT" ]; then
@@ -259,14 +258,23 @@ while [ "$msg_index" -lt "$message_count" ]; do
   fi
 done
 
-if [ -n "$new_ids" ]; then
-  printf '%s' "$new_ids" >> "$SEEN_FILE"
+seen_saved="yes"
+if [ -n "$new_ids" ] && ! printf '%s' "$new_ids" >> "$SEEN_FILE"; then
+  seen_saved="no"
 fi
-tail -n "$SEEN_MAX" "$SEEN_FILE" > "${SEEN_FILE}.tmp" && mv "${SEEN_FILE}.tmp" "$SEEN_FILE"
+if ! { tail -n "$SEEN_MAX" "$SEEN_FILE" > "${SEEN_FILE}.tmp" \
+  && mv "${SEEN_FILE}.tmp" "$SEEN_FILE"; }; then
+  seen_saved="no"
+fi
+if [ "$seen_saved" = "no" ]; then
+  add_reason "the list of reported messages could not be saved"
+fi
 
 if [ "$mail_fetched" = "yes" ]; then
-  printf '%s\n' "$fetch_started" > "${LAST_FETCH_FILE}.tmp" \
-    && mv "${LAST_FETCH_FILE}.tmp" "$LAST_FETCH_FILE"
+  if ! { printf '%s\n' "$fetch_started" > "${LAST_FETCH_FILE}.tmp" \
+    && mv -T "${LAST_FETCH_FILE}.tmp" "$LAST_FETCH_FILE"; }; then
+    add_reason "the time of this mail check could not be saved"
+  fi
 fi
 
 echo "NEW_UNREAD: ${new_count}"

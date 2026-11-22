@@ -21,14 +21,16 @@ bin/hermes-check-test          # everything that verifies hermes-check
 | `upstream-shape-test` | SPEC Open Question 2 — the response shape `gog` really emits. |
 | `gog-invocation-test` | C10 — what `gog` is actually called with. |
 | `lookback-test` | How far back the mail fetch looks, and what it remembers between runs. Not a 005 finding; see below. |
+| `state-files-test` | What a run does when its state files cannot be saved. Not a 005 finding; see below. |
 | `lint-test` | The shellcheck gate 006 depends on. |
 | `mutation-check` | Sensitivity check. Not part of `run`; see below. |
 | `stub-gog` | Fake `gog`: prints a fixture, exits with a chosen status, logs its argv. |
 | `stub-fasttext` | Fake urgency classifier, so bucket assignment is identical everywhere. |
 
-One hundred and nineteen cases: 20 in `vip-matching-test`, 8 in `classification-test`, 11 in
-`message-identity-test`, 11 in `data-source-test`, 21 in `calendar-dates-test`, 14 in
-`upstream-shape-test`, 6 in `gog-invocation-test`, 22 in `lookback-test`, 6 in `lint-test`.
+One hundred and twenty-five cases: 20 in `vip-matching-test`, 8 in `classification-test`, 11
+in `message-identity-test`, 11 in `data-source-test`, 21 in `calendar-dates-test`, 14 in
+`upstream-shape-test`, 6 in `gog-invocation-test`, 22 in `lookback-test`, 6 in
+`state-files-test`, 6 in `lint-test`.
 
 Fixtures live in [`../fixtures/`](../fixtures/README.md), shared with 001 and 006.
 
@@ -171,7 +173,7 @@ Chasing the third also turned up a latent bug in the extraction itself: `read` w
 have adopted its end as its start. Every field is now sentinelled, and
 `should_count_an_unparseable_event_when_it_has_no_start_at_all` holds it.
 
-All 52 mutations are caught, and `mutation-check` also fails loudly if an anchor stops
+All 57 mutations are caught, and `mutation-check` also fails loudly if an anchor stops
 matching exactly once — which it did, twice, when a variable was renamed under one and when
 a block it anchored on was rewritten.
 
@@ -258,6 +260,51 @@ which the agent running the script reads along with the report.
 And one that has no case at all: the record is the time the fetch *began*, so that mail
 arriving during the fetch falls inside the next window. The stub answers instantly, so a run
 that recorded the end instead would pass every case here.
+
+## State files that cannot be saved
+
+**The defect.** A run keeps two files between runs, the ids it has reported and the time of
+its last mail fetch, and each was written with `printf > tmp && mv tmp file` under `set -e`.
+The last command of an `&&` list is not exempt from `set -e`, so when the write succeeded and
+the `mv` failed, the run ended there: no counts, no `SUMMARY`, no `ACTION_NEEDED`. That needs
+a state directory the run cannot write to, a leftover temporary file it cannot replace, or two
+runs overlapping in the gap between the two commands. The heartbeat and the briefing both run
+the script, and nothing serialises them. A state directory that could not be created ended the
+run before it printed anything.
+
+Separately, a directory sitting where the record goes swallowed it: `mv` moved the temporary
+file into the directory, reported success, and every later run looked back two hours with
+nothing to say why.
+
+**What holds it now.** No write of either file can end the run. A write that fails adds a
+reason, so `ACTION_NEEDED` is set and the agent says so:
+
+- `the list of reported messages could not be saved`: the next run may report the same
+  messages again.
+- `the time of this mail check could not be saved`: the next run's window may be shorter than
+  it should be.
+
+The record is moved with `mv -T`, which refuses a directory as its target instead of moving
+into it. The seen list does not need it: a directory there fails the append first.
+
+| Case | State it builds |
+|---|---|
+| `should_not_mention_the_state_files_when_they_are_saved` | none: an ordinary run says nothing, and prints nothing on stderr |
+| `should_finish_the_report_when_the_record_cannot_be_written` | a directory where the record's temporary file goes |
+| `should_say_so_when_a_directory_sits_where_the_record_goes` | a directory where the record goes |
+| `should_finish_the_report_when_the_seen_list_cannot_be_appended_to` | a directory where the seen list goes |
+| `should_say_so_when_the_seen_list_cannot_be_trimmed` | a directory where the seen list's temporary file goes |
+| `should_finish_the_report_when_the_state_directory_cannot_be_made` | a file where the state directory goes |
+
+The cases use directories, not permissions, because the suites may run as root, which
+ignores mode bits.
+
+**Red before green.** Against the script as it was, 5 of the 6 fail. The one that passes is
+the ordinary run.
+
+**Mutation-checked.** Five mutations cover it, which makes 57 in `mutation-check`: each of the
+two writes and the directory creation allowed to end the run again, each reason left out, and
+the record moved with a plain `mv`.
 
 ## Linting
 

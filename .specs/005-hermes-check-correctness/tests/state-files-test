@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=harness.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
+
+SEEN_REASON='the list of reported messages could not be saved'
+RECORD_REASON='the time of this mail check could not be saved'
+
+state_dir() {
+  printf '%s/.openclaw/hermes-check' "$1"
+}
+
+should_not_mention_the_state_files_when_they_are_saved() {
+  case_start "${FUNCNAME[0]}"
+  run_check gmail-clean.json calendar-clean.json
+  assert_universal_invariants
+  assert_not_contains "the seen list" "$RUN_OUT" "$SEEN_REASON"
+  assert_not_contains "the record" "$RUN_OUT" "$RECORD_REASON"
+  assert_equals "nothing on stderr" "" "$RUN_ERR"
+  case_end
+}
+
+should_finish_the_report_when_the_record_cannot_be_written() {
+  case_start "${FUNCNAME[0]}"
+  local home
+  home="$(new_home)"
+  mkdir -p "$(state_dir "$home")/last-mail-fetch.tmp"
+  run_check --home "$home" gmail-clean.json calendar-clean.json
+  assert_universal_invariants
+  assert_equals "asks for attention" "yes" "$(field ACTION_NEEDED)"
+  assert_contains "says why" "$(field REASONS)" "$RECORD_REASON"
+  assert_not_contains "does not blame the seen list" "$(field REASONS)" "$SEEN_REASON"
+  case_end
+}
+
+should_say_so_when_a_directory_sits_where_the_record_goes() {
+  case_start "${FUNCNAME[0]}"
+  local home
+  home="$(new_home)"
+  mkdir -p "$(state_dir "$home")/last-mail-fetch"
+  run_check --home "$home" gmail-clean.json calendar-clean.json
+  assert_universal_invariants
+  assert_equals "asks for attention" "yes" "$(field ACTION_NEEDED)"
+  assert_contains "says why" "$(field REASONS)" "$RECORD_REASON"
+  case_end
+}
+
+should_finish_the_report_when_the_seen_list_cannot_be_appended_to() {
+  case_start "${FUNCNAME[0]}"
+  local home
+  home="$(new_home)"
+  mkdir -p "$(state_dir "$home")/seen-messages.txt"
+  run_check --home "$home" gmail-clean.json calendar-clean.json
+  assert_universal_invariants
+  assert_equals "asks for attention" "yes" "$(field ACTION_NEEDED)"
+  assert_contains "says why" "$(field REASONS)" "$SEEN_REASON"
+  assert_not_contains "does not blame the record" "$(field REASONS)" "$RECORD_REASON"
+  case_end
+}
+
+should_say_so_when_the_seen_list_cannot_be_trimmed() {
+  case_start "${FUNCNAME[0]}"
+  local home
+  home="$(new_home)"
+  mkdir -p "$(state_dir "$home")/seen-messages.txt.tmp"
+  run_check --home "$home" gmail-clean.json calendar-clean.json
+  assert_universal_invariants
+  assert_equals "asks for attention" "yes" "$(field ACTION_NEEDED)"
+  assert_contains "says why" "$(field REASONS)" "$SEEN_REASON"
+  case_end
+}
+
+should_finish_the_report_when_the_state_directory_cannot_be_made() {
+  case_start "${FUNCNAME[0]}"
+  local home
+  home="$(new_home)"
+  mkdir -p "${home}/.openclaw"
+  : > "$(state_dir "$home")"
+  run_check --home "$home" gmail-clean.json calendar-clean.json
+  assert_universal_invariants
+  assert_equals "asks for attention" "yes" "$(field ACTION_NEEDED)"
+  assert_contains "names the seen list" "$(field REASONS)" "$SEEN_REASON"
+  assert_contains "names the record" "$(field REASONS)" "$RECORD_REASON"
+  case_end
+}
+
+should_not_mention_the_state_files_when_they_are_saved
+should_finish_the_report_when_the_record_cannot_be_written
+should_say_so_when_a_directory_sits_where_the_record_goes
+should_finish_the_report_when_the_seen_list_cannot_be_appended_to
+should_say_so_when_the_seen_list_cannot_be_trimmed
+should_finish_the_report_when_the_state_directory_cannot_be_made
+
+report_totals "state-files-test"

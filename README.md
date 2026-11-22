@@ -1152,6 +1152,12 @@ reported, so a run of failures, or a run stopped part-way, keeps reaching back t
 success. A value that is not a time, or is in the future, is ignored and then replaced.
 Delete the file to go back to two hours.
 
+If either file cannot be saved, the run still finishes its report and sets `ACTION_NEEDED`,
+with the reason `the list of reported messages could not be saved` or `the time of this mail
+check could not be saved`. The first means the next run may report the same messages again;
+the second, that its window may be shorter than it should be. Both point at the state
+directory, `~/.openclaw/hermes-check`, on the volume.
+
 ### VIP senders
 
 `~/.openclaw/hermes-check/vip-senders.txt`, one entry per line. An entry matches only when
