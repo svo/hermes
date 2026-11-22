@@ -70,11 +70,11 @@ quietly turn `should_leave_an_onboarding_token_alone_when_the_bind_is_loopback` 
 it nothing to leave alone. `OPENCLAW_STUB_ONBOARD_AUTH=none` and `=bare` drive the other two
 shapes.
 
-**Every invocation is logged, one record per write.** The config records the bind, but only argv
-records that `exec openclaw gateway` was told the same thing — and the two disagreeing is finding
-A3a.
+**Every invocation is logged, one whole record at a time.** The config records the bind, but only
+argv records that `exec openclaw gateway` was told the same thing — and the two disagreeing is
+finding A3a.
 
-The single-write part is load-bearing rather than tidy. Two processes append to that log
+The whole-record part is load-bearing rather than tidy. Two processes append to that log
 concurrently — the foreground `exec openclaw gateway`, and 003's briefing registrar probing
 `openclaw gateway health --port <n>` from a background subshell — and both log under the command
 name `gateway`. Written a line at a time the two records interleave, and a reader then attributes
@@ -83,6 +83,19 @@ gateway's `--bind` as `3000`, because the exec wrote `ARG [--bind]` and the regi
 `ARG [3000]` landed between it and `ARG [lan]`. `argv_flag_value` reads one invocation at a time
 for the same reason, and takes the last matching one by default because the invocation a case
 cares about is the one the entrypoint ends on.
+
+Building the record first and appending it with one `printf` was the first fix, and it was not
+enough. bash writes a builtin's output a line at a time, so the one `printf` is still one write
+per line. Two writers appending 300 pairs of five-line records misplaced 32 lines that way. The
+append now holds `flock` on a lock file beside the log, and the same test misplaced none. 006's,
+008's and 009's stubs log the same way and take the same lock.
+
+The last one is not always the exec, though. The registrar's probe passes `--port` too, and it
+can be logged after the exec. The case that reads the gateway's port therefore names a second
+flag that only the exec carries, `--with --bind`. Until it did, the mutation that changes the
+port was caught on some runs and missed on others: one in three on a quiet machine. Naming the
+flag then made the interleaving visible: the case read the exec's port as `health` or `--port`
+in about one run of the suite in five, until the lock went in.
 
 **`config validate` has no schema opinion, but it can still fail.** 004's stub carries a
 transcription and 006's `config-schema-check` runs the real validator against the real schema; a

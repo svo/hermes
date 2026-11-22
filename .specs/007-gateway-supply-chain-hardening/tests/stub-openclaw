@@ -14,7 +14,10 @@ log_invocation() {
   for arg in "$@"; do
     record+="$(printf 'ARG [%s]' "$arg")"$'\n'
   done
-  printf '%s' "$record" >> "$OPENCLAW_STUB_ARGV_LOG"
+  {
+    flock 9
+    printf '%s' "$record" >> "$OPENCLAW_STUB_ARGV_LOG"
+  } 9>> "${OPENCLAW_STUB_ARGV_LOG}.lock"
 }
 
 usage() {

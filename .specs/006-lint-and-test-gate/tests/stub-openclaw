@@ -25,11 +25,14 @@ log_invocation() {
   done
 
   {
-    printf 'INVOCATION [%s] %d\n' "${words[*]:-none}" "$#"
-    for arg in "$@"; do
-      printf 'ARG [%s]\n' "$arg"
-    done
-  } >> "$OPENCLAW_ARGV_LOG"
+    flock 9
+    {
+      printf 'INVOCATION [%s] %d\n' "${words[*]:-none}" "$#"
+      for arg in "$@"; do
+        printf 'ARG [%s]\n' "$arg"
+      done
+    } >> "$OPENCLAW_ARGV_LOG"
+  } 9>> "${OPENCLAW_ARGV_LOG}.lock"
 }
 
 unimplemented() {

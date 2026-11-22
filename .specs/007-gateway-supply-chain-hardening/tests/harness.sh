@@ -170,12 +170,17 @@ onboarding_ran() {
 }
 
 argv_flag_value() {
-  local command="$1" flag="$2" occurrence='last'
-  if [ "${3:-}" = '--occurrence' ]; then
-    occurrence="$4"
-  fi
+  local command="$1" flag="$2" occurrence='last' with=''
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --occurrence) occurrence="$2"; shift 2 ;;
+      --with) with="$2"; shift 2 ;;
+      *) break ;;
+    esac
+  done
   ARGV_LOG="${RUN_DIR}/argv" ARGV_COMMAND="$command" ARGV_FLAG="$flag" \
-  ARGV_OCCURRENCE="$occurrence" node -e "
+  ARGV_OCCURRENCE="$occurrence" ARGV_WITH="$with" node -e "
     const fs = require('fs');
     let text = '';
     try {
@@ -200,7 +205,9 @@ argv_flag_value() {
       if (arg) current.push(arg[1]);
     }
 
-    const matching = invocations.filter((args) => args.indexOf(flag) !== -1);
+    const wanted = process.env.ARGV_WITH;
+    const matching = invocations.filter((args) =>
+      args.indexOf(flag) !== -1 && (!wanted || args.indexOf(wanted) !== -1));
     if (matching.length === 0) process.exit(0);
     const args = process.env.ARGV_OCCURRENCE === 'first'
       ? matching[0]

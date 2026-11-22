@@ -369,7 +369,7 @@ should_leave_the_gateway_port_alone_when_the_bind_changes() {
   case_start "${FUNCNAME[0]}"
   run_entrypoint
   assert_equals "gateway.port" "3000" "$(config_get gateway.port)"
-  assert_equals "the gateway's --port" "3000" "$(argv_flag_value gateway --port)"
+  assert_equals "the gateway's --port" "3000" "$(argv_flag_value gateway --port --with --bind)"
   case_end
 }
 
