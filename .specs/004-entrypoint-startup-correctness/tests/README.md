@@ -124,13 +124,26 @@ cannot fail is not a case.
 .specs/004-entrypoint-startup-correctness/tests/mutation-check
 ```
 
-Twenty-seven mutations, one behaviour each, applied to a copy of `entrypoint.sh`. Every one is
-caught. It is not part of `run` because it re-runs the suites up to twenty-seven times —
+Twenty-five mutations, one behaviour each, applied to a copy of `entrypoint.sh`. Every one is
+caught. It is not part of `run` because it re-runs the suites up to twenty-five times —
 `validation-test` first, and the rest only while nothing has caught the mutation yet.
 
 Each mutation asserts its anchor occurs exactly once in the whole file, and that the mutant
 still parses, before it is applied; a bad anchor is reported as a bad anchor rather than as a
 caught or uncaught mutation.
+
+There were twenty-seven. 008 replaced the block that edited the configuration key by key with
+one patch, and five mutations were left pointing at code that no longer existed: four anchors
+matched nothing, and a fifth matched a different statement and was caught by nothing. Three of
+them describe behaviour the patch still has — the owner is written, the API key goes under
+`env.vars`, the legacy key is removed — and are anchored on the patch now. Two were retired:
+
+- `the tools guard returns below its first use` was about `config.tools` being created after
+  it was first assigned to. The patch is one literal; there is no guard to misplace.
+- `approvals are rewritten on every start` was about `exec-approvals.json` being written when
+  it already existed. Nothing writes that file any more. 008's mutation-check holds what
+  replaced it: `the retired approvals file is written again` and `the migration runs on
+  every start`.
 
 The first mutation is the one worth knowing about. `validation runs after the writes` moves
 onboarding above the required-variable block, which is where it was — and four cases catch it,

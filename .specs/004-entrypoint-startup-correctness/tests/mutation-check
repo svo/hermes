@@ -167,29 +167,22 @@ mutate 'an access group is treated as an owner' \
         *) owner_entries+=(\"slack:\${entry}\") ;;"
 
 mutate 'the owner is never written to the config' \
-  '    config.commands.ownerAllowFrom = ownerAllowFrom;' \
-  '    config.commands.ownerAllowFrom = ownerAllowFrom.slice(0, 0);'
-
-mutate 'the tools guard returns below its first use' \
-  '  config.tools = config.tools || {};
-  config.tools.loopDetection = {' \
-  '  config.tools.loopDetection = {'
+  '      payload.commands = { ownerAllowFrom };' \
+  '      payload.commands = { ownerAllowFrom: ownerAllowFrom.slice(0, 0) };'
 
 mutate 'the heartbeat targets the last conversation' \
   "    target: 'owner'," \
   "    target: 'last',"
 
 mutate 'the api key keeps its undocumented path' \
-  '  config.env.vars.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;' \
-  '  config.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;'
+  '        ANTHROPIC_API_KEY: null,
+        vars: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }' \
+  '        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY'
 
 mutate 'the legacy api key is left in place' \
-  '  delete config.env.ANTHROPIC_API_KEY;' \
-  '  ;'
-
-mutate 'approvals are rewritten on every start' \
-  'if [ ! -f "$HOME/.openclaw/exec-approvals.json" ]; then' \
-  'if true; then'
+  '        ANTHROPIC_API_KEY: null,
+        vars: {' \
+  '        vars: {'
 
 mutate 'the validate gate is removed' \
   'if ! config_validation="$(openclaw config validate 2>&1)"; then' \
