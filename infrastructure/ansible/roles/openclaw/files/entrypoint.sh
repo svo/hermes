@@ -288,8 +288,8 @@ fi
 
 build_openclaw_config_payload() {
   node -e "
-    const chatModel = 'anthropic/claude-opus-5';
-    const utilityModel = 'anthropic/claude-haiku-4-5';
+    const chatModel = 'anthropic/claude-opus-5-5';
+    const utilityModel = 'anthropic/claude-haiku-5-5';
 
     const payload = {
       agents: {

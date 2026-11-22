@@ -40,11 +40,11 @@ should_set_every_key_it_used_to_write_when_it_starts() {
   run_entrypoint
   assert_equals "the run succeeded" "0" "$RUN_STATUS"
   assert_equals "skipBootstrap" "true" "$(config_get agents.defaults.skipBootstrap)"
-  assert_equals "model" "anthropic/claude-opus-5" \
+  assert_equals "model" "anthropic/claude-opus-5-5" \
     "$(config_get agents.defaults.model)"
   assert_equals "heartbeat cadence" "59m" "$(config_get agents.defaults.heartbeat.every)"
   assert_equals "heartbeat target" "owner" "$(config_get agents.defaults.heartbeat.target)"
-  assert_equals "compaction model" "anthropic/claude-haiku-4-5" \
+  assert_equals "compaction model" "anthropic/claude-haiku-5-5" \
     "$(config_get agents.defaults.compaction.model)"
   assert_equals "tools profile" "absent" "$(config_get tools.profile)"
   assert_equals "deny list" '["gateway"]' "$(config_get tools.deny)"
@@ -159,14 +159,14 @@ should_keep_a_model_the_container_did_not_write_when_it_restarts() {
     "$(config_get 'agents.defaults.models[anthropic/claude-sonnet-5]')"
   assert_equals "and the container's own is still right" \
     '{"params":{"cacheRetention":"long"}}' \
-    "$(config_get 'agents.defaults.models[anthropic/claude-haiku-4-5]')"
+    "$(config_get 'agents.defaults.models[anthropic/claude-haiku-5-5]')"
   case_end
 }
 
 should_answer_messages_on_the_larger_model_when_it_starts() {
   case_start "${FUNCNAME[0]}"
   run_entrypoint
-  assert_equals "the default model" "anthropic/claude-opus-5" \
+  assert_equals "the default model" "anthropic/claude-opus-5-5" \
     "$(config_get agents.defaults.model)"
   case_end
 }
@@ -174,7 +174,7 @@ should_answer_messages_on_the_larger_model_when_it_starts() {
 should_keep_the_heartbeat_on_the_small_model_when_it_starts() {
   case_start "${FUNCNAME[0]}"
   run_entrypoint
-  assert_equals "the heartbeat's model" "anthropic/claude-haiku-4-5" \
+  assert_equals "the heartbeat's model" "anthropic/claude-haiku-5-5" \
     "$(config_get agents.defaults.heartbeat.model)"
   case_end
 }
@@ -182,7 +182,7 @@ should_keep_the_heartbeat_on_the_small_model_when_it_starts() {
 should_keep_compaction_on_the_small_model_when_it_starts() {
   case_start "${FUNCNAME[0]}"
   run_entrypoint
-  assert_equals "compaction's model" "anthropic/claude-haiku-4-5" \
+  assert_equals "compaction's model" "anthropic/claude-haiku-5-5" \
     "$(config_get agents.defaults.compaction.model)"
   case_end
 }
@@ -191,9 +191,9 @@ should_give_each_model_an_hour_of_cache_when_it_starts() {
   case_start "${FUNCNAME[0]}"
   run_entrypoint
   assert_equals "the larger model" '{"params":{"cacheRetention":"long"}}' \
-    "$(config_get 'agents.defaults.models[anthropic/claude-opus-5]')"
+    "$(config_get 'agents.defaults.models[anthropic/claude-opus-5-5]')"
   assert_equals "the small model" '{"params":{"cacheRetention":"long"}}' \
-    "$(config_get 'agents.defaults.models[anthropic/claude-haiku-4-5]')"
+    "$(config_get 'agents.defaults.models[anthropic/claude-haiku-5-5]')"
   case_end
 }
 

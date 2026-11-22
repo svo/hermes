@@ -135,17 +135,17 @@ should_keep_the_rest_of_the_config_when_the_block_is_reordered() {
   case_start "${FUNCNAME[0]}"
   run_entrypoint
   assert_equals "skipBootstrap" "true" "$(config_get '.agents.defaults.skipBootstrap')"
-  assert_equals "model" "anthropic/claude-opus-5" "$(config_get '.agents.defaults.model')"
-  assert_equals "heartbeat model" "anthropic/claude-haiku-4-5" "$(config_get '.agents.defaults.heartbeat.model')"
+  assert_equals "model" "anthropic/claude-opus-5-5" "$(config_get '.agents.defaults.model')"
+  assert_equals "heartbeat model" "anthropic/claude-haiku-5-5" "$(config_get '.agents.defaults.heartbeat.model')"
   assert_equals "heartbeat interval" "59m" "$(config_get '.agents.defaults.heartbeat.every')"
   assert_equals "active hours start" "08:00" "$(config_get '.agents.defaults.heartbeat.activeHours.start')"
   assert_equals "active hours end" "20:00" "$(config_get '.agents.defaults.heartbeat.activeHours.end')"
   assert_equals "active hours timezone" "UTC" "$(config_get '.agents.defaults.heartbeat.activeHours.timezone')"
-  assert_equals "compaction model" "anthropic/claude-haiku-4-5" "$(config_get '.agents.defaults.compaction.model')"
+  assert_equals "compaction model" "anthropic/claude-haiku-5-5" "$(config_get '.agents.defaults.compaction.model')"
   assert_equals "cache retention" "long" \
-    "$(config_get '.agents.defaults.models."anthropic/claude-haiku-4-5".params.cacheRetention')"
+    "$(config_get '.agents.defaults.models."anthropic/claude-haiku-5-5".params.cacheRetention')"
   assert_equals "cache retention, chat model" "long" \
-    "$(config_get '.agents.defaults.models."anthropic/claude-opus-5".params.cacheRetention')"
+    "$(config_get '.agents.defaults.models."anthropic/claude-opus-5-5".params.cacheRetention')"
   assert_equals "cron enabled" "true" "$(config_get '.cron.enabled')"
   assert_equals "legacy agent key removed" "null" "$(config_get '.agent')"
   assert_equals "legacy heartbeat key removed" "null" "$(config_get '.heartbeat')"

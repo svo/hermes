@@ -247,8 +247,8 @@ mutate 'the tool profile is set to full, which now adds plugin tools' \
   "        profile: 'full',"
 
 mutate 'messages are answered by the small model again' \
-  "    const chatModel = 'anthropic/claude-opus-5';" \
-  "    const chatModel = 'anthropic/claude-haiku-4-5';"
+  "    const chatModel = 'anthropic/claude-opus-5-5';" \
+  "    const chatModel = 'anthropic/claude-haiku-5-5';"
 
 mutate 'the heartbeat runs on the larger model' \
   '            model: utilityModel,' \

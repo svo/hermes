@@ -69,10 +69,10 @@ cmd_onboard() {
     "defaults": {
       "workspace": "${HOME}/.openclaw/workspace",
       "model": {
-        "primary": "anthropic/claude-opus-5"
+        "primary": "anthropic/claude-opus-5-5"
       },
       "models": {
-        "anthropic/claude-opus-5": {}
+        "anthropic/claude-opus-5-5": {}
       }
     },
     "entries": {

@@ -891,10 +891,10 @@ Two models, chosen by what the work is. The entrypoint writes all three keys on 
 
 | Work | Model | Key |
 |---|---|---|
-| Messages, and the tasks they start | `anthropic/claude-opus-5` | `agents.defaults.model` |
+| Messages, and the tasks they start | `anthropic/claude-opus-5-5` | `agents.defaults.model` |
 | Morning briefing | the same | none: the job declares no model, so it runs on the default |
-| Heartbeat | `anthropic/claude-haiku-4-5` | `agents.defaults.heartbeat.model` |
-| Compaction | `anthropic/claude-haiku-4-5` | `agents.defaults.compaction.model` |
+| Heartbeat | `anthropic/claude-haiku-5-5` | `agents.defaults.heartbeat.model` |
+| Compaction | `anthropic/claude-haiku-5-5` | `agents.defaults.compaction.model` |
 
 Messages and the briefing read text that third parties wrote, with an unrestricted shell and
 the mailbox in reach, and take several steps to finish. That is where judgement is worth
@@ -902,12 +902,23 @@ paying for, and there is little volume to pay for: one user, and one briefing a 
 heartbeat is one fixed command and a sanitised, fenced report, about a dozen times a day, so
 it stays on the small model.
 
-One model, Haiku 4.5, used to do all four. Opus 5 is priced at five times Haiku 4.5 per
-token, so the briefing, and a message in a short conversation, cost about five times as much.
-A message in a long conversation can cost more than that. OpenClaw compacts a session only
-when it nears the model's context window, which is 1,000,000 tokens for Opus 5 against
-200,000 for Haiku 4.5, and nothing here resets a session or caps the window. The heartbeat's
-cost does not change.
+Prices per million tokens, input and output:
+
+| Model | Input | Output | Context window |
+|---|---|---|---|
+| Opus 5.5 | $4 | $20 | 1,000,000 |
+| Haiku 5.5, prompt of 100,000 tokens or fewer | $0.10 | $0.50 | 1,000,000 |
+| Haiku 5.5, longer prompt | $0.50 | $2.50 | |
+
+A message in a long conversation costs more than one in a short conversation, because every
+message sends the history again. OpenClaw compacts a session only when it nears the model's
+context window, less a reserve of 20,000 tokens: at about 980,000 tokens for Opus 5.5. Nothing
+here resets a session or caps the window.
+
+Both 5.5 models think on every request; for Opus 5.5 thinking cannot be turned off, and
+OpenClaw runs both at medium effort. Haiku 5.5 counts the same text as about 30% more tokens
+than Haiku 4.5 did. Either model can decline a request on safety grounds, which shows as a
+refusal rather than an answer.
 
 A better model is not a boundary. What the agent may run is still decided by
 `tools.exec.security`, and what it reads is still third-party text — see

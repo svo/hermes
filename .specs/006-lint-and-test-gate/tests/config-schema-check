@@ -194,19 +194,19 @@ for (const id of entries(env.SLACK_ALLOW_CHANNELS)) {
 
 const expected = new Map([
   ['agents.defaults.skipBootstrap', true],
-  ['agents.defaults.model', 'anthropic/claude-opus-5'],
+  ['agents.defaults.model', 'anthropic/claude-opus-5-5'],
   ['agents.defaults.heartbeat.every', '59m'],
   ['agents.defaults.heartbeat.target', 'owner'],
-  ['agents.defaults.heartbeat.model', 'anthropic/claude-haiku-4-5'],
+  ['agents.defaults.heartbeat.model', 'anthropic/claude-haiku-5-5'],
   ['agents.defaults.heartbeat.lightContext', true],
   ['agents.defaults.heartbeat.isolatedSession', true],
   ['agents.defaults.heartbeat.activeHours.start', env.HERMES_QUIET_HOURS_END],
   ['agents.defaults.heartbeat.activeHours.end', env.HERMES_QUIET_HOURS_START],
   ['agents.defaults.heartbeat.activeHours.timezone', env.HERMES_TIMEZONE],
-  ['agents.defaults.compaction.model', 'anthropic/claude-haiku-4-5'],
+  ['agents.defaults.compaction.model', 'anthropic/claude-haiku-5-5'],
   ['agents.defaults.models', {
-    'anthropic/claude-opus-5': { params: { cacheRetention: 'long' } },
-    'anthropic/claude-haiku-4-5': { params: { cacheRetention: 'long' } }
+    'anthropic/claude-opus-5-5': { params: { cacheRetention: 'long' } },
+    'anthropic/claude-haiku-5-5': { params: { cacheRetention: 'long' } }
   }],
   ['tools.loopDetection.enabled', true],
   ['tools.deny', ['gateway']],
